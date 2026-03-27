@@ -33,6 +33,9 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist', 
+    'cloudinary',
+    'cloudinary_storage',
 
     # my apps 
     'accounts',
@@ -109,6 +112,8 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+AUTH_USER_MODEL = "accounts.User"
+
 
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
@@ -135,6 +140,18 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '20/min',    # Unauthenticated users
+        'user': '100/min',   # Authenticated users
+        'signup': '5/min',
+        'login': '10/min',
+        'otp': '5/min',
+        'forgot_password': '3/hour',
+    }
 }
 
 SIMPLE_JWT = {
@@ -151,7 +168,7 @@ SIMPLE_JWT = {
 
     # Security
     'ALGORITHM': 'HS256',
-    'SIGNING_KEY': os.getenv('JWT_SECRET_KEY'),  # separate from SECRET_KEY
+    'SIGNING_KEY': os.getenv('JWT_SECRET_KEY'), 
 
     # Headers
     'AUTH_HEADER_TYPES': ('Bearer',),
@@ -209,3 +226,32 @@ CORS_ALLOW_METHODS = [
     'PUT',
 ]
 # ------ CORS END --------/
+
+
+
+# ------ CLOUDINARY (media) ------ /
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.getenv('CLOUDINARY_CLOUD_NAME'),
+    'API_KEY': os.getenv('CLOUDINARY_API_KEY'),
+    'API_SECRET': os.getenv('CLOUDINARY_API_SECRET'),
+}
+
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
+
+
+
+# -------- EMAIL CONFIG ----------
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+
+# ------- GOOGLE LOGIN ---------
+GOOGLE_AUTH_CLIENT_ID = os.getenv('GOOGLE_AUTH_CLIENT_ID')
+GOOGLE_AUTH_CLIENT_SECRET = os.getenv('GOOGLE_AUTH_CLIENT_SECRET')
+GOOGLE_AUTH_SCOPE = os.getenv('GOOGLE_AUTH_SCOPE')
+GOOGLE_CALLBACK_URI = os.getenv('GOOGLE_CALLBACK_URI')
