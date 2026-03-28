@@ -39,6 +39,8 @@ INSTALLED_APPS = [
 
     # my apps 
     'accounts',
+    'sports',
+    'organization',
     
     # buildin apps 
     'django.contrib.admin',

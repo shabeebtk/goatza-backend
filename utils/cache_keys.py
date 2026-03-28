@@ -10,3 +10,8 @@ class CacheKeys:
     @staticmethod
     def google_state(state):
         return f"google:state:{state}"
+    
+
+    @staticmethod
+    def sports_list():
+        return f"sports:list"
