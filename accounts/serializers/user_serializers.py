@@ -20,6 +20,18 @@ class BaseUserSerializer(serializers.ModelSerializer):
 class UserSerializer(BaseUserSerializer):
     pass
 
+class UserMiniSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(source='profile.name', read_only=True)
+    profile_photo = serializers.URLField(source='profile.profile_photo', read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'username',
+            'name',
+            'profile_photo',
+        ]
 
 class UserFullSerializer(BaseUserSerializer):
     cover_photo = serializers.URLField(source='profile.cover_photo', read_only=True)
