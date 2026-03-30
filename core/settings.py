@@ -42,6 +42,8 @@ INSTALLED_APPS = [
     'sports',
     'organization',
     'connections',
+    'posts',
+    'feed',
     
     # buildin apps 
     'django.contrib.admin',
@@ -159,7 +161,7 @@ REST_FRAMEWORK = {
 
 SIMPLE_JWT = {
     # Token lifetime
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
 
     # Rotation
