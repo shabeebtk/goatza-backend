@@ -10,7 +10,7 @@ urlpatterns = [
     path('list', ListPostsAPIView.as_view(), name='list-posts'),
     path('like', ToggleLikeAPIView.as_view(), name='toggle-like'),
     path('likes/list', ListPostLikesAPIView.as_view(), name='list-likes'),
-    path('comments/list', ListCommentsAPIView.as_view(), name='list-comments'),
     path('comments/create', CreateCommentAPIView.as_view(), name='create-comment'),
+    path('comments/list', ListCommentsAPIView.as_view(), name='list-comments'), # add replies data here itself
     path('comments/list/replies', ListRepliesAPIView.as_view(), name='list-comment-replies'),
 ]
