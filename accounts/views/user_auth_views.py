@@ -22,6 +22,16 @@ from accounts.throttles import (
 
 logger = logging.getLogger(__name__)
 
+
+def set_refresh_key_cookie(response, refresh_token):
+    response.set_cookie(
+        key="refresh_token",
+        value=str(refresh_token),
+        httponly=True,
+        secure=False,  # True in production
+        samesite="Lax"
+    )
+
 # Views here 
 class UserSignupAPIView(APIView):
     permission_classes = [AllowAny]
@@ -30,9 +40,7 @@ class UserSignupAPIView(APIView):
     def post(self, request):
         email = request.data.get("email")
         password = request.data.get("password")
-
-        data = generate_otp(email)
-        print(data)
+        name = request.data.get("name")
 
         if not email or not password:
             return response_data(False, "Email and password are required", status_code=400)
@@ -42,12 +50,13 @@ class UserSignupAPIView(APIView):
 
         if not is_valid_password(password):
             return response_data(False, "Password must be at least 6 characters", status_code=400)
+        
+        if not name:
+            name = email.split("@")[0]
 
-        name = email.split("@")[0]
         base_username = name
         username = base_username
-
-        username = generate_unique_username(base=email)
+        username = generate_unique_username(base=name)
 
         try:
             with transaction.atomic():
@@ -60,6 +69,8 @@ class UserSignupAPIView(APIView):
                 UserProfile.objects.create(user=user, name=name)
 
                 otp = generate_otp(email)
+
+                print(otp, 'user otp----')
 
                 email_sent = send_email(
                     subject="Goatza OTP Verification",
@@ -120,15 +131,17 @@ class VerifySignupOTPAPIView(APIView):
 
         logger.info(f"User verified: {email}")
 
-        return response_data(
+        response = response_data(
             True,
-            "Signup successful",
+            "verification successful",
             {
                 "access": str(refresh.access_token),
-                "refresh": str(refresh),
                 "user": UserSerializer(user).data
             }
         )
+        # Set refresh token in cookie
+        set_refresh_key_cookie(response, refresh_token=refresh)
+        return response 
 
 
 class UserLoginAPIView(APIView):
@@ -186,18 +199,21 @@ class UserLoginAPIView(APIView):
 
         # Prepare response data
         user_data = UserSerializer(user).data
-
-        return response_data(
+                
+        response = response_data(
             success=True,
             message="Login successful",
             data={
                 "access": access_token,
-                "refresh": str(refresh),
                 "user": user_data
             },
             status_code=200
         )
-        
+
+        # Set refresh token in cookie
+        set_refresh_key_cookie(response, refresh_token=refresh)
+
+        return response
         
         
 class ForgotPasswordAPIView(APIView):
@@ -307,12 +323,12 @@ class TokenRefreshAPIView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        refresh_token = request.data.get("refresh_token")
+        refresh_token = request.COOKIES.get("refresh_token")
 
         if not refresh_token:
             return response_data(
                 success=False,
-                message="Refresh token is required",
+                message="Refresh token not found",
                 status_code=400
             )
 
@@ -343,18 +359,27 @@ class UserLogoutAPIView(APIView):
 
     def post(self, request):
         try:
-            refresh_token = request.data["refresh_token"]
+            refresh_token = request.COOKIES.get("refresh_token")
             token = RefreshToken(refresh_token)
             token.blacklist()
-            return response_data(
+            response =  response_data(
                 success=True,
                 message="Logout successful",
                 status_code=200
             )
+
+            # DELETE COOKIE
+            response.delete_cookie(
+                key="refresh_token",
+                path="/",
+                samesite="Lax",
+            )
+            return response
+        
         except Exception as e:
             return response_data(
                 success=False,
-                message=f"Invalid token {str(e)}",
+                message=f"no token found {str(e)}",
                 status_code=400
             )
         

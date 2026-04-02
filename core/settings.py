@@ -55,10 +55,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware', # cors 
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'corsheaders.middleware.CorsMiddleware', # cors 
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -193,22 +193,22 @@ SIMPLE_JWT = {
 # ------- REST FRAMEWORKS END ------/
 
 
+
 # ------ CORS ------------/
-# Allow all origins to make requests
-CORS_ALLOW_ALL_ORIGINS = True
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+]
 
-# Alternatively, specify allowed origins
-# CORS_ALLOWED_ORIGINS = [
-#     "https://example.com",
-#     "https://sub.example.com",
-# ]
+# for production
+# SESSION_COOKIE_SECURE = True
+# CSRF_COOKIE_SECURE = True
 
-# CORS_ALLOW_CREDENTIALS = True   add in prod
- 
-# Allow credentials (if needed)
-# CORS_ALLOW_CREDENTIALS = True   add in prod
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+]
 
-# Allow specific headers 
+CORS_ALLOW_CREDENTIALS = True
+
 CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
@@ -219,9 +219,10 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'x-actor-type',  
+    'x-actor-id',  
 ]
 
-# Allow specific methods 
 CORS_ALLOW_METHODS = [
     'DELETE',
     'GET',
