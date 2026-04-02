@@ -19,3 +19,4 @@ sqlparse==0.5.5
 tzdata==2025.3
 urllib3==2.6.3
 uuid6==2025.0.1
+gunicorn==21.2.0
