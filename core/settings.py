@@ -21,9 +21,9 @@ SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -95,7 +95,10 @@ DATABASES = {
         'USER' : os.getenv('DATABASE_USER'),
         'PASSWORD' : os.getenv('DATABASE_PASSWORD'),
         'HOST' : os.getenv('DATABASE_HOST'),
-        'PORT' : os.getenv('DATABASE_PORT')
+        'PORT' : os.getenv('DATABASE_PORT'),
+        'OPTIONS': {
+            'sslmode': 'require',
+        },
     },
 }
 
@@ -136,8 +139,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
-
-
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.StaticFilesStorage'
 
 # ------- REST FRAMEWORK -----------
 
@@ -197,6 +200,9 @@ SIMPLE_JWT = {
 # ------ CORS ------------/
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
+    "https://goatza-backend.onrender.com",
+    "http://goatza-backend.onrender.com",
+    "https://goatza.com",
 ]
 
 # for production
@@ -205,6 +211,9 @@ CSRF_TRUSTED_ORIGINS = [
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "https://goatza-backend.onrender.com",
+    "http://goatza-backend.onrender.com",
+    "https://goatza.com",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
