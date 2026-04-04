@@ -8,7 +8,7 @@ from accounts.models import (
 from rest_framework.permissions import IsAuthenticated
 from accounts.serializers.user_serializers import UserSerializer, UserFullSerializer, UpdateUserMediaSerializer
 from utils.response import response_data
-from utils.cache import cache_set, cache_get
+from utils.cache import cache_set, cache_get, cache_delete
 from utils.cache_keys import CacheKeys
 from connections.services.follow_services import FollowService
 from services.storage.factory import get_storage_service
@@ -81,13 +81,6 @@ class GetUserDetailsByID(APIView):
             list_type = request.query_params.get("list_type")
             user_id = request.user.id
 
-            # get cache 
-            cache_key = CacheKeys.user_details(user_id, list_type=list_type)
-            cached_data = cache_get(cache_key)
-
-            if cached_data:
-                return response_data(success=True, data=cached_data)
-
             # Force optimized query
             user = User.objects.select_related("profile").get(id=user_id)
 
@@ -97,10 +90,6 @@ class GetUserDetailsByID(APIView):
                 serializer = UserSerializer(user)
 
             data = serializer.data
-
-            # Cache for 2 minutes
-            cache_set(cache_key, data, timeout=120)
-
             return response_data(success=True, data=data)
         
         except Exception as e:
@@ -339,12 +328,23 @@ class UpdateUserProfileAPIView(APIView):
                 f"{TAG} Success user={user.id}, fields={updated_fields}"
             )
 
+            # Return the full updated profile so the frontend can seed its cache correctly
+            user_fresh = (
+                User.objects
+                .select_related("profile")
+                .prefetch_related(
+                    "sports__sport",
+                    "positions__position",
+                    "positions__sport"
+                )
+                .get(id=user.id)
+            )
+            response_serializer = UserFullSerializer(user_fresh)
+
             return response_data(
                 success=True,
                 message="Profile updated successfully",
-                data={
-                    "updated_fields": updated_fields
-                }
+                data=response_serializer.data
             )
 
         except serializers.ValidationError as e:
