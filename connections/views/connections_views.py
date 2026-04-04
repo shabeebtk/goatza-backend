@@ -12,101 +12,83 @@ from organization.serializers.organization_serializers import OrganizationMiniSe
 from organization.models import Organization
 from core.constant import TYPE_USER, TYPE_ORGANIZATION
 from core.views.base_views import BaseAPIView
+from connections.services.follow_services import FollowService
 
 logger = logging.getLogger(__name__)
 
+
 class FollowAPIView(BaseAPIView):
-    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         try:
-            print(request.user)
-            actor = request.actor  # from middleware
+            actor = request.actor
             target_type = request.data.get("target_type")
             target_id = request.data.get("target_id")
 
             if target_type not in [TYPE_USER, TYPE_ORGANIZATION] or not target_id:
                 return response_data(False, "Invalid input", status_code=400)
 
-            follow_data = {}
+            target_user = None
+            target_org = None
 
-            # Set follower
-            if actor.is_user:
-                follow_data["follower_user"] = actor.user
-            else:
-                follow_data["follower_org"] = actor.organization
-
-            # Set target
-            if target_type == "user":
+            if target_type == TYPE_USER:
                 target_user = get_object_or_404(User, id=target_id)
-
-                # Prevent self-follow
-                if actor.is_user and actor.user.id == target_user.id:
-                    return response_data(False, "Cannot follow yourself", status_code=400)
-
-                follow_data["following_user"] = target_user
-
             else:
                 target_org = get_object_or_404(Organization, id=target_id)
 
-                if actor.is_org and actor.organization.id == target_org.id:
-                    return response_data(False, "Cannot follow your own organization", status_code=400)
-
-                follow_data["following_org"] = target_org
-
-            with transaction.atomic():
-                follow, created = Follow.objects.get_or_create(**follow_data)
+            success, result = FollowService.follow(
+                actor=actor,
+                target_user=target_user,
+                target_org=target_org
+            )
 
             return response_data(
-                True,
-                "Followed successfully" if created else "Already following",
-                data={"is_following": True}
+                success,
+                result if isinstance(result, str) else "Followed successfully",
+                data=result if isinstance(result, dict) else {"is_following": False}
             )
 
         except Exception as e:
             logger.error(f"Follow error: {str(e)}")
             return response_data(False, "Something went wrong", status_code=500, error=str(e))
         
-
 class UnfollowAPIView(BaseAPIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         try:
             actor = request.actor
-
             target_type = request.data.get("target_type")
             target_id = request.data.get("target_id")
 
             if target_type not in [TYPE_USER, TYPE_ORGANIZATION] or not target_id:
                 return response_data(False, "Invalid input", status_code=400)
 
-            filters = {}
+            target_user = None
+            target_org = None
 
-            # follower
-            if actor.is_user:
-                filters["follower_user"] = actor.user
+            if target_type == TYPE_USER:
+                target_user = get_object_or_404(User, id=target_id)
             else:
-                filters["follower_org"] = actor.organization
+                target_org = get_object_or_404(Organization, id=target_id)
 
-            # target
-            if target_type == "user":
-                filters["following_user_id"] = target_id
-            else:
-                filters["following_org_id"] = target_id
-
-            deleted, _ = Follow.objects.filter(**filters).delete()
+            success, result = FollowService.unfollow(
+                actor=actor,
+                target_user=target_user,
+                target_org=target_org
+            )
 
             return response_data(
-                True,
-                "Unfollowed successfully" if deleted else "Not following",
-                data={"is_following": False}
+                success,
+                result if isinstance(result, str) else "Unfollowed successfully",
+                data=result if isinstance(result, dict) else {"is_following": False}
             )
 
         except Exception as e:
             logger.error(f"Unfollow error: {str(e)}")
             return response_data(False, "Something went wrong", status_code=500, error=str(e))
         
+
 
 class CheckFollowStatusAPIView(BaseAPIView):
     permission_classes = [IsAuthenticated]

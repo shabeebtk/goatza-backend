@@ -17,6 +17,7 @@ from accounts.serializers.user_serializers import UserSerializer
 from utils.response import response_data
 from accounts.services.user_services import generate_unique_username
 from utils.passwords import generate_random_password
+from utils.cookies import set_refresh_key_cookie
 
 
 GOOGLE_AUTH_URL='https://accounts.google.com/o/oauth2/v2/auth'
@@ -29,7 +30,6 @@ class GoogleLoginUrlView(APIView):
     """
     generates a Google OAuth2 login URL 
     """
-
     def get(self, request):        
         # Build the Google OAuth2 authorization URL
         state = secrets.token_urlsafe(16)
@@ -135,20 +135,21 @@ class GoogleAuthCallbackView(APIView):
                     defaults={"name": name}
                 )
 
-            # 🔹 Step 4: Generate JWT
+            # Step 4: Generate JWT
             refresh = RefreshToken.for_user(user)
-
             logger.info(f"Google login success: {email}")
-
-            return response_data(
+            
+            response = response_data(
                 True,
                 "Login successful",
                 {
                     "access": str(refresh.access_token),
-                    "refresh": str(refresh),
-                    "user": UserSerializer(user).data,
+                    "user": UserSerializer(user).data
                 }
             )
+            # Set refresh token in cookie
+            set_refresh_key_cookie(response, refresh_token=refresh)
+            return response
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Google API error: {str(e)}")

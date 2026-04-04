@@ -97,9 +97,9 @@ DATABASES = {
         'HOST' : os.getenv('DATABASE_HOST'),
         'PORT' : os.getenv('DATABASE_PORT'),
         'OPTIONS': {
-            'sslmode': 'require',
+                'sslmode': os.getenv('DB_SSL_MODE', 'disable'),
+            },
         },
-    },
 }
 
 # Password validation
@@ -245,10 +245,14 @@ CORS_ALLOW_METHODS = [
 
 
 # ------ CLOUDINARY (media) ------ /
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+
 CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': os.getenv('CLOUDINARY_CLOUD_NAME'),
-    'API_KEY': os.getenv('CLOUDINARY_API_KEY'),
-    'API_SECRET': os.getenv('CLOUDINARY_API_SECRET'),
+    'CLOUD_NAME': CLOUDINARY_CLOUD_NAME,
+    'API_KEY': CLOUDINARY_API_KEY,
+    'API_SECRET': CLOUDINARY_API_SECRET,
 }
 
 DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'

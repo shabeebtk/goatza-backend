@@ -18,6 +18,44 @@ class UserSportMiniSerializer(serializers.ModelSerializer):
         ]
 
 
+
+class UserSportSerializer(serializers.Serializer):
+    sport_id = serializers.UUIDField(source="sport.id")
+    sport_name = serializers.CharField(source="sport.name")
+    icon_name = serializers.CharField(source="sport.icon_name")
+    icon_url = serializers.CharField(source="sport.icon_url")
+
+    is_primary = serializers.BooleanField()
+    experience_level = serializers.CharField()
+
+    positions = serializers.SerializerMethodField()
+    primary_position = serializers.SerializerMethodField()
+
+    def get_positions(self, obj):
+        user = obj.user
+
+        positions = user.positions.filter(sport=obj.sport)
+
+        return [
+            {
+                "position": p.position.name,
+                "is_primary": p.is_primary
+            }
+            for p in positions
+        ]
+
+    def get_primary_position(self, obj):
+        user = obj.user
+
+        primary = user.positions.filter(
+            sport=obj.sport,
+            is_primary=True
+        ).first()
+
+        return primary.position.name if primary else None
+    
+
+
 class UserAttributeValueSerializer(serializers.ModelSerializer):
     attribute = serializers.CharField(source="attribute.name")
     value = serializers.SerializerMethodField()

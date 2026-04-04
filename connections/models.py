@@ -55,7 +55,6 @@ class Follow(BaseUUIDModel):
                 ),
                 name="follower_user_or_org"
             ),
-
             # Only one following target
             models.CheckConstraint(
                 condition=(
@@ -64,6 +63,14 @@ class Follow(BaseUUIDModel):
                 ),
                 name="following_user_or_org"
             ),
+            models.UniqueConstraint(
+                fields=["follower_user", "following_user"],
+                name="unique_user_follow"
+            ),
+            models.UniqueConstraint(
+                fields=["follower_org", "following_org"],
+                name="unique_org_follow"
+            )
         ]
         indexes = [
             models.Index(fields=["follower_user"]),

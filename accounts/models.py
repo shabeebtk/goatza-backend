@@ -106,7 +106,14 @@ class UserProfile(BaseUUIDModel):
     birthdate = models.DateField(null=True, blank=True)
 
     profile_photo = models.URLField(blank=True)
+    profile_photo_public_id = models.CharField(max_length=255, blank=True)
+
     cover_photo = models.URLField(blank=True)
+    cover_photo_public_id = models.CharField(max_length=255, blank=True)
+
+    followers_count = models.IntegerField(default=0)
+    following_count = models.IntegerField(default=0)
+    connections_count = models.IntegerField(default=0)
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)

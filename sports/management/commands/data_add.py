@@ -21,7 +21,7 @@ class Command(BaseCommand):
         # =========================
         football, _ = Sport.objects.get_or_create(
             name="Football",
-            defaults={"icon_name": "football"}
+            defaults={"icon_name": "mdi:football"}
         )
 
         football_positions = [
@@ -65,7 +65,7 @@ class Command(BaseCommand):
         # =========================
         cricket, _ = Sport.objects.get_or_create(
             name="Cricket",
-            defaults={"icon_name": "cricket"}
+            defaults={"icon_name": "mdi:cricket"}
         )
 
         cricket_positions = [

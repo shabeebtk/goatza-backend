@@ -9,7 +9,7 @@ from core.models import BaseUUIDModel
 class Sport(BaseUUIDModel):
     name = models.CharField(max_length=100, unique=True)
 
-    icon_name = models.CharField(max_length=100, blank=True)
+    icon_name = models.CharField(max_length=100, blank=True, help_text="iconify library icon name")
     icon_url = models.URLField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)

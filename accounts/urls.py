@@ -12,8 +12,8 @@ from accounts.views.user_google_auth_views import (
     GoogleLoginUrlView,
     GoogleAuthCallbackView
 )
-from accounts.views.user_views import GetUserDetails
-
+from accounts.views.user_views import GetUserDetails, GetUserDetailsByID, UpdateUserMediaAPIView
+from accounts.views.user_upload_signature_views import GetUploadConfigAPIView
 # base url - /user/
 
 urlpatterns = [
@@ -30,5 +30,10 @@ urlpatterns = [
     path('auth/google/callback', GoogleAuthCallbackView.as_view()),
     
     # user details 
-    path('details', GetUserDetails.as_view())
+    path('<str:username>/details', GetUserDetails.as_view()),
+    path('details', GetUserDetailsByID.as_view()),
+    path('update/profile/cover', UpdateUserMediaAPIView.as_view()),
+
+    # user upload media signature 
+    path('get/upload/signature', GetUploadConfigAPIView.as_view()),
 ]

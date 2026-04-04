@@ -1,7 +1,7 @@
 class CacheKeys:
     @staticmethod
-    def user_details(user_id, detail="mini"):
-        return f"user:{user_id}:detail:{detail}"
+    def user_details(username, list_type="mini"):
+        return f"user:{username}:list_type:{list_type}"
 
     @staticmethod
     def email_otp(email):
