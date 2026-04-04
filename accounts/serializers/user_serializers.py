@@ -43,6 +43,8 @@ class UserFullSerializer(BaseUserSerializer):
     followers_count = serializers.CharField(source='profile.followers_count', read_only=True)
     following_count = serializers.CharField(source='profile.following_count', read_only=True)
     connections_count = serializers.CharField(source='profile.connections_count', read_only=True)
+    height_cm = serializers.CharField(source='profile.height_cm', read_only=True)
+    weight_kg = serializers.CharField(source='profile.weight_kg', read_only=True)
     primary_sport = serializers.SerializerMethodField()
 
     class Meta(BaseUserSerializer.Meta):
@@ -53,6 +55,8 @@ class UserFullSerializer(BaseUserSerializer):
             'followers_count', 
             'following_count', 
             'connections_count',
+            'height_cm',
+            'weight_kg',
             'created_at',
             'primary_sport'
         ]

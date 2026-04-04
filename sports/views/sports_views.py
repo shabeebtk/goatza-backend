@@ -17,13 +17,23 @@ class SportListAPIView(APIView):
 
     def get(self, request):
         try:
+            user = None
+            if request.user.is_authenticated:
+                user = request.user
+
             sport_id = request.query_params.get("sport_id")
             name = request.query_params.get("name")
             list_type = request.query_params.get('list_type')
+            exclude_user_sports = request.query_params.get('exclude_user_sports', False) == 'true'
 
-            queryset = Sport.objects.all()
 
-            # 🔍 Filters
+            if exclude_user_sports and user:
+                queryset = Sport.objects.exclude(users__id=user.id)
+            else:
+                queryset = Sport.objects.all()
+
+
+            # Filters
             if sport_id:
                 queryset = queryset.filter(id=sport_id)
 
