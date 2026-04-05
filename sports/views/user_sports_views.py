@@ -12,6 +12,7 @@ from sports.models import (
 from sports.serializers.user_sports_serializers import (
     UserSportFullSerializer, UserSportMiniSerializer
 )
+from accounts.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,18 @@ class UserSportListAPIView(APIView):
 
     LIST_TYPE_All = "all"
 
-    def get(self, request):
+    def get(self, request, username):
         try:
-            user = request.user
+            if username == "me":
+                target_user = request.user
+            else:
+                target_user = User.objects.filter(username=username).first()
+                if not target_user:
+                    return response_data(False, "User not found", status_code=404)
+
             list_type = request.query_params.get("list_type")
 
-            queryset = UserSport.objects.filter(user=user).select_related("sport")
+            queryset = UserSport.objects.filter(user=target_user).select_related("sport")
 
             if list_type == self.LIST_TYPE_All:
                 queryset = queryset.prefetch_related(
@@ -295,3 +302,46 @@ class UserSportUpsertAPIView(APIView):
         except Exception as e:
             logger.exception("UserSportUpsertAPIView error")
             return response_data(False, message="Something went wrong", error=str(e), status_code=500)
+
+
+class UserSportDeleteAPIView(APIView):
+    '''
+    Delete a user's sport profile.
+    Expected request: DELETE /user/sport/delete?sport_id=uuid
+    or DELETE with JSON body {"sport_id": "uuid"}
+    '''
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def delete(self, request):
+        user = request.user
+        
+        sport_id = request.query_params.get("sports_id")
+        logger.info(f"[USER SPORT DELETE] user={user.id} sport_id={sport_id}")
+
+        if not sport_id:
+            return response_data(False, "sport_id is required", status_code=400)
+
+        try:
+            # Check if user has this sport
+            user_sport = UserSport.objects.filter(user=user, sport_id=sport_id).first()
+            
+            if not user_sport:
+                return response_data(False, "User sport not found", status_code=404)
+            
+            # Delete related objects explicitly
+            UserSportPosition.objects.filter(user=user, sport_id=sport_id).delete()
+            UserAttributeValue.objects.filter(user=user, sport_id=sport_id).delete()
+            
+            # Delete the UserSport instance
+            user_sport.delete()
+
+            logger.info(f"[USER SPORT DELETE] success user={user.id} sport={sport_id}")
+
+            return response_data(True, "User sport deleted successfully")
+            
+        except ValidationError:
+            return response_data(False, "Invalid ID format", status_code=400)
+        except Exception as e:
+            logger.exception("UserSportDeleteAPIView error")
+            return response_data(False, "Something went wrong", error=str(e), status_code=500)
