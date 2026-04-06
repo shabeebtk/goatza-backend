@@ -96,6 +96,7 @@ class PostMedia(BaseUUIDModel):
         related_name="media"
     )
     file_url = models.URLField()
+    public_id = models.CharField(max_length=255)
     media_type = models.CharField(max_length=10, choices=MediaType.choices)
     thumbnail_url = models.URLField(blank=True)
     duration = models.PositiveIntegerField(null=True, blank=True)

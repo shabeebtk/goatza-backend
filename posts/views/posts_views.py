@@ -5,11 +5,14 @@ from rest_framework import status
 from rest_framework.exceptions import ValidationError
 
 from core.views.base_views import BaseAPIView
+from accounts.models import User
 from posts.models import Post, PostMedia, Like, Comment
 from sports.models import Sport
 from utils.response import response_data
 from connections.models import Follow
 from posts.serializers.posts_serializers import PostListSerializer
+from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS
+
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,7 @@ logger = logging.getLogger(__name__)
 class CreatePostAPIView(BaseAPIView):
     '''
     {
-        "content": "🔥 Football trial highlights! Looking for strikers ⚽",
+        "content": "🔥 Football trial highlights! My performance ⚽",
         "post_type": "normal",
         "visibility": "public",
         "sport_id": "uuid",
@@ -36,13 +39,14 @@ class CreatePostAPIView(BaseAPIView):
             "order": 1
             }
         ]
-        }
+    }
     '''
     def post(self, request):
         TAG = "CreatePostAPIView"
 
         try:
             actor = request.actor
+            user = request.user
             data = request.data
 
             content = (data.get("content") or "").strip()
@@ -52,79 +56,107 @@ class CreatePostAPIView(BaseAPIView):
             media_list = data.get("media", [])
 
             # -------------------------
-            # VALIDATIONS
+            # BASIC VALIDATIONS
             # -------------------------
 
-            # At least content or media required
             if not content and not media_list:
-                return response_data(
-                    success=False,
-                    message="Post cannot be empty",
-                    status_code=400
-                )
+                return response_data(False, message="Post cannot be empty", status_code=400)
 
-            # Validate post_type
             if post_type not in Post.PostType.values:
-                return response_data(
-                    success=False,
-                    message="Invalid post_type",
-                    status_code=400
-                )
+                return response_data(False, message="Invalid post_type", status_code=400)
 
-            # Validate visibility
             if visibility not in Post.Visibility.values:
-                return response_data(
-                    success=False,
-                    message="Invalid visibility",
-                    status_code=400
-                )
+                return response_data(False, message="Invalid visibility", status_code=400)
 
-            # Validate sport
+            # Sport validation
             sport = None
             if sport_id:
                 sport = Sport.objects.filter(id=sport_id).only("id").first()
                 if not sport:
-                    return response_data(
-                        success=False,
-                        message="Invalid sport_id",
-                        status_code=400
-                    )
+                    return response_data(False, message="Invalid sport_id", status_code=400)
 
-            # Validate media list
+            # -------------------------
+            # MEDIA VALIDATION
+            # -------------------------
+
             if not isinstance(media_list, list):
-                return response_data(
-                    success=False,
-                    message="media must be a list",
-                    status_code=400
-                )
+                return response_data(False, message="media must be a list", status_code=400)
 
             if len(media_list) > 10:
-                return response_data(
-                    success=False,
-                    message="Maximum 10 media allowed",
-                    status_code=400
-                )
+                return response_data(False, message="Maximum 10 media allowed", status_code=400)
 
-            valid_media_types = {PostMedia.MediaType.IMAGE, PostMedia.MediaType.VIDEO}
+            image_count = 0
+            video_count = 0
 
             for idx, media in enumerate(media_list):
+
                 if not isinstance(media, dict):
                     return response_data(False, f"Invalid media at index {idx}", status_code=400)
 
                 file_url = media.get("file_url")
                 media_type = media.get("media_type")
+                public_id = media.get("public_id")
 
-                if not file_url:
-                    return response_data(False, f"file_url required at index {idx}", status_code=400)
+                if not file_url or not media_type or not public_id:
+                    return response_data(False, f"Missing fields at index {idx}", status_code=400)
 
-                if media_type not in valid_media_types:
+                # -------------------------
+                # TYPE COUNT
+                # -------------------------
+                if media_type == PostMedia.MediaType.IMAGE:
+                    image_count += 1
+                elif media_type == PostMedia.MediaType.VIDEO:
+                    video_count += 1
+                else:
                     return response_data(False, f"Invalid media_type at index {idx}", status_code=400)
 
-                # Video-specific validation
-                if media_type == PostMedia.MediaType.VIDEO:
-                    duration = media.get("duration")
-                    if duration is None:
-                        return response_data(False, f"duration required for video at index {idx}", status_code=400)
+                # -------------------------
+                # CLOUDINARY VALIDATION
+                # -------------------------
+                try:
+                    if media_type == PostMedia.MediaType.IMAGE:
+                        validate_media(
+                            user,
+                            file_url,
+                            public_id,
+                            allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
+                        )
+
+                    elif media_type == PostMedia.MediaType.VIDEO:
+                        validate_media(
+                            user,
+                            file_url,
+                            public_id,
+                            allowed_extensions=DEFAULT_VIDEO_EXTENSIONS
+                        )
+
+                        duration = media.get("duration")
+                        if duration is None:
+                            return response_data(False, f"duration required at index {idx}", status_code=400)
+
+                        if duration > 300:
+                            return response_data(False, "Video cannot exceed 5 minutes", status_code=400)
+
+                except ValueError as ve:
+                    return response_data(False, error=str(ve), status_code=400)
+
+                # Order validation
+                order = media.get("order", idx)
+                if order < 0:
+                    return response_data(False, "Invalid media order", status_code=400)
+
+            # -------------------------
+            # MEDIA RULES
+            # -------------------------
+
+            if image_count > 10:
+                return response_data(False, "Max 10 images allowed", status_code=400)
+
+            if video_count > 1:
+                return response_data(False, "Only one video allowed", status_code=400)
+
+            if video_count >= 1 and image_count >= 1:
+                return response_data(False, "Cannot mix images and video", status_code=400)
 
             # -------------------------
             # CREATE POST
@@ -141,24 +173,27 @@ class CreatePostAPIView(BaseAPIView):
                     sport=sport
                 )
 
-                # Media bulk create
                 media_objs = []
-                for index, media in enumerate(media_list):
+                for idx, media in enumerate(media_list):
                     media_objs.append(
                         PostMedia(
                             post=post,
                             file_url=media.get("file_url"),
+                            public_id=media.get("public_id"),
                             media_type=media.get("media_type"),
                             thumbnail_url=media.get("thumbnail_url", ""),
                             duration=media.get("duration"),
-                            order=media.get("order", index)
+                            order=media.get("order", idx),
                         )
                     )
 
                 if media_objs:
                     PostMedia.objects.bulk_create(media_objs)
 
-            logger.info(f"{TAG} | Post created | post_id={post.id} | actor={request.user.id}")
+            # Safe actor logging
+            actor_id = actor.user.id if actor.is_user else actor.organization.id
+
+            logger.info(f"{TAG} | Post created | post_id={post.id} | actor={actor_id}")
 
             return response_data(
                 success=True,
@@ -168,24 +203,16 @@ class CreatePostAPIView(BaseAPIView):
 
         except ValidationError as e:
             logger.warning(f"{TAG} | Validation error | {str(e)}")
-            return response_data(
-                success=False,
-                message="Validation error",
-                status_code=400,
-                error=str(e)
-            )
+            return response_data(False, message="Validation error", status_code=400, error=str(e))
 
         except Exception as e:
             logger.error(f"{TAG} | Error | {str(e)}")
-
             return response_data(
                 success=False,
                 message="Something went wrong",
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 error=str(e)
             )
-        
-
 
 
 
@@ -198,14 +225,12 @@ class ListPostsAPIView(BaseAPIView):
         try:
             actor = request.actor
 
-            # -------------------------
-            # 🔹 Query params
-            # -------------------------
+            username = request.query_params.get("username")
             user_id = request.query_params.get("user_id")
             org_id = request.query_params.get("org_id")
             sport_id = request.query_params.get("sport_id")
 
-            limit = int(request.query_params.get("limit", 20))
+            limit = int(request.query_params.get("limit", 10))
             offset = int(request.query_params.get("offset", 0))
 
             limit = min(limit, 50)
@@ -214,11 +239,17 @@ class ListPostsAPIView(BaseAPIView):
             # -------------------------
             # VALIDATION
             # -------------------------
-            if not user_id and not org_id:
-                return response_data(False, "user_id or org_id is required", status_code=400)
+            if not username and not user_id and not org_id:
+                return response_data(False, "username or user_id or org_id is required", status_code=400)
 
-            if user_id and org_id:
-                return response_data(False, "Provide either user_id or org_id", status_code=400)
+            if (username and org_id) or (user_id and org_id):
+                return response_data(False, "Provide either user or org", status_code=400)
+            
+            if username:
+                user = User.objects.only("id").filter(username=username).first()
+                if not user:
+                    return response_data(False, "User not found", status_code=404)
+                user_id = user.id
 
             # -------------------------
             # BASE QUERY
