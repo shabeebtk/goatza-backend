@@ -18,12 +18,9 @@ class Actor:
 
 def resolve_actor(request):
     user = request.user
-    print(user, 'why no use')
     if not user or not user.is_authenticated:
         return None
     
-    print('working..')
-
     actor_type = request.headers.get("X-Actor-Type", "user")
     org_id = request.headers.get("X-Actor-Id")
 

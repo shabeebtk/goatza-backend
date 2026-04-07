@@ -369,3 +369,20 @@ class UpdateUserProfileAPIView(APIView):
                 error=str(e),
                 status_code=500
             )
+
+
+class ListAllUsersAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            users = User.objects.exclude(id=request.user.id).select_related("profile")
+            serializer = UserSerializer(users, many=True)
+            return response_data(success=True, data=serializer.data)
+        except Exception as e:
+            return response_data(
+                success=False,
+                message="Failed to fetch users",
+                error=str(e),
+                status_code=500
+            )

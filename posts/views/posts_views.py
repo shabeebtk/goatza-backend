@@ -331,27 +331,39 @@ class ListPostsAPIView(BaseAPIView):
             queryset = queryset.order_by("-created_at")[offset: offset + limit]
 
             # -------------------------
-            # LIKED POSTS
+            # USER REACTIONS (FIXED)
             # -------------------------
-            post_ids = [post.id for post in queryset]
+            post_ids = list(queryset.values_list("id", flat=True))
+
+            user_reactions = {}
 
             if actor.is_user:
-                liked_post_ids = set(
-                    Like.objects.filter(
-                        user=actor.user,
-                        post_id__in=post_ids
-                    ).values_list("post_id", flat=True)
-                )
-            else:
-                liked_post_ids = set()  # org like disabled (recommended)
+                reactions = Like.objects.filter(
+                    user=actor.user,
+                    post_id__in=post_ids
+                ).values("post_id", "type")
 
-            # -------------------------
+                user_reactions = {
+                    r["post_id"]: r["type"]
+                    for r in reactions
+                }
+
+            elif actor.is_org:
+                reactions = Like.objects.filter(
+                    organization=actor.organization,
+                    post_id__in=post_ids
+                ).values("post_id", "type")
+
+                user_reactions = {
+                    r["post_id"]: r["type"]
+                    for r in reactions
+                }
+
             # SERIALIZE
-            # -------------------------
             serializer = PostListSerializer(
                 queryset,
                 many=True,
-                context={"liked_post_ids": liked_post_ids}
+                context={"user_reactions": user_reactions}
             )
 
             logger.info(f"{TAG} | Success | count={len(serializer.data)}")

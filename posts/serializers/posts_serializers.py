@@ -53,9 +53,10 @@ class PostListSerializer(serializers.ModelSerializer):
     def get_reaction(self, obj):
         user_reactions = self.context.get("user_reactions", {})
         reaction_type = user_reactions.get(obj.id)
+
         return {
-            "is_reacted": bool(reaction_type),
-            "type": reaction_type  # "like" | "fire" | "respect"
+            "is_reacted": reaction_type is not None,
+            "type": reaction_type
         }
     
 
