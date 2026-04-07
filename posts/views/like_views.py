@@ -13,6 +13,7 @@ from posts.serializers.like_serializers import LikeListSerializer
 
 logger = logging.getLogger(__name__)
 
+from django.db import transaction
 
 class ToggleLikeAPIView(BaseAPIView):
 
@@ -22,60 +23,81 @@ class ToggleLikeAPIView(BaseAPIView):
         try:
             actor = request.actor
             post_id = request.data.get("post_id")
+            liked_type = request.data.get("type", Like.Type.LIKE)
 
-            # -------------------------
             # VALIDATION
-            # -------------------------
             if not post_id:
                 return response_data(False, "post_id is required", status_code=400)
 
-            post = Post.objects.filter(
-                id=post_id,
-                is_deleted=False
-            ).only("id", "likes_count").first()
+            if liked_type not in Like.Type.values:
+                return response_data(False, "Invalid like type", status_code=400)
 
-            if not post:
-                return response_data(False, "Post not found", status_code=404)
-
-            # -------------------------
-            # BUILD FILTERS
-            # -------------------------
-            like_filter = {"post_id": post.id}
-
-            if actor.is_user:
-                like_filter["user"] = actor.user
-            else:
-                like_filter["organization"] = actor.organization
-
-            # -------------------------
-            # TOGGLE
-            # -------------------------
+            # TRANSACTION START
             with transaction.atomic():
+
+                # LOCK inside transaction
+                post = Post.objects.select_for_update().filter(
+                    id=post_id,
+                    is_deleted=False
+                ).first()
+
+                if not post:
+                    return response_data(False, "Post not found", status_code=404)
+
+                # BUILD FILTER
+                like_filter = {"post": post}
+
+                if actor.is_user:
+                    like_filter["user"] = actor.user
+                else:
+                    like_filter["organization"] = actor.organization
 
                 existing_like = Like.objects.filter(**like_filter).first()
 
-                if existing_like:
-                    # ❌ UNLIKE
+                breakdown = post.likes_breakdown or {}
+
+                # CASE 1: REMOVE LIKE
+                if existing_like and existing_like.type == liked_type:
+                    old_type = existing_like.type
+
                     existing_like.delete()
 
-                    Post.objects.filter(id=post.id).update(
-                        likes_count=F("likes_count") - 1
-                    )
+                    post.likes_count = max(0, post.likes_count - 1)
+                    breakdown[old_type] = max(0, breakdown.get(old_type, 1) - 1)
 
                     is_liked = False
+                    current_type = None
 
-                else:
-                    # ✅ LIKE
-                    Like.objects.create(**like_filter)
+                # CASE 2: CHANGE TYPE
+                elif existing_like:
+                    old_type = existing_like.type
 
-                    Post.objects.filter(id=post.id).update(
-                        likes_count=F("likes_count") + 1
-                    )
+                    existing_like.type = liked_type
+                    existing_like.save(update_fields=["type"])
+
+                    breakdown[old_type] = max(0, breakdown.get(old_type, 1) - 1)
+                    breakdown[liked_type] = breakdown.get(liked_type, 0) + 1
 
                     is_liked = True
+                    current_type = liked_type
 
+                # CASE 3: NEW LIKE
+                else:
+                    Like.objects.create(**like_filter, type=liked_type)
+
+                    post.likes_count += 1
+                    breakdown[liked_type] = breakdown.get(liked_type, 0) + 1
+
+                    is_liked = True
+                    current_type = liked_type
+
+                # SAVE POST
+                post.likes_breakdown = breakdown
+                post.save(update_fields=["likes_count", "likes_breakdown"])
+
+            # RESPONSE
             logger.info(
-                f"{TAG} | post={post.id} | actor_type={'user' if actor.is_user else 'org'} | actor_id={actor.user.id if actor.is_user else actor.organization.id} | liked={is_liked}"
+                f"{TAG} | post={post.id} | actor_type={'user' if actor.is_user else 'org'} | liked={is_liked} | type={current_type}"
             )
 
             return response_data(
@@ -83,7 +105,10 @@ class ToggleLikeAPIView(BaseAPIView):
                 message="Success",
                 data={
                     "post_id": str(post.id),
-                    "is_liked": is_liked
+                    "is_liked": is_liked,
+                    "type": current_type,
+                    "likes_count": post.likes_count,
+                    "likes_breakdown": post.likes_breakdown
                 }
             )
 
@@ -96,7 +121,6 @@ class ToggleLikeAPIView(BaseAPIView):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 error=str(e)
             )
-        
 
 
 class ListPostLikesAPIView(BaseAPIView):

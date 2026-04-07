@@ -56,6 +56,8 @@ class Post(BaseUUIDModel):
     )
     # Denormalized counts
     likes_count = models.PositiveIntegerField(default=0)
+    likes_breakdown = models.JSONField(default=dict)
+
     comments_count = models.PositiveIntegerField(default=0)
     is_deleted = models.BooleanField(default=False)
 
@@ -116,6 +118,12 @@ class PostMedia(BaseUUIDModel):
     
 
 class Like(BaseUUIDModel):
+    class Type(models.TextChoices):
+        LIKE = "like"
+        FIRE = "fire"
+        RESPECT = "respect"
+        FUNNY = "funny"
+
     # WHO liked
     user = models.ForeignKey(
         User,
@@ -137,6 +145,7 @@ class Like(BaseUUIDModel):
         on_delete=models.CASCADE,
         related_name="likes"
     )
+    type = models.CharField(max_length=10, choices=Type.choices, default=Type.LIKE)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -198,6 +207,7 @@ class Comment(BaseUUIDModel):
         related_name="comments"
     )
     comment = models.TextField()
+    reply_count = models.PositiveIntegerField(default=0)
 
     parent = models.ForeignKey(
         "self",
@@ -206,6 +216,15 @@ class Comment(BaseUUIDModel):
         on_delete=models.CASCADE,
         related_name="replies"
     )
+    # WHO THIS REPLY IS TARGETING (NEW)
+    reply_to = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+"
+    )
+
     is_deleted = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 

@@ -8,6 +8,7 @@ class LikeListSerializer(serializers.Serializer):
     actor = serializers.SerializerMethodField()
     actor_type = serializers.SerializerMethodField()
     liked_at = serializers.DateTimeField(source="created_at")
+    type = serializers.CharField()
 
     def get_actor(self, obj):
         if obj.user:

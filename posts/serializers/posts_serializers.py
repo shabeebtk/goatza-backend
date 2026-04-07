@@ -22,7 +22,7 @@ class PostListSerializer(serializers.ModelSerializer):
     author_type = serializers.SerializerMethodField()
     media = PostMediaSerializer(many=True, read_only=True)
     sport = SportSerializer(read_only=True)
-    is_liked = serializers.SerializerMethodField()
+    reaction = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -32,13 +32,14 @@ class PostListSerializer(serializers.ModelSerializer):
             "post_type",
             "visibility",
             "likes_count",
+            "likes_breakdown",
             "comments_count",
             "created_at",
             "author",
             "author_type",
             "media",
             "sport",
-            "is_liked",
+            "reaction",
         ]
 
     def get_author(self, obj):
@@ -49,9 +50,13 @@ class PostListSerializer(serializers.ModelSerializer):
     def get_author_type(self, obj):
         return TYPE_USER if obj.author_user else TYPE_ORGANIZATION
 
-    def get_is_liked(self, obj):
-        liked_post_ids = self.context.get("liked_post_ids", set())
-        return obj.id in liked_post_ids
+    def get_reaction(self, obj):
+        user_reactions = self.context.get("user_reactions", {})
+        reaction_type = user_reactions.get(obj.id)
+        return {
+            "is_reacted": bool(reaction_type),
+            "type": reaction_type  # "like" | "fire" | "respect"
+        }
     
 
 

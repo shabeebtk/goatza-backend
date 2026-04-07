@@ -6,10 +6,33 @@ from sports.serializers.sports_serializers import SportSerializer
 from core.constant import TYPE_USER, TYPE_ORGANIZATION
 
 
+class CommentReplySerializer(serializers.ModelSerializer):
+    actor = serializers.SerializerMethodField()
+    reply_to = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Comment
+        fields = ["id", "comment", "actor", "reply_to", "created_at"]
+
+    def get_actor(self, obj):
+        if obj.user:
+            return UserMiniSerializer(obj.user).data
+        return OrganizationMiniSerializer(obj.organization).data
+
+    def get_reply_to(self, obj):
+        if not obj.reply_to:
+            return None
+
+        if obj.reply_to.user:
+            return UserMiniSerializer(obj.reply_to.user).data
+        return OrganizationMiniSerializer(obj.reply_to.organization).data
+
+
 class CommentSerializer(serializers.ModelSerializer):
     actor = serializers.SerializerMethodField()
     actor_type = serializers.SerializerMethodField()
-    replies_count = serializers.SerializerMethodField()
+    replies_count = serializers.IntegerField(source="reply_count")
+    replies_preview = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
@@ -19,8 +42,8 @@ class CommentSerializer(serializers.ModelSerializer):
             "created_at",
             "actor",
             "actor_type",
-            "parent",
             "replies_count",
+            "replies_preview",
         ]
 
     def get_actor(self, obj):
@@ -31,5 +54,6 @@ class CommentSerializer(serializers.ModelSerializer):
     def get_actor_type(self, obj):
         return TYPE_USER if obj.user else TYPE_ORGANIZATION
 
-    def get_replies_count(self, obj):
-        return obj.replies.filter(is_deleted=False).count()
+    def get_replies_preview(self, obj):
+        replies = getattr(obj, "all_replies", [])[:2]
+        return CommentReplySerializer(replies, many=True).data

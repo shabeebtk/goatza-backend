@@ -1,6 +1,6 @@
 import logging
 from django.db import transaction
-from django.db.models import Q, F
+from django.db.models import F, Prefetch
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 
@@ -13,7 +13,6 @@ from posts.serializers.comments_serializers import CommentSerializer
 
 logger = logging.getLogger(__name__)
 
-
 class CreateCommentAPIView(BaseAPIView):
 
     def post(self, request):
@@ -25,40 +24,43 @@ class CreateCommentAPIView(BaseAPIView):
             text = (request.data.get("comment") or "").strip()
             parent_id = request.data.get("parent_id")
 
-            # -------------------------
-            # 🔒 VALIDATION
-            # -------------------------
             if not post_id:
                 return response_data(False, "post_id is required", status_code=400)
 
             if not text:
                 return response_data(False, "comment is required", status_code=400)
 
-            post = Post.objects.filter(id=post_id, is_deleted=False).only("id").first()
-
-            if not post:
-                return response_data(False, "Post not found", status_code=404)
-
-            parent = None
-            if parent_id:
-                parent = Comment.objects.filter(
-                    id=parent_id,
-                    post_id=post.id,
-                    is_deleted=False
-                ).only("id").first()
-
-                if not parent:
-                    return response_data(False, "Invalid parent comment", status_code=400)
-
-            # -------------------------
-            # CREATE COMMENT
-            # -------------------------
             with transaction.atomic():
+
+                post = Post.objects.select_for_update().filter(
+                    id=post_id,
+                    is_deleted=False
+                ).only("id", "comments_count").first()
+
+                if not post:
+                    return response_data(False, "Post not found", status_code=404)
+
+                parent = None
+                root = None
+
+                if parent_id:
+                    parent = Comment.objects.select_for_update().filter(
+                        id=parent_id,
+                        post_id=post.id,
+                        is_deleted=False
+                    ).only("id", "parent", "reply_count").first()
+
+                    if not parent:
+                        return response_data(False, "Invalid parent comment", status_code=400)
+
+                    # CORE LOGIC (FLAT THREAD)
+                    root = parent.parent if parent.parent else parent
 
                 comment_data = {
                     "post": post,
                     "comment": text,
-                    "parent": parent
+                    "parent": root,
+                    "reply_to": parent if parent else None
                 }
 
                 if actor.is_user:
@@ -68,12 +70,16 @@ class CreateCommentAPIView(BaseAPIView):
 
                 comment = Comment.objects.create(**comment_data)
 
-                # increment counter
+                # increment post count
                 Post.objects.filter(id=post.id).update(
                     comments_count=F("comments_count") + 1
                 )
 
-            logger.info(f"{TAG} | post={post.id} | comment_id={comment.id}")
+                # increment reply count ONLY on root
+                if root:
+                    Comment.objects.filter(id=root.id).update(
+                        reply_count=F("reply_count") + 1
+                    )
 
             return response_data(
                 success=True,
@@ -83,13 +89,7 @@ class CreateCommentAPIView(BaseAPIView):
 
         except Exception as e:
             logger.error(f"{TAG} | Error | {str(e)}")
-
-            return response_data(
-                success=False,
-                message="Something went wrong",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                error=str(e)
-            )
+            return response_data(False, "Something went wrong", status_code=500, error=str(e))
 
 
 class ListCommentsAPIView(BaseAPIView):
@@ -100,31 +100,41 @@ class ListCommentsAPIView(BaseAPIView):
         try:
             post_id = request.query_params.get("post_id")
 
-            limit = int(request.query_params.get("limit", 20))
-            offset = int(request.query_params.get("offset", 0))
-
-            limit = min(limit, 50)
-            offset = max(offset, 0)
+            limit = min(int(request.query_params.get("limit", 20)), 50)
+            offset = max(int(request.query_params.get("offset", 0)), 0)
 
             if not post_id:
                 return response_data(False, "post_id is required", status_code=400)
 
+            # BASE QUERY
             queryset = Comment.objects.filter(
                 post_id=post_id,
                 parent__isnull=True,
                 is_deleted=False
-            )
-
-            total_count = queryset.count()
-
-            queryset = queryset.select_related(
+            ).select_related(
                 "user__profile",
                 "organization"
             ).order_by("-created_at")[offset: offset + limit]
 
-            serializer = CommentSerializer(queryset, many=True)
+            # PREFETCH REPLIES 
+            replies_qs = Comment.objects.filter(
+                is_deleted=False
+            ).select_related(
+                "user__profile",
+                "organization"
+            ).order_by("created_at")
 
-            logger.info(f"{TAG} | count={len(serializer.data)}")
+            queryset = queryset.prefetch_related(
+                Prefetch("replies", queryset=replies_qs, to_attr="all_replies")
+            )
+
+            total_count = Comment.objects.filter(
+                post_id=post_id,
+                parent__isnull=True,
+                is_deleted=False
+            ).count()
+
+            serializer = CommentSerializer(queryset, many=True)
 
             return response_data(
                 success=True,
@@ -145,7 +155,6 @@ class ListCommentsAPIView(BaseAPIView):
                 status_code=500,
                 error=str(e)
             )
-        
 
 
 class ListRepliesAPIView(BaseAPIView):
