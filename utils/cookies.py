@@ -3,6 +3,7 @@ def set_refresh_key_cookie(response, refresh_token):
         key="refresh_token",
         value=str(refresh_token),
         httponly=True,
-        secure=False,  # True in production
-        samesite="Lax"
+        secure=True,
+        samesite="Lax",   
+        path="/",
     )

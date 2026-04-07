@@ -19,19 +19,10 @@ from utils.emails import send_email
 from accounts.throttles import (
     SignupThrottle, LoginThrottle, OTPThrottle, ForgotPasswordThrottle
 )
+from utils.cookies import set_refresh_key_cookie
 
 logger = logging.getLogger(__name__)
 
-
-def set_refresh_key_cookie(response, refresh_token):
-    response.set_cookie(
-        key="refresh_token",
-        value=str(refresh_token),
-        httponly=True,
-        secure=True,          # 🔥 MUST be True in production
-        samesite="None",      # 🔥 REQUIRED for cross-site
-        max_age=7 * 24 * 60 * 60,  # optional but good
-    )
 
 # Views here 
 class UserSignupAPIView(APIView):
