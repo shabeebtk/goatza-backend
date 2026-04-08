@@ -2,7 +2,7 @@ from django.db import models
 from django.conf import settings
 from django.db.models import Q
 from django.core.exceptions import ValidationError
-from core.models import BaseUUIDModel
+from shared.models import BaseUUIDModel
 from accounts.models import User
 from sports.models import Sport
 

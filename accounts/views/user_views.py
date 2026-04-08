@@ -14,6 +14,7 @@ from connections.services.follow_services import FollowService
 from services.storage.factory import get_storage_service
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
 from accounts.serializers.user_update_serilizer import UpdateUserProfileSerializer
+from services.location.location_service import LocationService
 from utils.validations import validate_username_format
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,49 @@ class UpdateUserProfileAPIView(APIView):
                 logger.info(
                     f"{TAG} Username changed: {old_username} → {data['username']}"
                 )
+
+
+            # LOCATION UPDATE
+            if "location" in data:
+                location_data = data["location"]
+
+                if location_data is None:
+                    profile.location = None
+                    profile.location_name = ""
+                    profile.city = ""
+                    profile.country_code = ""
+                    profile.latitude = None
+                    profile.longitude = None
+
+                    profile_fields.extend([
+                        "location",
+                        "location_name",
+                        "city",
+                        "country_code",
+                        "latitude",
+                        "longitude"
+                    ])
+                    logger.info(f"{TAG} Location cleared")
+                else:
+                    location = LocationService.get_or_create_location(location_data)
+                    denorm = LocationService.build_denormalized(location)
+                    profile.location = location
+                    profile.location_name = denorm["location_name"]
+                    profile.city = denorm["city"]
+                    profile.country_code = denorm["country_code"]
+                    profile.latitude = denorm["latitude"]
+                    profile.longitude = denorm["longitude"]
+
+                    profile_fields.extend([
+                        "location",
+                        "location_name",
+                        "city",
+                        "country_code",
+                        "latitude",
+                        "longitude"
+                    ])
+                    logger.info(f"{TAG} Location updated → {denorm['location_name']}")
+                        
 
             # PROFILE FIELDS
             profile_mapping = [

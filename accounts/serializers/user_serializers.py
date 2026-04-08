@@ -46,6 +46,7 @@ class UserFullSerializer(BaseUserSerializer):
     height_cm = serializers.CharField(source='profile.height_cm', read_only=True)
     weight_kg = serializers.CharField(source='profile.weight_kg', read_only=True)
     primary_sport = serializers.SerializerMethodField()
+    location = serializers.SerializerMethodField()
 
     class Meta(BaseUserSerializer.Meta):
         fields = BaseUserSerializer.Meta.fields + [
@@ -58,7 +59,8 @@ class UserFullSerializer(BaseUserSerializer):
             'height_cm',
             'weight_kg',
             'created_at',
-            'primary_sport'
+            'primary_sport',
+            'location'
         ]
 
     def get_primary_sport(self, obj):
@@ -78,6 +80,20 @@ class UserFullSerializer(BaseUserSerializer):
             "icon_url": primary.sport.icon_url,
             "experience_level": primary.experience_level,
             "primary_position": positions.position.name if positions else None
+        }
+
+    def get_location(self, obj):
+        profile = obj.profile
+
+        if not profile or not profile.latitude:
+            return None
+
+        return {
+            "name": profile.location_name,
+            "city": profile.city,
+            "country_code": profile.country_code,
+            "latitude": profile.latitude,
+            "longitude": profile.longitude,
         }
 
 

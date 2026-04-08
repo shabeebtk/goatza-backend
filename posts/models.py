@@ -2,7 +2,7 @@ import uuid
 from django.db import models
 from django.conf import settings
 from django.db.models import Q
-from core.models import BaseUUIDModel 
+from shared.models import BaseUUIDModel, Location
 from accounts.models import User
 from organization.models import Organization
 from sports.models import Sport
@@ -42,13 +42,6 @@ class Post(BaseUUIDModel):
         related_name="posts",
         blank=True, null=True
     )
-    # location = models.ForeignKey(
-    #     "Location",
-    #     null=True,
-    #     blank=True,
-    #     on_delete=models.SET_NULL,
-    #     related_name="posts"
-    # )
     visibility = models.CharField(
         max_length=20,
         choices=Visibility.choices,
@@ -61,6 +54,21 @@ class Post(BaseUUIDModel):
     comments_count = models.PositiveIntegerField(default=0)
     is_deleted = models.BooleanField(default=False)
 
+    # Location (city-based)
+    location = models.ForeignKey(
+        Location,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="posts"
+    )
+    # Denormalized for better query
+    location_name = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    country_code = models.CharField(max_length=5, blank=True)
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -71,6 +79,8 @@ class Post(BaseUUIDModel):
             models.Index(fields=["author_user"]),
             models.Index(fields=["author_org"]),
             models.Index(fields=["sport"]),
+            models.Index(fields=["city"]),
+            models.Index(fields=["latitude", "longitude"])
         ]
         constraints = [
             models.CheckConstraint(

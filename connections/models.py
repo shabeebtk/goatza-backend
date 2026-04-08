@@ -2,7 +2,7 @@ from django.db import models
 from django.db.models import Q
 from django.core.exceptions import ValidationError
 from accounts.models import User
-from core.models import BaseUUIDModel
+from shared.models import BaseUUIDModel
 from organization.models import Organization
 
 # Create your models here.

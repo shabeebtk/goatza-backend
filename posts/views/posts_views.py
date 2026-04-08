@@ -12,7 +12,7 @@ from utils.response import response_data
 from connections.models import Follow
 from posts.serializers.posts_serializers import PostListSerializer
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS
-
+from services.location.location_service import LocationService
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,17 @@ class CreatePostAPIView(BaseAPIView):
             "duration": 32,
             "order": 1
             }
-        ]
+        ],
+        "location": {
+            "name": "Kannur Stadium",
+            "type": "place",
+            "city": "Kannur",
+            "state": "Kerala",
+            "country_code": "IN",
+            "latitude": 11.868,
+            "longitude": 75.355,
+            "external_id": "place.kannur.stadium"
+        }
     }
     '''
     def post(self, request):
@@ -54,6 +64,7 @@ class CreatePostAPIView(BaseAPIView):
             visibility = data.get("visibility", Post.Visibility.PUBLIC)
             sport_id = data.get("sport_id")
             media_list = data.get("media", [])
+            location_data = data.get("location", {})
 
             # -------------------------
             # BASIC VALIDATIONS
@@ -68,12 +79,22 @@ class CreatePostAPIView(BaseAPIView):
             if visibility not in Post.Visibility.values:
                 return response_data(False, message="Invalid visibility", status_code=400)
 
+
+            # location validation 
+            if location_data:
+                if not isinstance(location_data, dict):
+                    return response_data(False, message="Invalid location format", status_code=400)
+
+                if not location_data.get("latitude") or not location_data.get("longitude"):
+                    return response_data(False, message="Location must include latitude and longitude", status_code=400)
+
             # Sport validation
             sport = None
             if sport_id:
                 sport = Sport.objects.filter(id=sport_id).only("id").first()
                 if not sport:
                     return response_data(False, message="Invalid sport_id", status_code=400)
+
 
             # -------------------------
             # MEDIA VALIDATION
@@ -163,6 +184,11 @@ class CreatePostAPIView(BaseAPIView):
             # -------------------------
 
             with transaction.atomic():
+                location = None
+                denorm = {}
+                if location_data:
+                    location = LocationService.get_or_create_location(location_data)
+                    denorm = LocationService.build_denormalized(location)
 
                 post = Post.objects.create(
                     author_user=actor.user if actor.is_user else None,
@@ -170,7 +196,15 @@ class CreatePostAPIView(BaseAPIView):
                     content=content,
                     post_type=post_type,
                     visibility=visibility,
-                    sport=sport
+                    sport=sport,
+
+                    # LOCATION DATA - (for performance storing denormalized way)
+                    location=location,
+                    location_name=denorm.get("location_name", ""),
+                    city=denorm.get("city", ""),
+                    country_code=denorm.get("country_code", ""),
+                    latitude=denorm.get("latitude"),
+                    longitude=denorm.get("longitude"),
                 )
 
                 media_objs = []

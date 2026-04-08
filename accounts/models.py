@@ -1,9 +1,8 @@
 from django.db import models
 from django.db.models import Q
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
-from core.models import BaseUUIDModel
+from shared.models import BaseUUIDModel, Location
 from django.core.validators import MinValueValidator, MaxValueValidator
-
 
 class UserManager(BaseUserManager):
     def create_user(self, email=None, phone=None, password=None, **extra_fields):
@@ -65,7 +64,7 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     class Meta:
         indexes = [
             models.Index(fields=["email"]),
-            models.Index(fields=["phone"]),
+            models.Index(fields=["phone"]), 
         ]
         constraints = [
             models.CheckConstraint(
@@ -125,12 +124,30 @@ class UserProfile(BaseUUIDModel):
         validators=[MinValueValidator(20), MaxValueValidator(300)]
     )
 
+    # Location (city-based)
+    location = models.ForeignKey(
+        Location,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="users"
+    )
+    # Denormalized for better query
+    location_name = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    country_code = models.CharField(max_length=5, blank=True)
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
+
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["user"]),
+            models.Index(fields=["city"]),
+            models.Index(fields=["latitude", "longitude"]),
         ]
 
     def __str__(self):

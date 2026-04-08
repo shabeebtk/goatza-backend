@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'connections',
     'posts',
     'feed',
+    'shared',
     
     # buildin apps 
     'django.contrib.admin',

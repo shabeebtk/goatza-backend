@@ -29,6 +29,9 @@ class UpdateUserProfileSerializer(serializers.Serializer):
         allow_null=True
     )
 
+    # location 
+    location = serializers.DictField(required=False, allow_null=True)
+
     # VALIDATIONS
 
     def validate_username(self, value):
@@ -65,4 +68,16 @@ class UpdateUserProfileSerializer(serializers.Serializer):
     def validate_weight_kg(self, value):
         if value is not None and (value < 20 or value > 300):
             raise serializers.ValidationError("Weight must be between 20 and 300 kg")
+        return value
+
+    def validate_location(self, value):
+        if value is None:
+            return value
+
+        required_fields = ["latitude", "longitude", "name"]
+
+        for field in required_fields:
+            if field not in value:
+                raise serializers.ValidationError(f"{field} is required")
+
         return value

@@ -2,8 +2,7 @@ from django.db import models
 from accounts.models import User
 from django.core.exceptions import ValidationError
 from django.db.models import Q, F
-from core.models import BaseUUIDModel
-# Create your models here.
+from shared.models import BaseUUIDModel
 
 
 class Sport(BaseUUIDModel):

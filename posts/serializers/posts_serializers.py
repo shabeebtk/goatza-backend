@@ -23,6 +23,7 @@ class PostListSerializer(serializers.ModelSerializer):
     media = PostMediaSerializer(many=True, read_only=True)
     sport = SportSerializer(read_only=True)
     reaction = serializers.SerializerMethodField()
+    location = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -40,6 +41,7 @@ class PostListSerializer(serializers.ModelSerializer):
             "media",
             "sport",
             "reaction",
+            "location",
         ]
 
     def get_author(self, obj):
@@ -58,6 +60,18 @@ class PostListSerializer(serializers.ModelSerializer):
             "is_reacted": reaction_type is not None,
             "type": reaction_type
         }
+
+    def get_location(self, obj):
+        if not obj.latitude:
+            return None
+
+        return {
+            "name": obj.location_name,
+            "city": obj.city,
+            "country_code": obj.country_code,
+            "latitude": obj.latitude,
+        "longitude": obj.longitude,
+    }
     
 
 
