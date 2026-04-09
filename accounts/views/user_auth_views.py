@@ -15,7 +15,7 @@ from accounts.services.user_services import generate_unique_username
 from utils.response import response_data
 from utils.validations import is_valid_email, is_valid_password
 from utils.otp_validation import generate_otp, verify_otp
-from utils.emails import send_email
+from utils.emails import send_email, send_email_async
 from accounts.throttles import (
     SignupThrottle, LoginThrottle, OTPThrottle, ForgotPasswordThrottle
 )
@@ -62,17 +62,11 @@ class UserSignupAPIView(APIView):
 
                 otp = generate_otp(email)
 
-                print(otp, 'user otp----')
-
-                email_sent = send_email(
+                send_email_async(
                     subject="Goatza OTP Verification",
                     message=f"Hello {name},\n\nYour OTP is: {otp}\nValid for 10 minutes.",
                     to_email=email
                 )
-
-                if not email_sent:
-                    logger.error(f"Email sending failed for {email}")
-                    raise Exception("Failed to send OTP")
 
                 logger.info(f"User signup initiated: {email}")
 
@@ -165,15 +159,11 @@ class UserLoginAPIView(APIView):
             otp = generate_otp(email)
 
             # Send email
-            email_sent = send_email(
+            send_email_async(
                 subject="Your OTP for GOATZA",
                 message=f"Hello {user.profile_name},\n\nYour OTP is: {otp}\nIt is valid for 10 minutes.",
                 to_email=email
             )
-            
-            if not email_sent:
-                # Rollback user creation
-                raise Exception("Failed to login user")
 
             return response_data(
                 success=True,
@@ -235,19 +225,12 @@ class ForgotPasswordAPIView(APIView):
         otp = generate_otp(email)
 
         # Send OTP via email
-        email_sent = send_email(
+        send_email_async(
             subject="Password Reset OTP - LearningMate AI",
             message=f"Hello {user.profile_name},\n\nYour OTP to reset your password is: {otp}\nIt is valid for 10 minutes.",
             to_email=email
         )
-
-        if not email_sent:
-            return response_data(
-                success=False,
-                message="Failed to send OTP. Please try again later.",
-                status_code=500
-            )
-
+        
         return response_data(
             success=True,
             message="OTP has been sent to your email.",

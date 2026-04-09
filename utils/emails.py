@@ -1,14 +1,13 @@
 from django.core.mail import EmailMessage
 from django.conf import settings
 import time
+import threading
 
 def send_email(
     subject, message, to_email, html_message=None, from_email=None, max_attempts=3, delay_seconds=2
     ):
     """
-    Send email with retry logic.
-    Tries up to max_attempts, waiting delay_seconds between attempts.
-    Returns True if email sent successfully, False otherwise.
+    Internal function: runs in background thread
     """
     if from_email is None:
         from_email = f"LearningMate AI <{settings.DEFAULT_FROM_EMAIL}>"
@@ -29,11 +28,38 @@ def send_email(
                 email.attach_alternative(html_message, "text/html")
 
             response = email.send(fail_silently=False)
-            if response:  # 1 if success
-                return True
-        except Exception as e:
-            print(f"Attempt {attempt}: Error sending email: {e}")
-            if attempt < max_attempts:
-                time.sleep(delay_seconds)  # wait before retrying
 
+            if response:
+                print(f"Email sent to {to_email}")
+                return True
+
+        except Exception as e:
+            print(f"Attempt {attempt} failed: {str(e)}")
+
+            if attempt < max_attempts:
+                time.sleep(delay_seconds)
+
+    print(f" All attempts failed for {to_email}")
     return False
+
+
+
+
+def send_email_async(
+    subject,
+    message,
+    to_email,
+    html_message=None,
+    from_email=None,
+    max_attempts=3,
+    delay_seconds=2,
+):
+    """
+    Public function: non-blocking email sender
+    """
+    thread = threading.Thread(
+        target=send_email,
+        args=(subject, message, to_email, html_message, from_email, max_attempts, delay_seconds),
+    )
+    thread.daemon = True
+    thread.start()
