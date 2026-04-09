@@ -70,7 +70,7 @@ class PostListSerializer(serializers.ModelSerializer):
             "city": obj.city,
             "country_code": obj.country_code,
             "latitude": obj.latitude,
-        "longitude": obj.longitude,
+            "longitude": obj.longitude,
     }
     
 

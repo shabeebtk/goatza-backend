@@ -1,4 +1,4 @@
-import logging
+import logging, uuid
 from django.db.models import Q
 from rest_framework import status
 
@@ -6,125 +6,68 @@ from core.views.base_views import BaseAPIView
 from posts.models import Post
 from connections.services.follow_services import FollowService
 from posts.serializers.posts_serializers import PostListSerializer
-from posts.models import Like
 from utils.response import response_data
+from feed.services.feed_services import FeedService
+from feed.pagination import FeedCursorPagination
 
 logger = logging.getLogger(__name__)
 
 
 class FeedAPIView(BaseAPIView):
+    MAX_SEEN_IDS = 30
 
     def get(self, request):
         TAG = "FeedAPIView"
 
         try:
             actor = request.actor
+            user = request.user
+            seen_ids_param = request.query_params.get("seen_ids")
 
-            # -------------------------
-            # 🔹 Cursor pagination
-            # -------------------------
-            cursor = request.query_params.get("cursor")  # ISO datetime
-            limit = int(request.query_params.get("limit", 20))
+            if not actor.is_user:
+                return response_data(False, "Feed only for users", status_code=400)
 
-            limit = min(limit, 50)
+            seen_ids = []
+            if seen_ids_param:
+                try:
+                    seen_ids = [
+                        uuid.UUID(sid.strip())
+                        for sid in seen_ids_param.split(",")
+                        if sid.strip()
+                    ]
+                    seen_ids = seen_ids[:self.MAX_SEEN_IDS]
+                except Exception:
+                    seen_ids = []
 
-            # -------------------------
-            # 🔥 FOLLOWING IDS (CORE)
-            # -------------------------
-            following_data = FollowService.get_following_ids(actor)
+            # 1. GET FEED QUERYSET
+            queryset = FeedService.get_feed_queryset(user, seen_ids=seen_ids)
 
-            following_user_ids = following_data["user_ids"]
-            following_org_ids = following_data["org_ids"]
+            # 2. PAGINATION
+            paginator = FeedCursorPagination()
+            paginated_posts = paginator.paginate_queryset(queryset, request)
 
-            # -------------------------
-            # 🔥 BASE QUERY
-            # -------------------------
-            queryset = Post.objects.filter(
-                is_deleted=False
-            )
+            # 3. DIVERSIFY POSTS
+            paginated_posts = FeedService.diversify_posts(paginated_posts)
 
-            # -------------------------
-            # 🔒 VISIBILITY
-            # -------------------------
-            queryset = queryset.filter(
-                Q(visibility=Post.Visibility.PUBLIC) |
-                Q(
-                    visibility=Post.Visibility.FOLLOWERS,
-                    author_user_id__in=following_user_ids
-                ) |
-                Q(
-                    visibility=Post.Visibility.FOLLOWERS,
-                    author_org_id__in=following_org_ids
-                ) |
-                Q(author_user=actor.user if actor.is_user else None) |
-                Q(author_org=actor.organization if actor.is_org else None)
-            )
+            post_ids = [p.id for p in paginated_posts]
 
-            # -------------------------
-            # 🧠 FOLLOWED AUTHORS ONLY (FEED CORE)
-            # -------------------------
-            queryset = queryset.filter(
-                Q(author_user_id__in=following_user_ids) |
-                Q(author_org_id__in=following_org_ids) |
-                Q(author_user=actor.user if actor.is_user else None) |
-                Q(author_org=actor.organization if actor.is_org else None)
-            )
+            # 4. USER REACTIONS
+            user_reactions = FeedService.get_user_reactions(user, post_ids)
 
-            # -------------------------
-            # ⏱️ CURSOR FILTER
-            # -------------------------
-            if cursor:
-                queryset = queryset.filter(created_at__lt=cursor)
-
-            # -------------------------
-            # ⚡ OPTIMIZATION
-            # -------------------------
-            queryset = queryset.select_related(
-                "author_user__profile",
-                "author_org",
-                "sport"
-            ).prefetch_related("media")
-
-            queryset = queryset.order_by("-created_at")[:limit]
-
-            # -------------------------
-            # ❤️ LIKED POSTS
-            # -------------------------
-            post_ids = [p.id for p in queryset]
-
-            if actor.is_user:
-                liked_post_ids = set(
-                    Like.objects.filter(
-                        user=actor.user,
-                        post_id__in=post_ids
-                    ).values_list("post_id", flat=True)
-                )
-            else:
-                liked_post_ids = set()
-
-            # -------------------------
-            # 🧾 SERIALIZE
-            # -------------------------
+            # 5. SERIALIZE
             serializer = PostListSerializer(
-                queryset,
+                paginated_posts,
                 many=True,
-                context={"liked_post_ids": liked_post_ids}
+                context={"user_reactions": user_reactions}
             )
 
-            # -------------------------
-            # 🔁 NEXT CURSOR
-            # -------------------------
-            next_cursor = None
-            if queryset:
-                next_cursor = queryset[-1].created_at.isoformat()
-
-            logger.info(f"{TAG} | count={len(serializer.data)}")
-
+            # 6. RESPONSE
             return response_data(
                 success=True,
+                message="Feed fetched successfully",
                 data={
-                    "results": serializer.data,
-                    "next_cursor": next_cursor
+                    "next_cursor": paginator.get_next_cursor(),
+                    "results": serializer.data
                 }
             )
 
