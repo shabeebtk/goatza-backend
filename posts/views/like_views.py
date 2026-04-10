@@ -10,6 +10,7 @@ from sports.models import Sport
 from utils.response import response_data
 from connections.models import Follow
 from posts.serializers.like_serializers import LikeListSerializer
+from notifications.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,12 @@ class ToggleLikeAPIView(BaseAPIView):
 
                     is_liked = True
                     current_type = liked_type
+
+                    NotificationService.like(
+                        actor_user=actor.user if actor.is_user else None,
+                        actor_org=actor.organization if actor.is_org else None,
+                        post=post
+                    )
 
                 # SAVE POST
                 post.likes_breakdown = breakdown

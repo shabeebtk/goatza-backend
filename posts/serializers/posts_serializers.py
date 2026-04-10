@@ -75,30 +75,43 @@ class PostListSerializer(serializers.ModelSerializer):
     
 
 
-class CommentSerializer(serializers.ModelSerializer):
-    actor = serializers.SerializerMethodField()
-    actor_type = serializers.SerializerMethodField()
-    replies_count = serializers.SerializerMethodField()
+class PostMiniSerializer(serializers.ModelSerializer):
+    author = serializers.SerializerMethodField()
+    media = serializers.SerializerMethodField()
 
     class Meta:
-        model = Comment
+        model = Post
         fields = [
             "id",
-            "comment",
-            "created_at",
-            "actor",
-            "actor_type",
-            "parent",
-            "replies_count",
+            "content",
+            "media",
+            "author"
         ]
 
-    def get_actor(self, obj):
-        if obj.user:
-            return UserMiniSerializer(obj.user).data
-        return OrganizationMiniSerializer(obj.organization).data
+    def get_author(self, obj):
+        if obj.author_user:
+            return UserMiniSerializer(obj.author_user).data
+        return {
+            "id": str(obj.author_org.id),
+            "name": obj.author_org.name,
+            "logo": obj.author_org.logo
+        }
 
-    def get_actor_type(self, obj):
-        return TYPE_USER if obj.user else TYPE_ORGANIZATION
+    def get_media(self, obj):
+        """
+        Return only first media (for notification preview)
+        """
+        first_media = getattr(obj, "media", None)
 
-    def get_replies_count(self, obj):
-        return obj.replies.filter(is_deleted=False).count()
+        if not first_media:
+            return None
+
+        first = first_media.first()
+        if not first:
+            return None
+
+        return {
+            "type": first.media_type,
+            "url": first.file_url,
+            "thumbnail": first.thumbnail_url
+        }

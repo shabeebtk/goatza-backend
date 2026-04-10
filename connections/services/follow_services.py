@@ -2,7 +2,7 @@ from connections.models import Follow
 from accounts.models import User, UserProfile
 from django.db import transaction
 from django.db.models import F, Q
-
+from notifications.services.notification_service import NotificationService
 
 class FollowService:
 
@@ -80,7 +80,6 @@ class FollowService:
         # =========================
         # COUNT LOGIC (USER ONLY)
         # =========================
-
         if actor.is_user:
             # actor following count
             UserProfile.objects.filter(user=actor.user).update(
@@ -93,7 +92,9 @@ class FollowService:
                 followers_count=F("followers_count") + 1
             )
 
-            # MUTUAL CONNECTION (only user ↔ user)
+            # MUTUAL CONNECTION
+            is_mutual = False
+
             if actor.is_user:
                 is_mutual = Follow.objects.filter(
                     follower_user=target_user,
@@ -107,6 +108,31 @@ class FollowService:
                     UserProfile.objects.filter(user=target_user).update(
                         connections_count=F("connections_count") + 1
                     )
+
+            # NOTIFICATION NORMAL FOLLOW
+            if is_mutual:
+                # ONLY FOLLOW BACK
+                NotificationService.follow_back(
+                    actor_user=target_user,
+                    target_user=actor.user
+                )
+            else:
+                # NORMAL FOLLOW
+                NotificationService.follow(
+                    actor_user=actor.user if actor.is_user else None,
+                    actor_org=actor.organization if actor.is_org else None,
+                    target_user=target_user,
+                    target_org=None
+                )
+
+        elif target_org:
+            # org follow notification
+            NotificationService.follow(
+                actor_user=actor.user if actor.is_user else None,
+                actor_org=actor.organization if actor.is_org else None,
+                target_user=None,
+                target_org=target_org
+            )
 
         return True, {
             "is_following": True,

@@ -10,6 +10,7 @@ from sports.models import Sport
 from utils.response import response_data
 from connections.models import Follow
 from posts.serializers.comments_serializers import CommentSerializer
+from notifications.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,14 @@ class CreateCommentAPIView(BaseAPIView):
                     Comment.objects.filter(id=root.id).update(
                         reply_count=F("reply_count") + 1
                     )
+
+            
+                NotificationService.comment(
+                    actor_user=actor.user if actor.is_user else None,
+                    actor_org=actor.organization if actor.is_org else None,
+                    comment=comment
+                )
+
 
             return response_data(
                 success=True,
