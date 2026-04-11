@@ -16,6 +16,7 @@ class Notification(BaseUUIDModel):
         # future:
         # MESSAGE = "message"
         # TRIAL = "trial"
+        
 
     # WHO RECEIVES
     recipient_user = models.ForeignKey(
@@ -119,3 +120,33 @@ class Notification(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.type} -> {self.id}"
+    
+
+
+class UserFCMToken(BaseUUIDModel):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="fcm_tokens"
+    )
+
+    token = models.CharField(max_length=255, unique=True)
+
+    device_type = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True
+    )  # web / android / ios
+
+    device_name = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True
+    )  # Chrome / iPhone / etc
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user}  --> {self.token}"

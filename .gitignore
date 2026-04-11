@@ -4,3 +4,4 @@ env
 venv/
 *.log
 celerybeat-schedule.*
+goatza-dev-firebase-adminsdk-fbsvc-272fa51808.json

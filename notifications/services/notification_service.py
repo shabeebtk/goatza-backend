@@ -1,6 +1,69 @@
 from django.db import transaction
 from notifications.models import Notification
+from notifications.services.fcm_service import FCMService
 
+def build_notification_payload(notification: Notification):
+    actor = notification.actor_user
+    profile = getattr(actor, "profile", None)
+
+    actor_name = profile.name if profile else actor.username
+    actor_avatar = profile.profile_photo if profile else ""
+
+    # MESSAGE BUILDING 
+    title = "Goatza"
+    body = ""
+    url = "/"
+
+    if notification.type == Notification.Type.LIKE:
+        title = f"{actor_name} liked your post"
+        body = "Tap to view"
+        url = f"/post/{notification.post_id}"
+
+    elif notification.type == Notification.Type.COMMENT:
+        comment_text = getattr(notification.comment, "content", "")
+        short_comment = comment_text[:60] + "..." if len(comment_text) > 60 else comment_text
+
+        # reply vs normal comment
+        if notification.group_key.startswith("reply:"):
+            title = f"{actor_name} replied to your comment"
+        else:
+            title = f"{actor_name} commented on your post"
+
+        body = short_comment or "Tap to view"
+        url = f"/post/{notification.post_id}"
+
+    elif notification.type == Notification.Type.FOLLOW:
+        title = f"{actor_name} started following you"
+        body = "Tap to view profile"
+        url = f"/profile/{actor.username}"
+
+    elif notification.type == Notification.Type.FOLLOW_BACK:
+        title = f"{actor_name} followed you back"
+        body = "Tap to view profile"
+        url = f"/profile/{actor.username}"
+
+    # FINAL PAYLOAD
+    return {
+        "type": notification.type,
+        "notification_id": str(notification.id),
+
+        # actor
+        "actor_name": actor_name,
+        "actor_username": actor.username,
+        "actor_avatar": actor_avatar,
+        "actor_initials": (actor_name[:2]).upper(),
+
+        # target
+        "target_id": str(notification.post_id or ""),
+
+        # PUSH CONTENT
+        "title": title,
+        "body": body,
+        "url": url,
+
+        # grouping
+        "group_key": notification.group_key or "",
+    }
 
 class NotificationService:
 
@@ -36,15 +99,17 @@ class NotificationService:
         if Notification.objects.filter(dedup_key=dedup_key).exists():
             return
 
-        Notification.objects.create(
+        notification = Notification.objects.create(
             type=Notification.Type.FOLLOW,
             dedup_key=dedup_key,
             group_key=dedup_key,
             **NotificationService._get_actor(actor_user, actor_org),
             **NotificationService._get_recipient(target_user, target_org),
         )
+        payload = build_notification_payload(notification)
+        FCMService.send_to_user(target_user, payload)
 
-    
+            
     @staticmethod
     def follow_back(actor_user=None, actor_org=None, target_user=None, target_org=None):
         """
@@ -59,13 +124,15 @@ class NotificationService:
         if Notification.objects.filter(dedup_key=dedup_key).exists():
             return
 
-        Notification.objects.create(
+        notification = Notification.objects.create(
             type=Notification.Type.FOLLOW_BACK,
             dedup_key=dedup_key,
             group_key=dedup_key,
             **NotificationService._get_actor(actor_user, actor_org),
             **NotificationService._get_recipient(target_user, target_org),
         )
+        payload = build_notification_payload(notification)
+        FCMService.send_to_user(target_user, payload)
 
     # ----------------------------------------
     # LIKE
@@ -80,7 +147,7 @@ class NotificationService:
         if post.author_user == actor_user:
             return
 
-        Notification.objects.create(
+        notification = Notification.objects.create(
             type=Notification.Type.LIKE,
             group_key=f"like:post:{post.id}",
             post=post,
@@ -90,6 +157,8 @@ class NotificationService:
             **NotificationService._get_actor(actor_user, actor_org),
             **NotificationService._get_recipient(post.author_user, post.author_org),
         )
+        payload = build_notification_payload(notification)
+        FCMService.send_to_user(post.author_user, payload)
 
     # COMMENT
     @staticmethod
@@ -102,7 +171,7 @@ class NotificationService:
         # POST OWNER
         # ----------------------------------------
         if post.author_user and post.author_user != actor_user:
-            Notification.objects.create(
+            notification  = Notification.objects.create(
                 type=Notification.Type.COMMENT,
                 group_key=f"comment:post:{post.id}",
                 post=post,
@@ -111,6 +180,8 @@ class NotificationService:
                 **NotificationService._get_recipient(post.author_user, None),
             )
             notified_users.add(post.author_user.id)
+            payload = build_notification_payload(notification)
+            FCMService.send_to_user(post.author_user, payload)
 
         # ----------------------------------------
         # REPLY TARGET
@@ -123,7 +194,7 @@ class NotificationService:
                 and target_user != actor_user
                 and target_user.id not in notified_users
             ):
-                Notification.objects.create(
+                notification = Notification.objects.create(
                     type=Notification.Type.COMMENT,
                     group_key=f"reply:comment:{comment.reply_to.id}",
                     post=post,
@@ -131,3 +202,5 @@ class NotificationService:
                     **NotificationService._get_actor(actor_user, actor_org),
                     **NotificationService._get_recipient(target_user, None),
                 )
+                payload = build_notification_payload(notification)
+                FCMService.send_to_user(target_user, payload)

@@ -113,8 +113,8 @@ class FollowService:
             if is_mutual:
                 # ONLY FOLLOW BACK
                 NotificationService.follow_back(
-                    actor_user=target_user,
-                    target_user=actor.user
+                    actor_user=actor.user,
+                    target_user=target_user
                 )
             else:
                 # NORMAL FOLLOW
