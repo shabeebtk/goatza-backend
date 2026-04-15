@@ -259,6 +259,7 @@ class ListPostsAPIView(BaseAPIView):
         try:
             actor = request.actor
 
+            post_id = request.query_params.get("post_id")
             username = request.query_params.get("username")
             user_id = request.query_params.get("user_id")
             org_id = request.query_params.get("org_id")
@@ -273,7 +274,7 @@ class ListPostsAPIView(BaseAPIView):
             # -------------------------
             # VALIDATION
             # -------------------------
-            if not username and not user_id and not org_id:
+            if not username and not user_id and not org_id and not post_id:
                 return response_data(False, "username or user_id or org_id is required", status_code=400)
 
             if (username and org_id) or (user_id and org_id):
@@ -288,7 +289,10 @@ class ListPostsAPIView(BaseAPIView):
             # -------------------------
             # BASE QUERY
             # -------------------------
-            queryset = Post.objects.filter(is_deleted=False)
+            if post_id:
+                queryset = Post.objects.filter(id=post_id, is_deleted=False)
+            else:
+                queryset = Post.objects.filter(is_deleted=False)
 
             if user_id:
                 queryset = queryset.filter(author_user_id=user_id)
@@ -365,7 +369,7 @@ class ListPostsAPIView(BaseAPIView):
             queryset = queryset.order_by("-created_at")[offset: offset + limit]
 
             # -------------------------
-            # USER REACTIONS (FIXED)
+            # USER REACTIONS
             # -------------------------
             post_ids = list(queryset.values_list("id", flat=True))
 
