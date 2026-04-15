@@ -295,19 +295,11 @@ FIREBASE_CLIENT_ID = os.getenv("FIREBASE_CLIENT_ID")
 
 
 # --------- REDIS CHANNEL -------- 
-REDIS_URL = os.getenv("REDIS_URL")
-REDIS_SSL = os.getenv("REDIS_SSL", "False") == "True"
-
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [
-                {
-                    "address": REDIS_URL,
-                    "ssl": REDIS_SSL,
-                }
-            ],
+            "hosts": [os.getenv("REDIS_URL")],
         },
     },
 }
