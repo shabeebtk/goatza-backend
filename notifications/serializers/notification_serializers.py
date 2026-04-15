@@ -6,6 +6,8 @@ from notifications.models import Notification
 class NotificationSerializer(serializers.ModelSerializer):
     actor_name = serializers.SerializerMethodField()
     actor_avatar = serializers.SerializerMethodField()
+    actor_username = serializers.SerializerMethodField()
+    post_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Notification
@@ -14,6 +16,8 @@ class NotificationSerializer(serializers.ModelSerializer):
             "type",
             "actor_name",
             "actor_avatar",
+            "actor_username",
+            "post_id",
             "data",
             "is_read",
             "created_at",
@@ -26,9 +30,23 @@ class NotificationSerializer(serializers.ModelSerializer):
             return obj.actor_org.name
         return None
 
+    def get_actor_username(self, obj):
+        if obj.actor_user:
+            return obj.actor_user.username
+        # Orgs don't have usernames right now, but they might have ids or handles
+        if obj.actor_org:
+            return str(obj.actor_org.id)
+        return None
+
     def get_actor_avatar(self, obj):
         if obj.actor_user:
             return getattr(obj.actor_user.profile, "profile_photo", None)
         if obj.actor_org:
             return obj.actor_org.logo
         return None
+
+    def get_post_id(self, obj):
+        if obj.post:
+            return str(obj.post.id)
+        # fallback to data payload if needed
+        return obj.data.get("post_id", None)
