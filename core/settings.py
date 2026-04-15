@@ -30,12 +30,14 @@ ALLOWED_HOSTS = ["*"]
 
 INSTALLED_APPS = [
     # third party apps 
+    'daphne',
     'corsheaders',
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist', 
     'cloudinary',
-    'cloudinary_storage',
+    'cloudinary_storage', 
+    'channels', 
 
     # my apps 
     'accounts',
@@ -46,6 +48,7 @@ INSTALLED_APPS = [
     'feed',
     'shared',
     'notifications',
+    'messaging',
     
     # buildin apps 
     'django.contrib.admin',
@@ -85,7 +88,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'core.wsgi.application'
-
+ASGI_APPLICATION = "core.asgi.application"
 
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
@@ -289,3 +292,22 @@ FIREBASE_PRIVATE_KEY_ID = os.getenv("FIREBASE_PRIVATE_KEY_ID")
 FIREBASE_PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY")
 FIREBASE_CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL")
 FIREBASE_CLIENT_ID = os.getenv("FIREBASE_CLIENT_ID")
+
+
+# --------- REDIS CHANNEL -------- 
+REDIS_URL = os.getenv("REDIS_URL")
+REDIS_SSL = os.getenv("REDIS_SSL", "False") == "True"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [
+                {
+                    "address": REDIS_URL,
+                    "ssl": REDIS_SSL,
+                }
+            ],
+        },
+    },
+}
