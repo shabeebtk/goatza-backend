@@ -11,10 +11,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # CONNECT
     async def connect(self):
         self.user = self.scope["user"]
-        print(self.scope, '------')
-
-        print("SUBPROTOCOLS:", self.scope.get("subprotocols"))
-        print("USER:", self.scope.get("user"))
 
         # must be authenticated
         if not self.user or self.user.is_anonymous:
@@ -101,9 +97,29 @@ class ChatConsumer(AsyncWebsocketConsumer):
             conversation_id=self.conversation_id,
             user=self.user
         ).exists()
-
-        print("USER:", self.user.email)
-        print("CONVERSATION:", self.conversation_id)
         print("IS ALLOWED:", exists)
-
         return exists
+
+class UserNotificationsConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.user = self.scope.get("user")
+        if not self.user or self.user.is_anonymous:
+            await self.close()
+            return
+            
+        self.room_group_name = f"user_notifications_{self.user.id}"
+        await self.channel_layer.group_add(
+            self.room_group_name,
+            self.channel_name
+        )
+        await self.accept(subprotocol="access_token")
+
+    async def disconnect(self, close_code):
+        if hasattr(self, "room_group_name"):
+            await self.channel_layer.group_discard(
+                self.room_group_name,
+                self.channel_name
+            )
+
+    async def notification_message(self, event):
+        await self.send(text_data=json.dumps(event))

@@ -18,9 +18,9 @@ class GetOrCreateConversationAPIView(BaseAPIView):
         try:
             actor = request.actor
             actor_user = actor.user
-            target_user_id = request.data.get('target_user_id')
+            username = request.data.get('username')
 
-            target_user = UserService.get_user_by_id(target_user_id)
+            target_user = UserService.get_user_by_username(username)
 
             if not target_user:
                 return response_data(

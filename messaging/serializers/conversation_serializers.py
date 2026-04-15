@@ -47,12 +47,12 @@ class ConversationListSerializer(serializers.ModelSerializer):
         participant = obj.participants.filter(user=request_user).first()
 
         if not participant or not participant.last_read_at:
-            return 0
+            return obj.messages.filter(is_deleted=False).exclude(sender_user=request_user).count()
 
         return obj.messages.filter(
             created_at__gt=participant.last_read_at,
             is_deleted=False
-        ).count()
+        ).exclude(sender_user=request_user).count()
 
 
 
@@ -130,8 +130,8 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
         if not participant:
             return False
 
-        # must be accepted + active
-        return participant.has_accepted and obj.status == "active"
+        # must be accepted
+        return participant.has_accepted
 
 
     def get_last_read_at(self, obj):
@@ -148,18 +148,21 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
         participant = obj.participants.filter(user=request_user).first()
 
         if not participant or not participant.last_read_at:
-            return obj.messages.filter(is_deleted=False).count()
+            return obj.messages.filter(is_deleted=False).exclude(sender_user=request_user).count()
 
         return obj.messages.filter(
             created_at__gt=participant.last_read_at,
             is_deleted=False
-        ).count()
+        ).exclude(sender_user=request_user).count()
 
 
     def get_is_last_message_seen(self, obj):
         request_user = self.context["request"].user
 
         if not obj.last_message:
+            return True
+
+        if obj.last_message.sender_user == request_user:
             return True
 
         participant = obj.participants.filter(user=request_user).first()

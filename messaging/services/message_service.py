@@ -97,9 +97,11 @@ class MessageService:
     @staticmethod
     def _trigger_realtime(conversation, message):
         from channels.layers import get_channel_layer
+        from messaging.models import ConversationParticipant
 
         channel_layer = get_channel_layer()
 
+        # Chat room routing
         async_to_sync(channel_layer.group_send)(
             f"chat_{conversation.id}",
             {
@@ -110,6 +112,23 @@ class MessageService:
                 "created_at": message.created_at.isoformat(),
             }
         )
+
+        # Notify participants for conversation list update
+        # We also notify the sender so their list updates correctly on other devices
+        participants = ConversationParticipant.objects.filter(conversation=conversation)
+        for participant in participants:
+            user_id = participant.user_id if participant.user else None
+            org_id = participant.org_id if participant.org else None
+            recipient_id = user_id or org_id
+            if recipient_id:
+                async_to_sync(channel_layer.group_send)(
+                    f"user_notifications_{recipient_id}",
+                    {
+                        "type": "notification_message",
+                        "notification_type": "conversation_updated",
+                        "conversation_id": str(conversation.id),
+                    }
+                )
 
     # PUSH NOTIFICATION
     @staticmethod

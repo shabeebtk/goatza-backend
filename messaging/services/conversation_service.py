@@ -1,9 +1,10 @@
-from django.db import transaction
+from django.template.defaultfilters import default
+from django.db import transaction, IntegrityError
 from django.db.models import Q, Count
-
 from messaging.models import Conversation, ConversationParticipant
 from connections.services.follow_services import FollowService
 from django.utils import timezone
+
 
 class ConversationService:
 
@@ -87,6 +88,19 @@ class ConversationService:
 
         with transaction.atomic():
 
+            # GENERATE UNIVERSAL KEY
+            pair_key = ConversationService._generate_pair_key(
+                actor_user, actor_org, target_user, target_org
+            )
+
+            # LOCK + CHECK
+            existing = Conversation.objects.select_for_update().filter(
+                direct_pair_key=pair_key
+            ).first()
+
+            if existing:
+                return existing
+
             # CHECK RELATIONSHIP
             is_active = FollowService.is_mutual_follow(
                 actor_user, actor_org, target_user, target_org
@@ -98,33 +112,54 @@ class ConversationService:
                 else Conversation.Status.REQUESTED
             )
 
-            # CREATE CONVERSATION
-            conversation = Conversation.objects.create(
-                type=Conversation.Type.DIRECT,
-                status=status,
-                created_by_user=actor_user if actor_user else None,
-                created_by_org=actor_org if actor_org else None,
-            )
+            try:
+                conversation, created = Conversation.objects.get_or_create(
+                    type=Conversation.Type.DIRECT,
+                    direct_pair_key=pair_key,
+                    defaults={
+                        "status": status,
+                        "created_by_user": actor_user if actor_user else None,
+                        "created_by_org": actor_org if actor_org else None,
+                    }
+                )
+            except IntegrityError:
+                # RACE CONDITION SAFE
+                return Conversation.objects.get(direct_pair_key=pair_key)
 
-            # ADD PARTICIPANTS
-            ConversationService._create_participants(
-                conversation,
-                actor_user,
-                actor_org,
-                target_user,
-                target_org,
-                is_active
-            )
-
-            conversation.refresh_from_db()
-            count = ConversationParticipant.objects.filter(
-                conversation=conversation
-            ).count()
-
-            if conversation.type == Conversation.Type.DIRECT and count != 2:
-                raise Exception("Invalid direct conversation setup")
+            if created:
+                ConversationService._create_participants(
+                    conversation,
+                    actor_user,
+                    actor_org,
+                    target_user,
+                    target_org,
+                    is_active
+                )
 
             return conversation
+
+    @staticmethod
+    def _generate_pair_key(actor_user=None, actor_org=None, target_user=None, target_org=None):
+        """
+        Generates a unique, order-independent key for ANY direct conversation
+        """
+        def get_actor_key(user, org):
+            if user:
+                return f"user:{user.id}"
+            elif org:
+                return f"org:{org.id}"
+            return None
+
+        a1 = get_actor_key(actor_user, actor_org)
+        a2 = get_actor_key(target_user, target_org)
+
+        if not a1 or not a2:
+            raise Exception("Invalid actors for conversation")
+
+        # SORT to make it order independent
+        sorted_keys = sorted([a1, a2])
+
+        return f"{sorted_keys[0]}__{sorted_keys[1]}"
 
     # PARTICIPANTS
     @staticmethod

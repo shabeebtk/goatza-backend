@@ -24,6 +24,12 @@ class Conversation(BaseUUIDModel):
         choices=Type.choices,
         default=Type.DIRECT
     )
+    direct_pair_key = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        unique=True
+    )
 
     status = models.CharField(
         max_length=20,
