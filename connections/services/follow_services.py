@@ -230,3 +230,52 @@ class FollowService:
             "is_followed_by": is_followed_by,
             "is_connected": is_following and is_followed_by,
         }
+
+
+    # CHECK IS MUTUAL FOLLOW
+    @staticmethod
+    def is_mutual_follow(actor_user, actor_org, target_user, target_org):
+
+        # USER ↔ USER
+        if actor_user and target_user:
+            return (
+                Follow.objects.filter(
+                    follower_user=actor_user,
+                    following_user=target_user
+                ).exists()
+                and
+                Follow.objects.filter(
+                    follower_user=target_user,
+                    following_user=actor_user
+                ).exists()
+            )
+
+        # USER ↔ ORG
+        if actor_user and target_org:
+            return Follow.objects.filter(
+                follower_user=actor_user,
+                following_org=target_org
+            ).exists()
+
+        if actor_org and target_user:
+            return Follow.objects.filter(
+                follower_org=actor_org,
+                following_user=target_user
+            ).exists()
+
+
+        # ORG ↔ ORG
+        if actor_org and target_org:
+            return (
+                Follow.objects.filter(
+                    follower_org=actor_org,
+                    following_org=target_org
+                ).exists()
+                and
+                Follow.objects.filter(
+                    follower_org=target_org,
+                    following_org=actor_org
+                ).exists()
+            )
+
+        return False

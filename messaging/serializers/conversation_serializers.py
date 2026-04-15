@@ -1,0 +1,170 @@
+
+from rest_framework import serializers
+from messaging.models import Conversation, ConversationParticipant
+from accounts.serializers.user_serializers import UserMiniSerializer
+
+class ConversationListSerializer(serializers.ModelSerializer):
+
+    other_user = serializers.SerializerMethodField()
+    last_message = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Conversation
+        fields = [
+            "id",
+            "type",
+            "status",
+            "last_message",
+            "last_message_at",
+            "other_user",
+            "unread_count",
+        ]
+
+    # OTHER USER
+    def get_other_user(self, obj):
+        request_user = self.context["request"].user
+
+        participant = obj.participants.exclude(user=request_user).select_related("user__profile").first()
+
+        if participant and participant.user:
+            return UserMiniSerializer(participant.user).data
+
+        return None
+
+    # LAST MESSAGE
+    def get_last_message(self, obj):
+        if not obj.last_message:
+            return None
+
+        from messaging.serializers.message_serializers import MessageSerializer
+        return MessageSerializer(obj.last_message).data
+
+    # UNREAD COUNT
+    def get_unread_count(self, obj):
+        request_user = self.context["request"].user
+
+        participant = obj.participants.filter(user=request_user).first()
+
+        if not participant or not participant.last_read_at:
+            return 0
+
+        return obj.messages.filter(
+            created_at__gt=participant.last_read_at,
+            is_deleted=False
+        ).count()
+
+
+
+
+class ConversationDetailSerializer(serializers.ModelSerializer):
+
+    other_user = serializers.SerializerMethodField()
+    last_message = serializers.SerializerMethodField()
+    is_accepted = serializers.SerializerMethodField()
+    can_message = serializers.SerializerMethodField()
+
+    unread_count = serializers.SerializerMethodField()
+    last_read_at = serializers.SerializerMethodField()
+    is_last_message_seen = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Conversation
+        fields = [
+            "id",
+            "type",
+            "status",
+            "created_at",
+
+            "last_message",
+            "last_message_at",
+
+            "other_user",
+
+            "is_accepted",
+            "can_message",
+
+            "unread_count",
+            "last_read_at",
+            "is_last_message_seen",
+        ]
+
+    # OTHER USER
+    def get_other_user(self, obj):
+        request_user = self.context["request"].user
+
+        participant = (
+            obj.participants
+            .exclude(user=request_user)
+            .select_related("user__profile")
+            .first()
+        )
+
+        if participant and participant.user:
+            return UserMiniSerializer(participant.user).data
+
+        return None
+
+    # LAST MESSAGE
+    def get_last_message(self, obj):
+        if not obj.last_message:
+            return None
+
+        from messaging.serializers.message_serializers import MessageSerializer
+        return MessageSerializer(obj.last_message).data
+
+    # REQUEST ACCEPTED?
+    def get_is_accepted(self, obj):
+        request_user = self.context["request"].user
+
+        participant = obj.participants.filter(user=request_user).first()
+
+        return participant.has_accepted if participant else False
+
+    # CAN MESSAGE?
+    def get_can_message(self, obj):
+        request_user = self.context["request"].user
+
+        participant = obj.participants.filter(user=request_user).first()
+
+        if not participant:
+            return False
+
+        # must be accepted + active
+        return participant.has_accepted and obj.status == "active"
+
+
+    def get_last_read_at(self, obj):
+        request_user = self.context["request"].user
+
+        participant = obj.participants.filter(user=request_user).first()
+
+        return participant.last_read_at if participant else None
+
+
+    def get_unread_count(self, obj):
+        request_user = self.context["request"].user
+
+        participant = obj.participants.filter(user=request_user).first()
+
+        if not participant or not participant.last_read_at:
+            return obj.messages.filter(is_deleted=False).count()
+
+        return obj.messages.filter(
+            created_at__gt=participant.last_read_at,
+            is_deleted=False
+        ).count()
+
+
+    def get_is_last_message_seen(self, obj):
+        request_user = self.context["request"].user
+
+        if not obj.last_message:
+            return True
+
+        participant = obj.participants.filter(user=request_user).first()
+
+        if not participant or not participant.last_read_at:
+            return False
+
+        return obj.last_message.created_at <= participant.last_read_at
