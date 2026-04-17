@@ -13,6 +13,7 @@ from connections.models import Follow
 from posts.serializers.posts_serializers import PostListSerializer
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS
 from services.location.location_service import LocationService
+from posts.services.post_service import PostService
 
 logger = logging.getLogger(__name__)
 
@@ -426,3 +427,34 @@ class ListPostsAPIView(BaseAPIView):
                 error=str(e)
             )
         
+
+class DeletePost(BaseAPIView):
+
+    def delete(self, request):
+        try:
+            actor = request.actor
+            post_id = request.query_params.get('post_id')
+
+            if not post_id:
+                return response_data(
+                    success=False,
+                    error="post id is required"
+                )
+            is_deleted, _ = PostService.delete_post(
+                post_id=post_id,
+                actor=actor
+            )
+
+            print(is_deleted, '----')
+
+            return response_data(
+                success=True if is_deleted else False,
+                message="post deleted successfully" if is_deleted else "post not deleted",
+                status_code=200 if is_deleted else 400
+            )
+
+        except Exception as e:
+            return response_data(
+                success=False,
+                error=f"failed to delete due to server error str(e)"
+            )

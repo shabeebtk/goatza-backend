@@ -93,3 +93,11 @@ class CloudinaryService:
 
     def delete_file(self, public_id: str):
         cloudinary.uploader.destroy(public_id)
+
+
+    def delete_folder_data(self, folder_path: str):
+        """
+        Deletes all resources inside a folder using prefix
+        """
+        cloudinary.api.delete_resources_by_prefix(folder_path)
+        cloudinary.api.delete_folder(folder_path)
