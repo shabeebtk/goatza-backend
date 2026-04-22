@@ -24,8 +24,12 @@ class FeedAPIView(BaseAPIView):
             user = request.user
             seen_ids_param = request.query_params.get("seen_ids")
 
-            if not actor.is_user:
-                return response_data(False, "Feed only for users", status_code=400)
+            if not actor or (not actor.is_user and not actor.is_org):
+                return response_data(
+                    False,
+                    "Feed is only available for users and organizations",
+                    status_code=400
+                )
 
             seen_ids = []
             if seen_ids_param:
@@ -40,7 +44,7 @@ class FeedAPIView(BaseAPIView):
                     seen_ids = []
 
             # 1. GET FEED QUERYSET
-            queryset = FeedService.get_feed_queryset(user, seen_ids=seen_ids)
+            queryset = FeedService.get_feed_queryset(actor, seen_ids=seen_ids)
 
             # 2. PAGINATION
             paginator = FeedCursorPagination()
@@ -52,7 +56,7 @@ class FeedAPIView(BaseAPIView):
             post_ids = [p.id for p in paginated_posts]
 
             # 4. USER REACTIONS
-            user_reactions = FeedService.get_user_reactions(user, post_ids)
+            user_reactions = FeedService.get_actor_reactions(actor, post_ids)
 
             # 5. SERIALIZE
             serializer = PostListSerializer(

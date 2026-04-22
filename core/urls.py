@@ -26,4 +26,5 @@ urlpatterns = [
     path('feed/', include('feed.urls')),
     path('notifications/', include('notifications.urls')),
     path('conversations/', include('messaging.urls')),
+    path('organizations/', include('organization.urls')),
 ]

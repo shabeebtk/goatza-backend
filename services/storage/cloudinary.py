@@ -87,6 +87,42 @@ class CloudinaryService:
                 "temp_post_id": temp_post_id,  # ✅ only for posts
                 "uploads": uploads
             }
+        
+        elif upload_type in ['organization_logo', 'organization_cover']:
+            temp_post_id = str(uuid.uuid4())
+            folder = f"users/{user.id}/organizations/{temp_post_id}/{upload_type}"
+
+            file_uuid = str(uuid.uuid4())
+
+            params = {
+                "timestamp": timestamp,
+                "folder": folder,
+                "public_id": file_uuid,
+                "overwrite": "false",
+            }
+
+            signature = cloudinary.utils.api_sign_request(
+                params,
+                settings.CLOUDINARY_API_SECRET
+            )
+
+            uploads.append({
+                "upload_url": upload_url,
+                "api_key": settings.CLOUDINARY_API_KEY,
+                "cloud_name": settings.CLOUDINARY_CLOUD_NAME,
+                "timestamp": timestamp,
+                "signature": signature,
+                "folder": folder,
+                "public_id": file_uuid,
+                "overwrite": "false",
+            })
+
+            return {
+                "provider": "cloudinary",
+                "temp_post_id": temp_post_id, 
+                "uploads": uploads
+            }
+
 
         else:
             raise ValueError("Invalid upload type")
