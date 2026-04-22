@@ -1,13 +1,13 @@
-from rest_framework.views import APIView
+from core.views.base_views import BaseAPIView
 from rest_framework.permissions import IsAuthenticated
 from utils.response import response_data
 from services.storage.factory import get_storage_service
 
 
-class GetUploadConfigAPIView(APIView):
+class GetUploadConfigAPIView(BaseAPIView):
     permission_classes = [IsAuthenticated]
-
-    ALLOWED_TYPES = {"profile", "cover", "posts"}
+    # make sure this matches storage config
+    ALLOWED_TYPES = {"profile", "cover", "posts", "organization_logo", "organization_cover"} 
 
     def get(self, request):
         upload_type = request.query_params.get("type")

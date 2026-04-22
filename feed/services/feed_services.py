@@ -11,130 +11,163 @@ from posts.models import Post, Like
 from connections.models import Follow
 from sports.models import UserSport
 
+from organization.models import OrganizationSport
+
 
 class FeedService:
 
     MAX_POSTS_PER_AUTHOR = 3
 
     @staticmethod
-    def get_feed_queryset(user, seen_ids=None):
+    def get_feed_queryset(actor, seen_ids=None):
         """
-        Build optimized feed queryset with scoring
+        Build optimized feed queryset with scoring.
+        Supports both user and org actors.
         """
 
-        # 1. FOLLOWING USERS
-        following_users = Follow.objects.filter(
-            follower_user=user
-        ).values_list("following_user_id", flat=True)
+        # 1. RESOLVE FOLLOWING + INTERESTS based on actor type
+        if actor.is_user:
+            user = actor.user
 
-        # 2. USER SPORTS
-        user_sports = UserSport.objects.filter(
-            user=user
-        ).values_list("sport_id", flat=True)
+            following_user_ids = Follow.objects.filter(
+                follower_user=user
+            ).values_list("following_user_id", flat=True)
 
-        primary_sports = UserSport.objects.filter(
-            user=user,
-            is_primary=True
-        ).values_list("sport_id", flat=True)
+            following_org_ids = Follow.objects.filter(
+                follower_user=user
+            ).values_list("following_org_id", flat=True)
 
-        # 3. BASE QUERY + VISIBILITY
+            user_sport_ids = UserSport.objects.filter(
+                user=user
+            ).values_list("sport_id", flat=True)
+
+            primary_sport_ids = UserSport.objects.filter(
+                user=user, is_primary=True
+            ).values_list("sport_id", flat=True)
+
+        else:  # actor.is_org
+            org = actor.organization
+
+            following_user_ids = Follow.objects.filter(
+                follower_org=org
+            ).values_list("following_user_id", flat=True)
+
+            following_org_ids = Follow.objects.filter(
+                follower_org=org
+            ).values_list("following_org_id", flat=True)
+
+            # Use org's associated sports as interests
+            user_sport_ids = OrganizationSport.objects.filter(
+                organization=org
+            ).values_list("sport_id", flat=True)
+
+            primary_sport_ids = OrganizationSport.objects.filter(
+                organization=org, is_primary=True
+            ).values_list("sport_id", flat=True)
+
+        # 2. BASE QUERYSET + VISIBILITY FILTER
         queryset = Post.objects.filter(is_deleted=False)
 
+        # Public posts are always visible
         visibility_filter = Q(visibility=Post.Visibility.PUBLIC)
 
+        # Followers-only posts from followed users/orgs
         visibility_filter |= Q(
             visibility=Post.Visibility.FOLLOWERS,
-            author_user__in=following_users
+            author_user_id__in=following_user_ids
+        )
+        visibility_filter |= Q(
+            visibility=Post.Visibility.FOLLOWERS,
+            author_org_id__in=following_org_ids
         )
 
-        visibility_filter |= Q(author_user=user)
+        # Own posts are always visible
+        if actor.is_user:
+            visibility_filter |= Q(author_user=actor.user)
+        else:
+            visibility_filter |= Q(author_org=actor.organization)
 
         queryset = queryset.filter(visibility_filter)
 
         if seen_ids:
             queryset = queryset.exclude(id__in=seen_ids)
 
-        # 4. SCORING
+        # 3. SCORING
         queryset = queryset.annotate(
-
             follow_score=Case(
-                When(author_user__in=following_users, then=Value(6)),
+                When(author_user_id__in=following_user_ids, then=Value(6)),
+                When(author_org_id__in=following_org_ids, then=Value(6)),
                 default=Value(0),
                 output_field=FloatField()
             ),
-
             primary_interest_score=Case(
-                When(sport__in=primary_sports, then=Value(5)),
+                When(sport_id__in=primary_sport_ids, then=Value(5)),
                 default=Value(0),
                 output_field=FloatField()
             ),
-
             secondary_interest_score=Case(
-                When(sport__in=user_sports, then=Value(3)),
+                When(sport_id__in=user_sport_ids, then=Value(3)),
                 default=Value(0),
                 output_field=FloatField()
             ),
-
-            engagement_score=Ln(F("likes_count") + F("comments_count") + 1),
-
-            # simple recency boost
+            engagement_score=Ln(
+                F("likes_count") + F("comments_count") + 1
+            ),
             recency_boost=Case(
                 When(created_at__gte=now() - timedelta(hours=2), then=Value(5)),
                 When(created_at__gte=now() - timedelta(hours=24), then=Value(2)),
                 default=Value(0),
                 output_field=FloatField()
             )
-        )
-
-        queryset = queryset.annotate(
-            final_score=
-                F("follow_score") +
-                F("primary_interest_score") +
-                F("secondary_interest_score") +
-                F("engagement_score") * 2 +
-                F("recency_boost")
+        ).annotate(
+            final_score=(
+                F("follow_score")
+                + F("primary_interest_score")
+                + F("secondary_interest_score")
+                + F("engagement_score") * 2
+                + F("recency_boost")
+            )
         ).order_by("-final_score", "-created_at")
 
         return queryset.select_related(
             "author_user__profile",
-            "author_org",
+            "author_org__profile",   # org feed needs org profile too
             "sport"
         ).prefetch_related("media")
 
-
     # REACTIONS HELPER
     @staticmethod
-    def get_user_reactions(user, post_ids):
-        reactions = Like.objects.filter(
-            user=user,
-            post_id__in=post_ids
-        ).values("post_id", "type")
+    def get_actor_reactions(actor, post_ids):
+        """
+        Fetch reactions for the current actor (user or org).
+        """
+        if actor.is_user:
+            reactions = Like.objects.filter(
+                user=actor.user,
+                post_id__in=post_ids
+            ).values("post_id", "type")
+        else:
+            reactions = Like.objects.filter(
+                organization=actor.organization,
+                post_id__in=post_ids
+            ).values("post_id", "type")
 
-        return {
-            r["post_id"]: r["type"]
-            for r in reactions
-        }
-
-
+        return {r["post_id"]: r["type"] for r in reactions}
 
     @staticmethod
     def diversify_posts(posts):
-        """
-        Interleave posts from different authors
-        """
+        """Interleave posts so no single author dominates the feed."""
         author_buckets = defaultdict(deque)
-
         for post in posts:
             author_id = post.author_user_id or f"org_{post.author_org_id}"
             author_buckets[author_id].append(post)
 
         diversified = []
-
         while author_buckets:
             for author_id in list(author_buckets.keys()):
                 if author_buckets[author_id]:
                     diversified.append(author_buckets[author_id].popleft())
                 if not author_buckets[author_id]:
                     del author_buckets[author_id]
-
         return diversified
+

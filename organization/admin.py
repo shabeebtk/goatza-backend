@@ -1,10 +1,32 @@
 from django.contrib import admin
-from .models import Organization, OrganizationMember, OrganizationSport
+from .models import (
+    Organization,
+    OrganizationProfile,
+    OrganizationMember,
+    OrganizationSport,
+    OrganizationLocation,
+)
 
 
-# =========================
-# 🔹 INLINE: MEMBERS
-# =========================
+class OrganizationProfileInline(admin.StackedInline):
+    model = OrganizationProfile
+    can_delete = False
+    extra = 0
+
+    fields = (
+        "logo",
+        "cover_image",
+        "description",
+        "website",
+        "level",
+        "followers_count",
+        "posts_count",
+    )
+
+    readonly_fields = ("followers_count", "posts_count")
+
+
+
 class OrganizationMemberInline(admin.TabularInline):
     model = OrganizationMember
     extra = 0
@@ -13,9 +35,6 @@ class OrganizationMemberInline(admin.TabularInline):
     readonly_fields = ("created_at",)
 
 
-# =========================
-# 🔹 INLINE: SPORTS
-# =========================
 class OrganizationSportInline(admin.TabularInline):
     model = OrganizationSport
     extra = 0
@@ -23,16 +42,28 @@ class OrganizationSportInline(admin.TabularInline):
     fields = ("sport", "is_primary")
 
 
-# =========================
-# 🔹 ORGANIZATION ADMIN
-# =========================
+class OrganizationLocationInline(admin.TabularInline):
+    model = OrganizationLocation
+    extra = 0
+
+    fields = (
+        "name",
+        "city",
+        "country_code",
+        "is_primary",
+        "latitude",
+        "longitude",
+    )
+
+
+
 @admin.register(Organization)
 class OrganizationAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "name",
+        "username",
         "type",
-        "level",
         "created_by",
         "is_verified",
         "is_active",
@@ -41,7 +72,6 @@ class OrganizationAdmin(admin.ModelAdmin):
 
     list_filter = (
         "type",
-        "level",
         "is_verified",
         "is_active",
         "created_at",
@@ -49,12 +79,10 @@ class OrganizationAdmin(admin.ModelAdmin):
 
     search_fields = (
         "name",
-        "slug",
+        "username",
         "created_by__username",
         "created_by__email",
     )
-
-    prepopulated_fields = {"slug": ("name",)}
 
     autocomplete_fields = ("created_by",)
 
@@ -65,19 +93,15 @@ class OrganizationAdmin(admin.ModelAdmin):
     list_select_related = ("created_by",)
 
     inlines = [
+        OrganizationProfileInline,
         OrganizationMemberInline,
         OrganizationSportInline,
+        OrganizationLocationInline,
     ]
 
     fieldsets = (
         ("Basic Info", {
-            "fields": ("name", "slug", "type", "level")
-        }),
-        ("Media", {
-            "fields": ("logo", "cover_image")
-        }),
-        ("Details", {
-            "fields": ("description", "website")
+            "fields": ("name", "username", "type")
         }),
         ("Status", {
             "fields": ("is_verified", "is_active")
@@ -88,9 +112,22 @@ class OrganizationAdmin(admin.ModelAdmin):
     )
 
 
-# =========================
-# 🔹 ORGANIZATION MEMBER ADMIN
-# =========================
+
+
+@admin.register(OrganizationProfile)
+class OrganizationProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        "organization",
+        "level",
+        "followers_count",
+        "posts_count",
+    )
+
+    search_fields = ("organization__name",)
+
+    list_select_related = ("organization",)
+
+
 @admin.register(OrganizationMember)
 class OrganizationMemberAdmin(admin.ModelAdmin):
     list_display = (
@@ -121,9 +158,7 @@ class OrganizationMemberAdmin(admin.ModelAdmin):
     ordering = ("-created_at",)
 
 
-# =========================
-# 🔹 ORGANIZATION SPORT ADMIN
-# =========================
+
 @admin.register(OrganizationSport)
 class OrganizationSportAdmin(admin.ModelAdmin):
     list_display = (

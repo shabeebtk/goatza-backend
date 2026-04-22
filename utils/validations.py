@@ -1,5 +1,7 @@
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
+import uuid
+
 
 def is_valid_email(email: str) -> bool:
     """
@@ -59,3 +61,12 @@ def validate_username_format(username: str):
         raise ValueError("Username cannot contain consecutive underscores")
 
     return username
+
+
+
+def is_valid_uuid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
