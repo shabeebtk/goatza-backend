@@ -101,11 +101,11 @@ class OrganizationService:
                     organization=org,
                     name=location.get("name", ""),
                     address=location.get("address", ""),
-                    city=data.get("city", ""),
-                    state=data.get("state", ""),
-                    country_code=data.get("country_code", ""),
-                    latitude=data.get("latitude"),
-                    longitude=data.get("longitude"),
+                    city=location.get("city", ""),
+                    state=location.get("state", ""),
+                    country_code=location.get("country_code", ""),
+                    latitude=location.get("latitude"),
+                    longitude=location.get("longitude"),
                     is_primary=True
                 )
 

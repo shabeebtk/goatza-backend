@@ -76,15 +76,15 @@ class OrganizationProfile(BaseUUIDModel):
         related_name="profile"
     )
 
-    logo = models.URLField(blank=True)
+    logo = models.URLField(max_length=500, blank=True)
     logo_public_id = models.CharField(max_length=255, blank=True)
 
-    cover_image = models.URLField(blank=True)
+    cover_image = models.URLField(max_length=500, blank=True)
     cover_image_public_id = models.CharField(max_length=255, blank=True)
 
     headline = models.CharField(max_length=150, blank=True)
     description = models.TextField(blank=True)
-    website = models.URLField(blank=True)
+    website = models.URLField(max_length=500, blank=True)
 
     level = models.CharField(
         max_length=20,

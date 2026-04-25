@@ -3,7 +3,6 @@ from urllib.parse import urlparse
 from django.conf import settings
 from typing import Iterable, Optional
 
-
 # 🔹 Default sets (reusable anywhere)
 DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 DEFAULT_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "webm"}
