@@ -40,8 +40,20 @@ def validate_file_extension(
     return ext
 
 
-def validate_public_id(user, public_id: str):
-    expected_prefix = f"users/{user.id}/"
+def validate_public_id(
+    user,
+    public_id: str,
+    org=None   # optional
+):
+    """
+    If org passed -> validate organization path
+    Else -> validate user path
+    """
+
+    if org:
+        expected_prefix = f"organizations/{org.id}/"
+    else:
+        expected_prefix = f"users/{user.id}/"
 
     if not public_id.startswith(expected_prefix):
         raise ValueError("Invalid public_id path")
@@ -52,27 +64,47 @@ def validate_media(
     url: str,
     public_id: str,
     *,
+    org=None,   # optional
     allowed_extensions: Optional[Iterable[str]] = None,
     strict: bool = True
 ):
     """
-    Generic validator (reusable for images, videos, docs)
+    Generic validator (users + organizations)
 
-    Params:
-    - allowed_extensions → {"jpg", "png"} etc.
-    - strict → if False, skip extension validation
+    Examples:
+
+    User:
+    validate_media(
+        user=request.user,
+        url=...,
+        public_id=...
+    )
+
+    Org:
+    validate_media(
+        user=request.user,
+        org=request.actor.organization,
+        url=...,
+        public_id=...
+    )
     """
 
+    # source check
     if not is_valid_cloudinary_url(url):
         raise ValueError("Invalid media source")
 
-    # Extension validation
+    # extension check
     if strict:
         validate_file_extension(url, allowed_extensions)
 
-    # Public ID validation
-    validate_public_id(user, public_id)
+    # path ownership check
+    validate_public_id(
+        user=user,
+        public_id=public_id,
+        org=org
+    )
 
+    # compare extracted public id from URL
     extracted = extract_public_id_from_url(url)
 
     if extracted != public_id:

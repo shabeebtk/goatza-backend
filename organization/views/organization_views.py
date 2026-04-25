@@ -216,11 +216,13 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
                 update_fields += ["cover_image", "cover_image_public_id"]
 
             # UPDATE LOGO
+                        # UPDATE LOGO
             if "logo" in data:
                 validate_media(
-                    request.user,
-                    data["logo"],
-                    data["logo_public_id"],
+                    user=request.user,
+                    org=request.actor.organization,   # NEW
+                    url=data["logo"],
+                    public_id=data["logo_public_id"],
                     allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
                 )
 
@@ -229,12 +231,14 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
 
                 update_fields += ["logo", "logo_public_id"]
 
+
             # UPDATE COVER
             if "cover_image" in data:
                 validate_media(
-                    request.user,
-                    data["cover_image"],
-                    data["cover_image_public_id"],
+                    user=request.user,
+                    org=request.actor.organization,   # NEW
+                    url=data["cover_image"],
+                    public_id=data["cover_image_public_id"],
                     allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
                 )
 
