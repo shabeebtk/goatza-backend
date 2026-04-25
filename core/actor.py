@@ -1,5 +1,6 @@
 from rest_framework.exceptions import PermissionDenied
 from organization.models import OrganizationMember
+from utils.validations import is_valid_uuid
 
 class Actor:
     def __init__(self, actor_type, user=None, organization=None):
@@ -27,9 +28,10 @@ def resolve_actor(request):
     if actor_type == "user":
         return Actor(actor_type="user", user=user)
 
+
     if actor_type == "organization":
-        if not org_id:
-            raise PermissionDenied("Organization ID required")
+        if not org_id or not is_valid_uuid(org_id):
+            raise PermissionDenied("Organization ID Not found or Invalid")
 
         membership = OrganizationMember.objects.filter(
             user=user,

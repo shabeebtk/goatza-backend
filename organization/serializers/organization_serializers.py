@@ -203,3 +203,29 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
     def get_posts_count(self, obj):
         profile = self._profile(obj)
         return profile.posts_count if profile else 0
+    
+
+# ---------------------------------------------- 
+# media update 
+class UpdateOrganizationMediaSerializer(serializers.Serializer):
+    logo = serializers.URLField(required=False)
+    logo_public_id = serializers.CharField(required=False)
+
+    cover_image = serializers.URLField(required=False)
+    cover_image_public_id = serializers.CharField(required=False)
+
+    is_delete_logo = serializers.BooleanField(required=False, default=False)
+    is_delete_cover = serializers.BooleanField(required=False, default=False)
+
+    def validate(self, data):
+        if not data:
+            raise serializers.ValidationError("No data provided")
+
+        # pair validation
+        if "logo" in data and "logo_public_id" not in data:
+            raise serializers.ValidationError("logo_public_id required")
+
+        if "cover_image" in data and "cover_image_public_id" not in data:
+            raise serializers.ValidationError("cover_image_public_id required")
+
+        return data

@@ -55,7 +55,8 @@ class UserSignupAPIView(APIView):
                 user = User.objects.create_user(
                     email=email,
                     username=username,
-                    password=password
+                    password=password,
+                    is_active=False
                 )
 
                 UserProfile.objects.create(user=user, name=name)
@@ -111,6 +112,7 @@ class VerifySignupOTPAPIView(APIView):
             return response_data(False, "Invalid or expired OTP", status_code=400)
 
         user.is_email_verified = True
+        user.is_active = True
         user.save()
 
         refresh = RefreshToken.for_user(user)
