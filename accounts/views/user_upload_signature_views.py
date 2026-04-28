@@ -2,7 +2,8 @@ from core.views.base_views import BaseAPIView
 from rest_framework.permissions import IsAuthenticated
 from utils.response import response_data
 from services.storage.factory import get_storage_service
-
+from organization.models import Organization
+from organization.services.organization_member_service import OrganizationMemberService
 
 class GetUploadConfigAPIView(BaseAPIView):
     """
@@ -25,6 +26,7 @@ class GetUploadConfigAPIView(BaseAPIView):
         try:
             upload_type = request.query_params.get("type")
             count = int(request.query_params.get("count", 1))
+            org_id = request.query_params.get("org_id")
 
             if upload_type not in self.ALLOWED_TYPES:
                 return response_data(
@@ -41,6 +43,26 @@ class GetUploadConfigAPIView(BaseAPIView):
                 )
 
             actor = self.actor
+            user = request.user
+            if org_id:
+                try:
+                    org = Organization.objects.select_related("profile").get(id=org_id)
+                    if not OrganizationMemberService.is_organization_member(org, user):
+                        return response_data(
+                            success=False,
+                            message="not an organization member",
+                            status_code=400
+                        )
+                    
+                    actor.organization = org
+                    actor.actor_type = "organization"
+
+                except Organization.DoesNotExist:
+                    return response_data(
+                        success=False,
+                        message="Organization not found",
+                        status_code=404
+                    )
 
             # -----------------------------------
             # Prevent wrong actor usage
