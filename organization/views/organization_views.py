@@ -3,17 +3,19 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework import serializers
 from core.views.base_views import BaseAPIView
+from django.db import transaction
 from organization.models import Organization
 from organization.services.organization_service import OrganizationService
 from organization.serializers.organization_serializers import (
     OrganizationCreateSerializer, OrganizationMiniSerializer, OrganizationFullSerializer, 
     UpdateOrganizationMediaSerializer
 )
+from organization.serializers.update_organization_serializer import UpdateOrganizationSerializer
 from utils.response import response_data
 from utils.validations import is_valid_uuid
 from services.storage.factory import get_storage_service
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
-
+from organization.services.organization_member_service import OrganizationMemberService
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,6 @@ class CreateOrganizationAPIView(APIView):
                 status_code=500,
                 error=str(e)
             )
-
 
 
 
@@ -168,14 +169,20 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
     def post(self, request):
         try:
             actor = request.actor
-            if not actor.is_org:
-                return response_data(
-                    success=False,
-                    error="organization request only",
-                    status_code=400
-                )
+            user = request.user 
+           
         
-            org_id = actor.organization.id
+            org_id = request.query_params.get('org_id')
+            if not org_id:
+                if not actor.is_org:
+                    return response_data(
+                        success=False,
+                        error="organization request only",
+                        status_code=400
+                    )
+                
+                org_id = actor.organization.id
+
 
             serializer = UpdateOrganizationMediaSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
@@ -183,6 +190,14 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
 
             try:
                 org = Organization.objects.select_related("profile").get(id=org_id)
+                
+                if not OrganizationMemberService.is_organization_member(org, user):
+                    return response_data(
+                        success=False,
+                        message="not a organization member",
+                        status_code=400
+                    )
+
             except Organization.DoesNotExist:
                 return response_data(
                     success=False,
@@ -276,3 +291,122 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
                 message=f"Failed to update media: {str(e)}",
                 status_code=500
             )
+
+
+
+class UpdateOrganizationAPIView(BaseAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        TAG = "[ORG UPDATE]"
+        actor = request.actor
+        user = request.user 
+
+        org_id = request.query_params.get('org_id')
+        if not org_id:
+            if not actor.is_org:
+                return response_data(
+                    success=False,
+                    error="organization request only or provide org_id",
+                    status_code=400
+                )
+            org_id = actor.organization.id
+
+        logger.info(f"{TAG} User={user.id} updating Org={org_id}")
+
+        try:
+            org = Organization.objects.select_related("profile").get(id=org_id)
+            
+            if not OrganizationMemberService.is_organization_member(org, user):
+                return response_data(
+                    success=False,
+                    message="not a organization member",
+                    status_code=403
+                )
+        except Organization.DoesNotExist:
+            return response_data(
+                success=False,
+                message="Organization not found",
+                status_code=404
+            )
+
+        try:
+            serializer = UpdateOrganizationSerializer(
+                data=request.data,
+                context={"request": request, "org_id": org_id}
+            )
+            serializer.is_valid(raise_exception=True)
+
+            data = serializer.validated_data
+            profile = org.profile
+
+            org_fields = []
+            profile_fields = []
+
+            logger.debug(f"{TAG} Payload={data}")
+
+            # ORGANIZATION FIELDS
+            if "name" in data:
+                org.name = data["name"]
+                org_fields.append("name")
+
+            if "username" in data:
+                old_username = org.username
+                org.username = data["username"]
+                org_fields.append("username")
+                logger.info(f"{TAG} Username changed: {old_username} -> {data['username']}")
+
+            if "type" in data:
+                org.type = data["type"]
+                org_fields.append("type")
+
+            # PROFILE FIELDS
+            profile_mapping = ["headline", "description", "website", "level"]
+
+            for field in profile_mapping:
+                if field in data:
+                    old_value = getattr(profile, field)
+                    new_value = data[field]
+                    setattr(profile, field, new_value)
+                    profile_fields.append(field)
+                    logger.debug(f"{TAG} {field}: {old_value} -> {new_value}")
+
+            # ATOMIC SAVE
+            with transaction.atomic():
+                if org_fields:
+                    org.save(update_fields=org_fields + ["updated_at"])
+
+                if profile_fields:
+                    profile.save(update_fields=profile_fields + ["updated_at"])
+
+            updated_fields = org_fields + profile_fields
+            logger.info(f"{TAG} Success org={org.id}, fields={updated_fields}")
+
+            # Return full updated org
+            org_fresh = OrganizationService.get_organization_by_id(org.id)
+            response_serializer = OrganizationFullSerializer(org_fresh)
+
+            return response_data(
+                success=True,
+                message="Organization updated successfully",
+                data=response_serializer.data
+            )
+
+        except serializers.ValidationError as e:
+            logger.warning(f"{TAG} Validation failed org={org_id}, error={e.detail}")
+            return response_data(
+                success=False,
+                message="Validation failed",
+                data=e.detail,
+                status_code=400
+            )
+
+        except Exception as e:
+            logger.exception(f"{TAG} Unexpected error org={org_id}")
+            return response_data(
+                success=False,
+                message="Failed to update organization",
+                error=str(e),
+                status_code=500
+            )
+
