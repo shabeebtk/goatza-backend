@@ -55,8 +55,8 @@ class NotificationGroupingService:
             return {
                 "id": str(notification.actor_org.id),
                 "name": notification.actor_org.name,
-                "username": str(notification.actor_org.id), # orgs fallback or implement handle later
-                "avatar": notification.actor_org.logo
+                "username": str(notification.actor_org.username), 
+                "avatar": getattr(notification.actor_org.profile, "logo", None)
             }
 
         return None

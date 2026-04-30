@@ -172,20 +172,32 @@ class OrganizationService:
     
 
     @staticmethod
-    def get_organization_by_id(org_id):
+    def get_organization(id=None, username=None):
         """
-        Return single organization by id
+        Fetch organization by id OR username
+
+        Args:
+            id: UUID (organization_id)
+            username: str
+
+        Returns:
+            Organization instance or None
         """
-        return (
+
+        queryset = (
             Organization.objects
-            .filter(
-                id=org_id,
-                is_active=True
-            )
+            .filter(is_active=True)
             .select_related("profile")
             .prefetch_related(
                 "locations",
                 "sports__sport"
             )
-            .first()
         )
+
+        if id:
+            return queryset.filter(id=id).first()
+
+        if username:
+            return queryset.filter(username=username).first()
+
+        return None

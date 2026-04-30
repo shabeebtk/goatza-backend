@@ -99,26 +99,50 @@ class ListUserOrganizationsAPIView(APIView):
             )
         
 
-
 class OrganizationsDetailsAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         try:
             view_type = request.GET.get("type", "mini").lower()
-            organization_id = request.query_params.get('organization_id')
+            organization_id = request.query_params.get("organization_id")
+            org_username = request.query_params.get("username")
 
-            if not organization_id or not is_valid_uuid(organization_id):
+            # -------------------------
+            # VALIDATION
+            # -------------------------
+            if not organization_id and not org_username:
                 return response_data(
                     success=False,
-                    error="organization id is required",
+                    error="organization_id or username is required",
                     status_code=400
                 )
 
-            organization = OrganizationService.get_organization_by_id(
-                organization_id
+            if organization_id and not is_valid_uuid(organization_id):
+                return response_data(
+                    success=False,
+                    error="Invalid organization_id",
+                    status_code=400
+                )
+
+            # -------------------------
+            # FETCH
+            # -------------------------
+            organization = OrganizationService.get_organization(
+                id=organization_id,
+                username=org_username
             )
 
+            if not organization:
+                return response_data(
+                    success=False,
+                    error="Organization not found",
+                    status_code=404
+                )
+
+            # -------------------------
+            # SERIALIZE
+            # -------------------------
             if view_type == "all":
                 serializer = OrganizationFullSerializer(organization)
             else:
@@ -126,23 +150,22 @@ class OrganizationsDetailsAPIView(APIView):
 
             return response_data(
                 success=True,
-                message="Organizations fetched successfully",
+                message="Organization fetched successfully",
                 data=serializer.data,
                 status_code=200
             )
 
         except Exception as e:
             logger.error(
-                f"UserOrganizationsAPIView error user={request.user.id}: {str(e)}"
+                f"OrganizationsDetailsAPIView error user={request.user.id}: {str(e)}"
             )
 
             return response_data(
                 success=False,
-                message="Failed to fetch organizations",
+                message="Failed to fetch organization",
                 status_code=500,
                 error=str(e)
             )
-        
 
 
 
@@ -383,7 +406,7 @@ class UpdateOrganizationAPIView(BaseAPIView):
             logger.info(f"{TAG} Success org={org.id}, fields={updated_fields}")
 
             # Return full updated org
-            org_fresh = OrganizationService.get_organization_by_id(org.id)
+            org_fresh = OrganizationService.get_organization(id=org.id)
             response_serializer = OrganizationFullSerializer(org_fresh)
 
             return response_data(
