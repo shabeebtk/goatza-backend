@@ -10,10 +10,14 @@ from posts.models import Post, PostMedia, Like, Comment
 from sports.models import Sport
 from utils.response import response_data
 from connections.models import Follow
+from core.constant import TYPE_USER
 from posts.serializers.posts_serializers import PostListSerializer
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS
 from services.location.location_service import LocationService
 from posts.services.post_service import PostService
+from organization.services.user_organization_services import UserOrganizationService
+from connections.services.follow_services import FollowService
+
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +255,6 @@ class CreatePostAPIView(BaseAPIView):
 
 
 
-
 class ListPostsAPIView(BaseAPIView):
 
     def get(self, request):
@@ -262,93 +265,73 @@ class ListPostsAPIView(BaseAPIView):
 
             post_id = request.query_params.get("post_id")
             username = request.query_params.get("username")
-            user_id = request.query_params.get("user_id")
-            org_id = request.query_params.get("org_id")
             sport_id = request.query_params.get("sport_id")
 
-            limit = int(request.query_params.get("limit", 10))
-            offset = int(request.query_params.get("offset", 0))
-
-            limit = min(limit, 50)
-            offset = max(offset, 0)
+            limit = min(int(request.query_params.get("limit", 10)), 50)
+            offset = max(int(request.query_params.get("offset", 0)), 0)
 
             # -------------------------
             # VALIDATION
             # -------------------------
-            if not username and not user_id and not org_id and not post_id:
-                return response_data(False, "username or user_id or org_id is required", status_code=400)
-
-            if (username and org_id) or (user_id and org_id):
-                return response_data(False, "Provide either user or org", status_code=400)
-            
-            if username:
-                user = User.objects.only("id").filter(username=username).first()
-                if not user:
-                    return response_data(False, "User not found", status_code=404)
-                user_id = user.id
+            if not username and not post_id:
+                return response_data(False, "username or post_id is required", status_code=400)
 
             # -------------------------
             # BASE QUERY
             # -------------------------
+            queryset = Post.objects.filter(is_deleted=False)
+
             if post_id:
-                queryset = Post.objects.filter(id=post_id, is_deleted=False)
-            else:
-                queryset = Post.objects.filter(is_deleted=False)
+                queryset = queryset.filter(id=post_id)
 
-            if user_id:
-                queryset = queryset.filter(author_user_id=user_id)
+            profile = None
 
-            if org_id:
-                queryset = queryset.filter(author_org_id=org_id)
+            # -------------------------
+            # PROFILE RESOLUTION
+            # -------------------------
+            if username:
+                try:
+                    profile = UserOrganizationService.get_user_or_org_by_username(username)
+                except ValueError as e:
+                    return response_data(False, str(e), status_code=404)
+
+                if profile["type"] == TYPE_USER:
+                    queryset = queryset.filter(author_user_id=profile["id"])
+                else:
+                    queryset = queryset.filter(author_org_id=profile["id"])
 
             if sport_id:
                 queryset = queryset.filter(sport_id=sport_id)
 
             # -------------------------
-            # VISIBILITY
+            # VISIBILITY 
             # -------------------------
-            is_following_user = False
-            is_following_org = False
-
-            if user_id:
-                if actor.is_user:
-                    is_following_user = Follow.objects.filter(
-                        follower_user=actor.user,
-                        following_user_id=user_id
-                    ).exists()
-                else:
-                    is_following_user = Follow.objects.filter(
-                        follower_org=actor.organization,
-                        following_user_id=user_id
-                    ).exists()
-
-            if org_id:
-                if actor.is_user:
-                    is_following_org = Follow.objects.filter(
-                        follower_user=actor.user,
-                        following_org_id=org_id
-                    ).exists()
-                else:
-                    is_following_org = Follow.objects.filter(
-                        follower_org=actor.organization,
-                        following_org_id=org_id
-                    ).exists()
-
             visibility_filter = Q(visibility=Post.Visibility.PUBLIC)
 
-            if user_id and is_following_user:
-                visibility_filter |= Q(
-                    visibility=Post.Visibility.FOLLOWERS,
-                    author_user_id=user_id
-                )
+            # Get following ids once 
+            following_ids = FollowService.get_following_ids(actor)  # :contentReference[oaicite:0]{index=0}
 
-            if org_id and is_following_org:
-                visibility_filter |= Q(
-                    visibility=Post.Visibility.FOLLOWERS,
-                    author_org_id=org_id
-                )
+            # Target-specific visibility
+            if profile:
+                if profile["type"] == TYPE_USER:
+                    is_following = profile["id"] in following_ids["user_ids"]
 
-            # own posts always visible
+                    if is_following:
+                        visibility_filter |= Q(
+                            visibility=Post.Visibility.FOLLOWERS,
+                            author_user_id=profile["id"]
+                        )
+
+                else:
+                    is_following = profile["id"] in following_ids["org_ids"]
+
+                    if is_following:
+                        visibility_filter |= Q(
+                            visibility=Post.Visibility.FOLLOWERS,
+                            author_org_id=profile["id"]
+                        )
+
+            # Own posts always visible
             if actor.is_user:
                 visibility_filter |= Q(author_user=actor.user)
             else:
@@ -373,7 +356,6 @@ class ListPostsAPIView(BaseAPIView):
             # USER REACTIONS
             # -------------------------
             post_ids = list(queryset.values_list("id", flat=True))
-
             user_reactions = {}
 
             if actor.is_user:
@@ -382,23 +364,20 @@ class ListPostsAPIView(BaseAPIView):
                     post_id__in=post_ids
                 ).values("post_id", "type")
 
-                user_reactions = {
-                    r["post_id"]: r["type"]
-                    for r in reactions
-                }
-
-            elif actor.is_org:
+            else:
                 reactions = Like.objects.filter(
                     organization=actor.organization,
                     post_id__in=post_ids
                 ).values("post_id", "type")
 
-                user_reactions = {
-                    r["post_id"]: r["type"]
-                    for r in reactions
-                }
+            user_reactions = {
+                r["post_id"]: r["type"]
+                for r in reactions
+            }
 
+            # -------------------------
             # SERIALIZE
+            # -------------------------
             serializer = PostListSerializer(
                 queryset,
                 many=True,
@@ -426,7 +405,9 @@ class ListPostsAPIView(BaseAPIView):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 error=str(e)
             )
-        
+
+
+
 
 class DeletePost(BaseAPIView):
 

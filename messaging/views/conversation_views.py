@@ -88,14 +88,12 @@ class ConversationListAPIView(BaseAPIView):
 
             if filter_type == "requested":
                 queryset = queryset.filter(
-                    status=Conversation.Status.REQUESTED,
                     participants__user=user,
                     participants__has_accepted=False
                 )
 
             elif filter_type == "active":
                 queryset = queryset.filter(
-                    status=Conversation.Status.ACTIVE,
                     participants__user=user,
                     participants__has_accepted=True
                 )
