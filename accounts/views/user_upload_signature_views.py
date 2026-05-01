@@ -44,7 +44,7 @@ class GetUploadConfigAPIView(BaseAPIView):
 
             actor = self.actor
             user = request.user
-            if org_id:
+            if org_id: # for user want to access org directly
                 try:
                     org = Organization.objects.select_related("profile").get(id=org_id)
                     if not OrganizationMemberService.is_organization_member(org, user):
@@ -67,7 +67,7 @@ class GetUploadConfigAPIView(BaseAPIView):
             # -----------------------------------
             # Prevent wrong actor usage
             # -----------------------------------
-            if upload_type in {"profile", "cover", "posts"} and not actor.is_user:
+            if upload_type in {"profile", "cover"} and not actor.is_user:
                 return response_data(
                     False,
                     error="Switch to personal account for this upload",
