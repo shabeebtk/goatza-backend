@@ -33,17 +33,19 @@ class NotificationSerializer(serializers.ModelSerializer):
     def get_actor_username(self, obj):
         if obj.actor_user:
             return obj.actor_user.username
-        # Orgs don't have usernames right now, but they might have ids or handles
+        
         if obj.actor_org:
-            return str(obj.actor_org.id)
+            return str(obj.actor_org.username)
         return None
 
     def get_actor_avatar(self, obj):
         if obj.actor_user:
             return getattr(obj.actor_user.profile, "profile_photo", None)
+
         if obj.actor_org:
-            return obj.actor_org.logo
+            return getattr(obj.actor_org.profile, "logo", None)  
         return None
+    
 
     def get_post_id(self, obj):
         if obj.post:

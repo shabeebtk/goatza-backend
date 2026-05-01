@@ -16,7 +16,6 @@ class NotificationListAPIView(BaseAPIView):
 
         try:
             actor = request.actor
-            user = request.user
 
             # ----------------------------------------
             # VALIDATION
@@ -39,6 +38,7 @@ class NotificationListAPIView(BaseAPIView):
                 )
                 .select_related(
                     "actor_user__profile",
+                    "actor_org__profile",
                     "actor_org",
                     "post",
                     "comment"
