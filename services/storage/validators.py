@@ -55,6 +55,8 @@ def validate_public_id(
     else:
         expected_prefix = f"users/{user.id}/"
 
+    
+
     if not public_id.startswith(expected_prefix):
         raise ValueError("Invalid public_id path")
 

@@ -90,13 +90,15 @@ class PostMiniSerializer(serializers.ModelSerializer):
 
     def get_author(self, obj):
         if obj.author_user:
-            return UserMiniSerializer(obj.author_user).data
-        return {
-            "id": str(obj.author_org.id),
-            "name": obj.author_org.name,
-            "logo": obj.author_org.logo
-        }
+            data = UserMiniSerializer(obj.author_user).data
+            data["type"] = "user"
+            return data
 
+        data = OrganizationMiniSerializer(obj.author_org).data
+        data["type"] = "organization"
+        return data
+    
+    
     def get_media(self, obj):
         """
         Return only first media (for notification preview)

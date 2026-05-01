@@ -48,11 +48,17 @@ class CloudinaryService:
         # USER POSTS
         # -----------------------------------------
         elif upload_type == "posts":
-            user = actor.user
-
             temp_post_id = str(uuid.uuid4())
-            folder = f"users/{user.id}/posts/{temp_post_id}"
 
+            if actor.is_user:
+                user = actor.user
+                folder = f"users/{user.id}/posts/{temp_post_id}"
+
+            elif actor.is_org:
+                org = actor.organization
+                folder = f"organizations/{org.id}/posts/{temp_post_id}"
+
+        
             for _ in range(count):
                 uploads.append(
                     self._build_signed_upload(

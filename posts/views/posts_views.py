@@ -140,11 +140,14 @@ class CreatePostAPIView(BaseAPIView):
                 # CLOUDINARY VALIDATION
                 # -------------------------
                 try:
+                    org = actor.organization if actor.is_org else None
+
                     if media_type == PostMedia.MediaType.IMAGE:
                         validate_media(
                             user,
                             file_url,
                             public_id,
+                            org=org,
                             allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
                         )
 
@@ -153,6 +156,7 @@ class CreatePostAPIView(BaseAPIView):
                             user,
                             file_url,
                             public_id,
+                            org=org,
                             allowed_extensions=DEFAULT_VIDEO_EXTENSIONS
                         )
 
