@@ -3,6 +3,9 @@ from accounts.models import User, UserProfile
 from django.db import transaction
 from django.db.models import F, Q
 from notifications.services.notification_service import NotificationService
+from core.constant import TYPE_ORGANIZATION, TYPE_USER
+from organization.models import OrganizationProfile
+
 
 class FollowService:
 
@@ -78,11 +81,14 @@ class FollowService:
             return False, "Already following"
 
         # =========================
-        # COUNT LOGIC (USER ONLY)
+        # COUNT LOGIC (USER + ORG)
         # =========================
         if actor.is_user:
-            # actor following count
             UserProfile.objects.filter(user=actor.user).update(
+                following_count=F("following_count") + 1
+            )
+        elif actor.is_org:
+            OrganizationProfile.objects.filter(organization=actor.organization).update(
                 following_count=F("following_count") + 1
             )
 
@@ -126,6 +132,9 @@ class FollowService:
                 )
 
         elif target_org:
+            OrganizationProfile.objects.filter(organization=target_org).update(
+                followers_count=F("followers_count") + 1
+            )
             # org follow notification
             NotificationService.follow(
                 actor_user=actor.user if actor.is_user else None,
@@ -162,11 +171,15 @@ class FollowService:
             return False, "Not following"
 
         # =========================
-        # COUNT LOGIC (USER ONLY)
+        # COUNT LOGIC (USER + ORG)
         # =========================
 
         if actor.is_user:
             UserProfile.objects.filter(user=actor.user).update(
+                following_count=F("following_count") - 1
+            )
+        elif actor.is_org:
+            OrganizationProfile.objects.filter(organization=actor.organization).update(
                 following_count=F("following_count") - 1
             )
 
@@ -189,6 +202,11 @@ class FollowService:
                     UserProfile.objects.filter(user=target_user).update(
                         connections_count=F("connections_count") - 1
                     )
+                    
+        elif target_org:
+            OrganizationProfile.objects.filter(organization=target_org).update(
+                followers_count=F("followers_count") - 1
+            )
 
         return True, {
             "is_following": False,
@@ -197,29 +215,64 @@ class FollowService:
     
 
     @staticmethod
-    def get_relationship(viewer, target_user_id):
+    def get_relationship(actor, target_id, target_type):
         """
-        Returns relationship between viewer and target user
+        Returns relationship between actor and target (user/org)
         """
-        is_me = viewer.id == target_user_id
-        if is_me:
-            return {
-                "is_me": True,
-                "is_following": False,
-                "is_followed_by": False,
-                "is_connected": False,
-            }
+        # ----------------------------------
+        # SELF CHECK
+        # ----------------------------------
+        if actor.is_user and target_type == TYPE_USER:
+            if actor.user.id == target_id:
+                return FollowService._self_response()
 
-        relations = Follow.objects.filter(
-            Q(follower_user=viewer, following_user_id=target_user_id) |
-            Q(follower_user_id=target_user_id, following_user=viewer)
-        ).values("follower_user_id")
+        if actor.is_org and target_type == TYPE_ORGANIZATION:
+            if actor.organization.id == target_id:
+                return FollowService._self_response()
+
+        # ----------------------------------
+        # BUILD QUERY
+        # ----------------------------------
+        filters = Q()
+
+        # actor → target
+        if actor.is_user and target_type == TYPE_USER:
+            filters |= Q(follower_user=actor.user, following_user_id=target_id)
+
+        elif actor.is_user and target_type == TYPE_ORGANIZATION:
+            filters |= Q(follower_user=actor.user, following_org_id=target_id)
+
+        elif actor.is_org and target_type == TYPE_USER:
+            filters |= Q(follower_org=actor.organization, following_user_id=target_id)
+
+        elif actor.is_org and target_type == TYPE_ORGANIZATION:
+            filters |= Q(follower_org=actor.organization, following_org_id=target_id)
+
+        # target → actor
+        if actor.is_user and target_type == TYPE_USER:
+            filters |= Q(follower_user_id=target_id, following_user=actor.user)
+
+        elif actor.is_user and target_type == TYPE_ORGANIZATION:
+            filters |= Q(follower_org_id=target_id, following_user=actor.user)
+
+        elif actor.is_org and target_type == TYPE_USER:
+            filters |= Q(follower_user_id=target_id, following_org=actor.organization)
+
+        elif actor.is_org and target_type == TYPE_ORGANIZATION:
+            filters |= Q(follower_org_id=target_id, following_org=actor.organization)
+
+        relations = Follow.objects.filter(filters).values(
+            "follower_user_id",
+            "follower_org_id"
+        )
 
         is_following = False
         is_followed_by = False
 
         for rel in relations:
-            if rel["follower_user_id"] == viewer.id:
+            if actor.is_user and rel["follower_user_id"] == actor.user.id:
+                is_following = True
+            elif actor.is_org and rel["follower_org_id"] == actor.organization.id:
                 is_following = True
             else:
                 is_followed_by = True
@@ -229,6 +282,15 @@ class FollowService:
             "is_following": is_following,
             "is_followed_by": is_followed_by,
             "is_connected": is_following and is_followed_by,
+        }
+
+    @staticmethod
+    def _self_response():
+        return {
+            "is_me": True,
+            "is_following": False,
+            "is_followed_by": False,
+            "is_connected": False,
         }
 
 

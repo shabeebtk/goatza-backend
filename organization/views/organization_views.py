@@ -16,6 +16,8 @@ from utils.validations import is_valid_uuid
 from services.storage.factory import get_storage_service
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
 from organization.services.organization_member_service import OrganizationMemberService
+from connections.services.follow_services import FollowService
+from core.constant import TYPE_ORGANIZATION
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +101,7 @@ class ListUserOrganizationsAPIView(APIView):
             )
         
 
-class OrganizationsDetailsAPIView(APIView):
+class OrganizationsDetailsAPIView(BaseAPIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -107,6 +109,7 @@ class OrganizationsDetailsAPIView(APIView):
             view_type = request.GET.get("type", "mini").lower()
             organization_id = request.query_params.get("organization_id")
             org_username = request.query_params.get("username")
+            actor = request.actor
 
             # -------------------------
             # VALIDATION
@@ -148,10 +151,19 @@ class OrganizationsDetailsAPIView(APIView):
             else:
                 serializer = OrganizationMiniSerializer(organization)
 
+            relation = FollowService.get_relationship(
+                actor=actor,
+                target_id=organization.id,
+                target_type=TYPE_ORGANIZATION
+            )
+
+            data = serializer.data
+            data["relationship"] = relation
+
             return response_data(
                 success=True,
                 message="Organization fetched successfully",
-                data=serializer.data,
+                data=data,
                 status_code=200
             )
 

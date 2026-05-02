@@ -94,6 +94,7 @@ class OrganizationProfile(BaseUUIDModel):
 
     # Denormalized counters (fast reads)
     followers_count = models.PositiveIntegerField(default=0)
+    following_count = models.PositiveIntegerField(default=0)
     posts_count = models.PositiveIntegerField(default=0)
 
     created_at = models.DateTimeField(auto_now_add=True)

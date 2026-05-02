@@ -1,5 +1,6 @@
 import logging
 from rest_framework.views import APIView
+from core.views.base_views import BaseAPIView
 from rest_framework import serializers
 from django.db import transaction
 from accounts.models import (
@@ -16,19 +17,18 @@ from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
 from accounts.serializers.user_update_serilizer import UpdateUserProfileSerializer
 from services.location.location_service import LocationService
 from utils.validations import validate_username_format
+from core.constant import TYPE_USER
 
 logger = logging.getLogger(__name__)
 
 
-class GetUserDetails(APIView):
-    permission_classes = [IsAuthenticated]
-
+class GetUserDetails(BaseAPIView):
     LIST_TYPE_MINI = 'mini'
     LIST_TYPE_FULL = 'full'
 
     def get(self, request, username):
         list_type = request.query_params.get("list_type", self.LIST_TYPE_MINI)
-        viewer = request.user
+        actor = request.actor
 
         try:
             if list_type == self.LIST_TYPE_FULL:
@@ -52,7 +52,11 @@ class GetUserDetails(APIView):
             user_data = serializer.data
             user_id = user.id
 
-            relation = FollowService.get_relationship(viewer, user_id)
+            relation = FollowService.get_relationship(
+                actor=actor,
+                target_id=user.id,
+                target_type=TYPE_USER
+            )
             user_data.update({"relationship" : relation})
 
             return response_data(success=True, data=user_data)
