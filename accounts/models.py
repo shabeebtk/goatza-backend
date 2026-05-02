@@ -104,9 +104,9 @@ class UserProfile(BaseUUIDModel):
     cover_photo = models.URLField(blank=True)
     cover_photo_public_id = models.CharField(max_length=255, blank=True)
 
-    followers_count = models.IntegerField(default=0)
-    following_count = models.IntegerField(default=0)
-    connections_count = models.IntegerField(default=0)
+    followers_count = models.PositiveIntegerField(default=0)
+    following_count = models.PositiveIntegerField(default=0)
+    connections_count = models.PositiveIntegerField(default=0)
 
     gender = models.CharField(
         max_length=10,

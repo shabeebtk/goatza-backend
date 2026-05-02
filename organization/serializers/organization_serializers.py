@@ -132,6 +132,7 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
     level = serializers.SerializerMethodField()
 
     followers_count = serializers.SerializerMethodField()
+    following_count = serializers.SerializerMethodField()
     posts_count = serializers.SerializerMethodField()
 
     locations = OrganizationLocationSerializer(
@@ -161,6 +162,7 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
             "level",
 
             "followers_count",
+            "following_count",
             "posts_count",
 
             "locations",
@@ -199,6 +201,10 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
     def get_followers_count(self, obj):
         profile = self._profile(obj)
         return profile.followers_count if profile else 0
+    
+    def get_following_count(self, obj):
+        profile = self._profile(obj)
+        return profile.following_count if profile else 0
 
     def get_posts_count(self, obj):
         profile = self._profile(obj)
