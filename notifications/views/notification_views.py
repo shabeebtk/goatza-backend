@@ -18,23 +18,14 @@ class NotificationListAPIView(BaseAPIView):
             actor = request.actor
 
             # ----------------------------------------
-            # VALIDATION
-            # ----------------------------------------
-            if not actor.is_user:
-                return response_data(
-                    success=False,
-                    message="Notifications only available for users",
-                    status_code=status.HTTP_400_BAD_REQUEST
-                )
-
-            # ----------------------------------------
             # QUERYSET
             # ----------------------------------------
             queryset = (
                 Notification.objects
                 .filter(
                     is_deleted=False,
-                    recipient_user=actor.user
+                    recipient_user=actor.user if actor.is_user else None,
+                    recipient_org=actor.organization if actor.is_org else None,
                 )
                 .select_related(
                     "actor_user__profile",
@@ -89,12 +80,13 @@ class MarkNotificationReadAPIView(BaseAPIView):
         TAG = "MarkNotificationReadAPIView"
 
         try:
-            user = request.user
+            actor = request.actor
             notification_id = request.query_params.get('notification_id')
 
             is_saved = Notification.objects.filter(
                 id=notification_id,
-                recipient_user=user
+                recipient_user=actor.user if actor.is_user else None,
+                recipient_org=actor.organization if actor.is_org else None
             ).update(is_read=True)
 
 
@@ -123,10 +115,11 @@ class MarkAllNotificationsReadAPIView(BaseAPIView):
         TAG = "MarkAllNotificationsReadAPIView"
 
         try:
-            user = request.user
+            actor = request.actor
 
             Notification.objects.filter(
-                recipient_user=user,
+                recipient_user=actor.user if actor.is_user else None,
+                recipient_org=actor.organization if actor.is_org else None,
                 is_read=False
             ).update(is_read=True)
 
@@ -152,10 +145,11 @@ class NotificationUnreadCountAPIView(BaseAPIView):
         TAG = "NotificationUnreadCountAPIView"
 
         try:
-            user = request.user
+            actor = request.actor
 
             count = Notification.objects.filter(
-                recipient_user=user,
+                recipient_user=actor.user if actor.is_user else None,
+                recipient_org=actor.organization if actor.is_org else None,
                 is_read=False
             ).count()
 

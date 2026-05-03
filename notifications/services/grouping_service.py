@@ -103,7 +103,6 @@ class NotificationGroupingService:
             "is_read": all(n.is_read for n in items),
             "created_at": primary.created_at,
 
-            # 🔥 NEW STRUCTURE
             "post": post_data,
             "comment": comment_data
         }
