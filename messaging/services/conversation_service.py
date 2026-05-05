@@ -12,6 +12,11 @@ class ConversationService:
     # MAIN ENTRY
     # ----------------------------------------
     @staticmethod
+    def get_conversation(id=None):
+        return Conversation.objects.get(id=id)
+      
+
+    @staticmethod
     def get_or_create_conversation(
         actor_user=None,
         actor_org=None,
@@ -202,11 +207,27 @@ class ConversationService:
 
 
     @staticmethod
-    def accept_conversation(conversation, user):
-        participant = ConversationParticipant.objects.filter(
+    def is_participants(conversation, actor):
+        return ConversationParticipant.objects.filter(
             conversation=conversation,
-            user=user
-        ).first()
+            user=actor.user if actor.is_user else None,
+            org=actor.organization if actor.is_org else None
+        ).exists()
+
+
+    @staticmethod
+    def accept_conversation(conversation, actor_user, actor_org):
+        if actor_user:
+            participant = ConversationParticipant.objects.filter(
+                conversation=conversation,
+                user=actor_user
+            ).first()
+            
+        elif actor_org:
+            participant = ConversationParticipant.objects.filter(
+                conversation=conversation,
+                org=actor_org
+            ).first()
 
         if not participant:
             raise Exception("Not a participant")

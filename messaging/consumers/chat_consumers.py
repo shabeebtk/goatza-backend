@@ -11,8 +11,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # CONNECT
     async def connect(self):
         self.user = self.scope["user"]
+        self.actor = self.scope.get("actor")  # setup in auth websocket 
 
-        # must be authenticated
         if not self.user or self.user.is_anonymous:
             await self.close()
             return
@@ -20,14 +20,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.conversation_id = self.scope["url_route"]["kwargs"]["conversation_id"]
         self.room_group_name = f"chat_{self.conversation_id}"
 
-        # VALIDATE ACCESS
-        is_allowed = await self._is_user_in_conversation()
+        is_allowed = await self._is_participant()   
 
         if not is_allowed:
             await self.close()
             return
 
-        # JOIN GROUP
         await self.channel_layer.group_add(
             self.room_group_name,
             self.channel_name
@@ -45,7 +43,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     # RECEIVE MESSAGE FROM CLIENT
     async def receive(self, text_data):
-        
         try:
             data = json.loads(text_data)
             message_text = data.get("message")
@@ -59,14 +56,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
             await sync_to_async(MessageService.send_message)(
                 conversation=conversation,
-                sender_user=self.user,
+                sender_user=self.actor.user if self.actor.is_user else None,
+                sender_org=self.actor.organization if self.actor.is_org else None,
                 content=message_text
             )
-
-            # MessageService already triggers:
-            # - WebSocket broadcast
-            # - FCM push
-
 
         except Exception as e:
             await self.send(json.dumps({
@@ -86,40 +79,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "type": "message",
             "message_id": event["message_id"],
             "content": event["content"],
-            "sender_id": event["sender_id"],
+            "sender": event["sender"],
             "created_at": event["created_at"],
         }))
 
     # VALIDATION
     @sync_to_async
-    def _is_user_in_conversation(self):
-        exists = ConversationParticipant.objects.filter(
+    def _is_participant(self):
+        return ConversationParticipant.objects.filter(
             conversation_id=self.conversation_id,
-            user=self.user
+            user=self.actor.user if self.actor.is_user else None,
+            org=self.actor.organization if self.actor.is_org else None
         ).exists()
-        print("IS ALLOWED:", exists)
-        return exists
 
-class UserNotificationsConsumer(AsyncWebsocketConsumer):
-    async def connect(self):
-        self.user = self.scope.get("user")
-        if not self.user or self.user.is_anonymous:
-            await self.close()
-            return
-            
-        self.room_group_name = f"user_notifications_{self.user.id}"
-        await self.channel_layer.group_add(
-            self.room_group_name,
-            self.channel_name
-        )
-        await self.accept(subprotocol="access_token")
-
-    async def disconnect(self, close_code):
-        if hasattr(self, "room_group_name"):
-            await self.channel_layer.group_discard(
-                self.room_group_name,
-                self.channel_name
-            )
-
-    async def notification_message(self, event):
-        await self.send(text_data=json.dumps(event))

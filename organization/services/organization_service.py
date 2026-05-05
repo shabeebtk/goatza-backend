@@ -201,3 +201,4 @@ class OrganizationService:
             return queryset.filter(username=username).first()
 
         return None
+    
