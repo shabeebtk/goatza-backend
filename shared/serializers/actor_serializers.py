@@ -12,12 +12,12 @@ class ActorMiniSerializer(serializers.Serializer):
 
     def to_representation(self, obj):
         # USER
-        if hasattr(obj, "profile"):
+        if hasattr(obj, "email"):
             return {
                 "id": str(obj.id),
                 "username": obj.username,
-                "name": getattr(obj.profile, "name", ""),
-                "avatar": getattr(obj.profile, "profile_photo", ""),
+                "name": getattr(obj.profile, "name", "") if hasattr(obj, "profile") else "",
+                "avatar": getattr(obj.profile, "profile_photo", "") if hasattr(obj, "profile") else "",
                 "type": "user",
             }
 
@@ -26,6 +26,6 @@ class ActorMiniSerializer(serializers.Serializer):
             "id": str(obj.id),
             "username": obj.username,
             "name": obj.name,
-            "avatar": getattr(obj.profile, "logo", ""),
+            "avatar": getattr(obj.profile, "logo", "") if hasattr(obj, "profile") else "",
             "type": "organization",
         }

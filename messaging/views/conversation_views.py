@@ -205,7 +205,8 @@ class MarkConversationReadAPIView(BaseAPIView):
             # SERVICE CALL
             ConversationService.mark_as_read(
                 conversation=conversation,
-                user=actor.user
+                user=actor.user if actor.is_user else None,
+                org=actor.organization if actor.is_org else None
             )
 
             return response_data(

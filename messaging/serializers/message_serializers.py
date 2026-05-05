@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from messaging.models import Message
-from shared.serializers.ActorSerializer import ActorMiniSerializer
+from shared.serializers.actor_serializers import ActorMiniSerializer
 
 class MessageSerializer(serializers.ModelSerializer):
     sender = serializers.SerializerMethodField()

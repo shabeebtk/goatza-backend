@@ -207,11 +207,11 @@ class ConversationService:
 
 
     @staticmethod
-    def is_participants(coversation, actor):
+    def is_participants(conversation, actor):
         return ConversationParticipant.objects.filter(
-            coversation=coversation,
+            conversation=conversation,
             user=actor.user if actor.is_user else None,
-            user=actor.organization if actor.is_org else None
+            org=actor.organization if actor.is_org else None
         ).exists()
 
 

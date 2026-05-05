@@ -14,7 +14,7 @@ from asgiref.sync import async_to_sync
 
 from messaging.models import Message, Conversation, ConversationParticipant
 from notifications.services.fcm_service import FCMService
-
+from shared.serializers.actor_serializers import ActorMiniSerializer
 
 class MessageService:
 
@@ -101,14 +101,21 @@ class MessageService:
 
         channel_layer = get_channel_layer()
 
-        # Chat room routing
+        if message.sender_user:
+            sender_data = ActorMiniSerializer(message.sender_user).data
+        else:
+            sender_data = ActorMiniSerializer(message.sender_org).data
+
+        # ----------------------------------------
+        # 🔥 SEND CHAT MESSAGE
+        # ----------------------------------------
         async_to_sync(channel_layer.group_send)(
             f"chat_{conversation.id}",
             {
                 "type": "chat_message",
                 "message_id": str(message.id),
                 "content": message.content,
-                "sender_id": str(message.sender_user_id or message.sender_org_id),
+                "sender": sender_data,  
                 "created_at": message.created_at.isoformat(),
             }
         )
