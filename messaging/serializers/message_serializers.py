@@ -1,12 +1,9 @@
 from rest_framework import serializers
 from messaging.models import Message
-from accounts.serializers.user_serializers import UserMiniSerializer
-
+from shared.serializers.ActorSerializer import ActorMiniSerializer
 
 class MessageSerializer(serializers.ModelSerializer):
-
-    sender_user = UserMiniSerializer(read_only=True)
-    sender_id = serializers.UUIDField(source="sender_user_id", read_only=True)
+    sender = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -16,6 +13,14 @@ class MessageSerializer(serializers.ModelSerializer):
             "message_type",
             "media_url",
             "created_at",
-            "sender_user",
-            "sender_id",
+            "sender",
         ]
+
+    def get_sender(self, obj):
+        if obj.sender_user:
+            return ActorMiniSerializer(obj.sender_user).data
+
+        if obj.sender_org:
+            return ActorMiniSerializer(obj.sender_org).data
+
+        return None

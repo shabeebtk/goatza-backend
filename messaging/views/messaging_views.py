@@ -1,4 +1,4 @@
-from rest_framework.views import APIView
+from core.views.base_views import BaseAPIView
 from rest_framework import status
 
 from messaging.models import Message, ConversationParticipant
@@ -7,11 +7,11 @@ from messaging.pagination import MessageCursorPagination
 from utils.response import response_data 
 
 
-class MessageListAPIView(APIView):
+class MessageListAPIView(BaseAPIView):
 
     def get(self, request):
         try:
-            user = request.user
+            actor = request.actor
             conversation_id = request.query_params.get("conversation_id")
 
             # ----------------------------------------
@@ -29,7 +29,8 @@ class MessageListAPIView(APIView):
             # ----------------------------------------
             is_allowed = ConversationParticipant.objects.filter(
                 conversation_id=conversation_id,
-                user=user
+                user=actor.user if actor.is_user else None,
+                org=actor.organization if actor.is_org else None
             ).exists()
 
             if not is_allowed:
@@ -45,7 +46,7 @@ class MessageListAPIView(APIView):
             queryset = (
                 Message.objects
                 .filter(conversation_id=conversation_id, is_deleted=False)
-                .select_related("sender_user__profile")
+                .select_related("sender_user__profile", "sender_org__profile")
                 .order_by("-created_at")
             )
 
