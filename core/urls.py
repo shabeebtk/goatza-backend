@@ -27,4 +27,5 @@ urlpatterns = [
     path('notifications/', include('notifications.urls')),
     path('conversations/', include('messaging.urls')),
     path('organizations/', include('organization.urls')),
+    path('recruitments/', include('recruitments.urls')),
 ]
