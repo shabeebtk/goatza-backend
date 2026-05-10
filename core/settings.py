@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'shared',
     'notifications',
     'messaging',
+    'recruitments',
     
     # buildin apps 
     'django.contrib.admin',
