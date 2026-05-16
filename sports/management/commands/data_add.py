@@ -21,7 +21,7 @@ class Command(BaseCommand):
         # =========================
         football, _ = Sport.objects.get_or_create(
             name="Football",
-            defaults={"icon_name": "mdi:football"}
+            defaults={"icon_name": "mdi:soccer"}
         )
 
         football_positions = [

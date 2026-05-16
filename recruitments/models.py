@@ -34,6 +34,12 @@ class Recruitment(BaseUUIDModel):
         FEMALE = "female", "Female"
         ALL = "all", "All"
 
+    class ApplyMethod(models.TextChoices):
+        GOATZA = "goatza", "goatza"
+        EXTERNAL = "external", "External"
+        CONTACT = "contact", "contact"
+        
+
     organization = models.ForeignKey(
         Organization,
         on_delete=models.CASCADE,
@@ -83,19 +89,6 @@ class Recruitment(BaseUUIDModel):
         blank=True
     )
 
-    # Age filters
-    min_age = models.PositiveSmallIntegerField(
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(5), MaxValueValidator(100)]
-    )
-
-    max_age = models.PositiveSmallIntegerField(
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(5), MaxValueValidator(100)]
-    )
-
     # Experience / level
     experience_level = models.CharField(
         max_length=50,
@@ -112,6 +105,16 @@ class Recruitment(BaseUUIDModel):
         null=True,
         blank=True
     )
+
+    apply_method = models.CharField(
+        max_length=20,
+        choices=ApplyMethod.choices,
+        default=ApplyMethod.GOATZA
+    )
+    external_apply_url = models.URLField(
+        blank=True
+    )
+
 
     is_remote = models.BooleanField(default=False)
     max_applications = models.PositiveIntegerField(
@@ -136,7 +139,11 @@ class Recruitment(BaseUUIDModel):
         blank=True
     )
 
-    # Location
+    # venue  
+    venue_name = models.CharField(max_length=255, blank=True)
+    venue_link = models.URLField(blank=True, max_length=500)
+
+    # Location - denormalized 
     location = models.ForeignKey(
         Location,
         null=True,
@@ -189,14 +196,6 @@ class Recruitment(BaseUUIDModel):
         constraints = [
             models.CheckConstraint(
                 condition=(
-                    Q(min_age__isnull=True) |
-                    Q(max_age__isnull=True) |
-                    Q(min_age__lte=F("max_age"))
-                ),
-                name="recruitment_valid_age_range"
-            ),
-            models.CheckConstraint(
-                condition=(
                     Q(is_paid=False, fee_amount__isnull=True) |
                     Q(is_paid=True, fee_amount__isnull=False)
                 ),
@@ -209,14 +208,92 @@ class Recruitment(BaseUUIDModel):
                     Q(application_deadline__lte=F("event_date"))
                 ),
                 name="valid_application_deadline"
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(apply_method="external", external_apply_url__isnull=False) |
+                    ~Q(apply_method="external")
+                ),
+                name="external_apply_url_required"
             )
         ]
+
+    def clean(self):
+        if (
+            self.apply_method == self.ApplyMethod.EXTERNAL
+            and not self.external_apply_url
+        ):
+            raise ValidationError(
+                "External apply URL required."
+            )
 
     def __str__(self):
         return f"{self.title} ({self.organization.name})"
 
 
 
+class RecruitmentAgeCategory(BaseUUIDModel):
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="age_categories"
+    )
+    title = models.CharField(max_length=50)
+    min_birth_year = models.PositiveIntegerField()
+    max_birth_year = models.PositiveIntegerField()
+    reporting_time = models.TimeField(null=True, blank=True)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+
+        db_table = "recruitment_age_categories"
+
+        ordering = ["display_order"]
+
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+
+class RecruitmentContact(BaseUUIDModel):
+
+    class ContactType(models.TextChoices):
+        PHONE = "phone", "Phone"
+        EMAIL = "email", "Email"
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="contacts"
+    )
+    name = models.CharField(max_length=255, blank=True)
+    contact_type = models.CharField(max_length=20, choices=ContactType.choices)
+    value = models.CharField(max_length=255)
+
+    class Meta:
+        db_table = "recruitment_contacts"
+        indexes = [
+            models.Index(fields=["recruitment"]),
+            models.Index(fields=["contact_type"]),
+        ]
+
+    def clean(self):
+        if (
+            self.contact_type
+            == self.ContactType.EMAIL
+        ):
+            from django.core.validators import (
+                validate_email
+            )
+
+            validate_email(self.value)
+
+    def __str__(self):
+
+        return (
+            f"{self.contact_type} - {self.value}"
+        )
 
 
 class RecruitmentPosition(BaseUUIDModel):
@@ -261,10 +338,57 @@ class RecruitmentPosition(BaseUUIDModel):
         return f"{self.recruitment_id} - {self.position.name}"
 
 
+class RecruitmentBenefit(BaseUUIDModel):
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="benefits"
+    )
+    title = models.CharField(
+        max_length=255
+    )
+    icon_name = models.CharField(
+        max_length=50,
+        blank=True
+    )
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_benefits"
+        ordering = ["display_order"]
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+class RecruitmentRequirement(BaseUUIDModel):
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="requirements"
+    )
+    title = models.CharField(max_length=255)
+    is_mandatory = models.BooleanField(default=True)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_requirements"
+        ordering = ["display_order"]
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
 
 
 class RecruitmentMedia(BaseUUIDModel):
-
     class MediaType(models.TextChoices):
         IMAGE = "image", "Image"
         VIDEO = "video", "Video"

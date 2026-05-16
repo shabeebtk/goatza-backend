@@ -128,6 +128,10 @@ class GoogleAuthCallbackView(APIView):
                     if not user.is_email_verified:
                         user.is_email_verified = True
                         user.save(update_fields=["is_email_verified"])
+                    
+                    if not user.is_active:
+                        user.is_active = True
+                        user.save(update_fields=["is_active"])
 
                 # Profile
                 UserProfile.objects.get_or_create(

@@ -141,8 +141,6 @@ class RecruitmentAdmin(admin.ModelAdmin):
         ("Requirements", {
             "fields": (
                 "gender",
-                "min_age",
-                "max_age",
                 "experience_level",
             )
         }),

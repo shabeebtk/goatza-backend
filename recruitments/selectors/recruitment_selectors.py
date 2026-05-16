@@ -7,6 +7,7 @@ from core.constant import TYPE_ORGANIZATION
 from connections.services.follow_services import FollowService
 from connections.models import Follow
 
+
 class RecruitmentSelector:
 
     @staticmethod
@@ -20,20 +21,24 @@ class RecruitmentSelector:
         limit=10,
         offset=0
     ):
-
+        
         queryset = Recruitment.objects.filter(
             is_deleted=False
         )
-
         target_org = None
 
         # PROFILE FILTER
         if username:
-            profile = UserOrganizationService.get_user_or_org_by_username(
-                username
+            profile = (
+                UserOrganizationService
+                .get_user_or_org_by_username(
+                    username
+                )
             )
 
-            # recruitments only for org
+            if not profile:
+                return Recruitment.objects.none(), 0
+
             if profile["type"] != TYPE_ORGANIZATION:
                 return Recruitment.objects.none(), 0
 
@@ -43,48 +48,78 @@ class RecruitmentSelector:
                 organization_id=target_org
             )
 
-        # VISIBILITY RULES
-        visibility_filter = Q()
-
         # OWNER ACCESS
         is_owner = (
-            actor.is_org
+            actor
+            and actor.is_org
             and target_org
-            and str(actor.organization.id) == str(target_org)
+            and str(actor.organization.id)
+            == str(target_org)
         )
-        if is_owner:
-            visibility_filter |= Q()
-        else:
-            visibility_filter |= Q(
+
+        # PUBLIC VISIBILITY RULES
+        if not is_owner:
+            visibility_filter = Q(
                 status=Recruitment.Status.ACTIVE,
                 visibility=Recruitment.Visibility.PUBLIC
             )
 
-            # followers-only
-            if target_org:
-                following_ids = FollowService.get_following_ids(actor)
-                if target_org in following_ids["org_ids"]:
-                    visibility_filter |= Q(
-                        status=Recruitment.Status.ACTIVE,
-                        visibility=Recruitment.Visibility.FOLLOWERS_ONLY
+            # followers only support
+            if actor and target_org:
+                follow_filter = Q()
+
+                # user follows org
+                if actor.is_user:
+                    follow_filter |= Q(
+                        follower_user=actor.user,
+                        following_org_id=target_org
                     )
 
-        queryset = queryset.filter(visibility_filter)
+                # org follows org
+                elif actor.is_org:
+                    follow_filter |= Q(
+                        follower_org=actor.organization,
+                        following_org_id=target_org
+                    )
+
+                follows = Follow.objects.filter(
+                    follow_filter
+                ).exists()
+
+                if follows:
+                    visibility_filter |= Q(
+                        status=Recruitment.Status.ACTIVE,
+                        visibility=(
+                            Recruitment.Visibility
+                            .FOLLOWERS_ONLY
+                        )
+                    )
+
+            queryset = queryset.filter(
+                visibility_filter
+            )
 
         # FILTERS
         if sport_id:
-            queryset = queryset.filter(sport_id=sport_id)
+            queryset = queryset.filter(
+                sport_id=sport_id
+            )
 
         if recruitment_type:
             queryset = queryset.filter(
                 recruitment_type=recruitment_type
             )
 
+        # only owner can filter drafts etc
         if status and is_owner:
-            queryset = queryset.filter(status=status)
+            queryset = queryset.filter(
+                status=status
+            )
 
         if city:
-            queryset = queryset.filter(city__iexact=city)
+            queryset = queryset.filter(
+                city__iexact=city
+            )
 
         # COUNT
         total_count = queryset.count()
@@ -95,7 +130,9 @@ class RecruitmentSelector:
             "sport"
         ).prefetch_related(
             "positions__position",
-            "media"
+            "media",
+            "age_categories",
+            "benefits",
         )
 
         queryset = queryset.order_by(
@@ -104,7 +141,7 @@ class RecruitmentSelector:
         )[offset: offset + limit]
 
         return queryset, total_count
-    
+
 
     @staticmethod
     def get_recruitment_detail(
@@ -116,7 +153,6 @@ class RecruitmentSelector:
             id=recruitment_id,
             is_deleted=False
         )
-
         queryset = queryset.select_related(
             "organization",
             "sport",
@@ -125,7 +161,11 @@ class RecruitmentSelector:
             "positions__position",
             "media",
             "questions__options",
-            "applications"
+            "applications",
+            "age_categories",
+            "contacts",
+            "benefits",
+            "requirements",
         )
 
         recruitment = queryset.first()
@@ -144,17 +184,20 @@ class RecruitmentSelector:
         if is_owner:
             return recruitment
 
-        # PUBLIC ACTIVE ONLY
+        # PUBLIC ACCESS
         if (
-            recruitment.status == Recruitment.Status.ACTIVE
+            recruitment.status
+            == Recruitment.Status.ACTIVE
             and recruitment.visibility
             == Recruitment.Visibility.PUBLIC
         ):
+
             return recruitment
 
         # FOLLOWERS ONLY
         if (
-            recruitment.status == Recruitment.Status.ACTIVE
+            recruitment.status
+            == Recruitment.Status.ACTIVE
             and recruitment.visibility
             == Recruitment.Visibility.FOLLOWERS_ONLY
         ):
@@ -162,9 +205,28 @@ class RecruitmentSelector:
             if not actor:
                 return None
 
+            follow_filter = Q()
+
+            if actor.is_user:
+
+                follow_filter |= Q(
+                    follower_user=actor.user,
+                    following_org_id=(
+                        recruitment.organization_id
+                    )
+                )
+
+            elif actor.is_org:
+
+                follow_filter |= Q(
+                    follower_org=actor.organization,
+                    following_org_id=(
+                        recruitment.organization_id
+                    )
+                )
+
             follows = Follow.objects.filter(
-                follower_user=getattr(actor, "user", None),
-                following_org_id=recruitment.organization_id
+                follow_filter
             ).exists()
 
             if follows:
