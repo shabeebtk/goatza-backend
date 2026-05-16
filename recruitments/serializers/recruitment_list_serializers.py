@@ -2,7 +2,8 @@
 from rest_framework import serializers
 from recruitments.models import (
     Recruitment, RecruitmentMedia, RecruitmentQuestion, 
-    RecruitmentQuestionOption, RecruitmentApplication, RecruitmentPosition
+    RecruitmentQuestionOption, RecruitmentApplication, RecruitmentPosition,
+    RecruitmentAgeCategory, RecruitmentContact, RecruitmentBenefit, RecruitmentRequirement
 )
 from organization.serializers.organization_serializers import OrganizationMiniSerializer
 from sports.serializers.sports_serializers import SportSerializer, SportPositionSerializer
@@ -17,6 +18,52 @@ class RecruitmentPositionMiniSerializer(serializers.ModelSerializer):
         fields = [
             "position",
             "is_primary"
+        ]
+
+
+class RecruitmentAgeCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecruitmentAgeCategory
+
+        fields = [
+            "id",
+            "title",
+            "min_birth_year",
+            "max_birth_year",
+            "reporting_time",
+        ]
+
+    
+class RecruitmentContactSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecruitmentContact
+
+        fields = [
+            "id",
+            "name",
+            "contact_type",
+            "value",
+        ]
+
+
+class RecruitmentBenefitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecruitmentBenefit
+
+        fields = [
+            "id",
+            "title",
+            "icon_name",
+        ]
+
+
+class RecruitmentRequirementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecruitmentRequirement
+        fields = [
+            "id",
+            "title",
+            "is_mandatory",
         ]
 
 
@@ -134,33 +181,17 @@ class MyApplicationSerializer(serializers.ModelSerializer):
 
 # PUBLIC DETAIL SERIALIZER
 class RecruitmentDetailSerializer(serializers.ModelSerializer):
-
-    organization = OrganizationMiniSerializer(
-        read_only=True
-    )
-
-    sport = SportSerializer(
-        read_only=True
-    )
-
-    positions = RecruitmentPositionMiniSerializer(
-        many=True,
-        read_only=True
-    )
-
-    media = RecruitmentMediaSerializer(
-        many=True,
-        read_only=True
-    )
-
-    questions = RecruitmentQuestionSerializer(
-        many=True,
-        read_only=True
-    )
-
+    organization = OrganizationMiniSerializer(read_only=True)
+    sport = SportSerializer(read_only=True)
+    positions = RecruitmentPositionMiniSerializer(many=True, read_only=True)
+    media = RecruitmentMediaSerializer(many=True, read_only=True)
+    questions = RecruitmentQuestionSerializer(many=True, read_only=True)
     my_application = serializers.SerializerMethodField()
-
     can_apply = serializers.SerializerMethodField()
+    age_categories = RecruitmentAgeCategorySerializer(many=True, read_only=True)
+    contacts = RecruitmentContactSerializer(many=True, read_only=True)
+    benefits = RecruitmentBenefitSerializer(many=True, read_only=True)
+    requirements = RecruitmentRequirementSerializer(many=True, read_only=True)
 
     class Meta:
         model = Recruitment
@@ -174,11 +205,9 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
 
             "recruitment_type",
             "visibility",
+            "apply_method",
 
             "gender",
-
-            "min_age",
-            "max_age",
 
             "experience_level",
 
@@ -192,6 +221,8 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
             "fee_currency",
             "payment_note",
 
+            "venue_name",
+            "venue_link",
             "location_name",
             "city",
             "country_code",
@@ -205,18 +236,21 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
             "positions",
             "media",
             "questions",
+            "age_categories",
+            "contacts",
+            "benefits",
+            "requirements",
 
             "my_application",
             "can_apply",
+            "external_apply_url",
 
             "created_at",
         ]
 
     # PLAYER APPLICATION
     def get_my_application(self, obj):
-
         request = self.context.get("request")
-
         actor = getattr(request, "actor", None)
 
         if not actor or not actor.is_user:
@@ -233,9 +267,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
 
     # APPLY BUTTON STATE
     def get_can_apply(self, obj):
-
         request = self.context.get("request")
-
         actor = getattr(request, "actor", None)
 
         if not actor or not actor.is_user:
@@ -268,7 +300,6 @@ class RecruitmentOwnerDetailSerializer(
     class Meta(RecruitmentDetailSerializer.Meta):
 
         fields = RecruitmentDetailSerializer.Meta.fields + [
-
             "status",
 
             "shortlisted_count",

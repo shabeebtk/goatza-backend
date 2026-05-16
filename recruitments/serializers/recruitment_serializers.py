@@ -2,7 +2,8 @@ from django.utils import timezone
 from rest_framework import serializers
 from recruitments.models import (
     Recruitment,
-    RecruitmentQuestion
+    RecruitmentQuestion,
+    RecruitmentContact,
 )
 from sports.models import SportPosition, Sport
 
@@ -14,6 +15,39 @@ class RecruitmentPositionInputSerializer(serializers.Serializer):
 
 # QUESTION OPTION INPUT
 class RecruitmentQuestionOptionInputSerializer(serializers.Serializer):
+    value = serializers.CharField(max_length=255)
+
+
+# AGE CATEGORY INPUT
+class RecruitmentAgeCategoryInputSerializer(
+    serializers.Serializer
+):
+
+    title = serializers.CharField(max_length=50)
+    min_birth_year = serializers.IntegerField(min_value=1950)
+    max_birth_year = serializers.IntegerField(min_value=1950)
+    reporting_time = serializers.TimeField(required=False)
+    display_order = serializers.IntegerField(default=0)
+
+    def validate(self, attrs):
+
+        if (
+            attrs["min_birth_year"]
+            > attrs["max_birth_year"]
+        ):
+            raise serializers.ValidationError(
+                "Invalid birth year range."
+            )
+
+        return attrs
+    
+
+# CONTACT INPUT
+class RecruitmentContactInputSerializer(serializers.Serializer):
+    name = serializers.CharField(required=False, allow_blank=True)
+    contact_type = serializers.ChoiceField(
+        choices=RecruitmentContact.ContactType.choices
+    )
     value = serializers.CharField(max_length=255)
 
 
@@ -84,6 +118,19 @@ class RecruitmentMediaInputSerializer(serializers.Serializer):
     order = serializers.IntegerField(default=0)
 
 
+# BENEFIT INPUT
+class RecruitmentBenefitInputSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255)
+    icon_name = serializers.CharField(required=False, allow_blank=True)
+    display_order = serializers.IntegerField(default=0)
+
+
+# REQUIREMENT INPUT
+class RecruitmentRequirementInputSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255)
+    is_mandatory = serializers.BooleanField(default=True)
+    display_order = serializers.IntegerField(default=0)
+
 # LOCATION INPUT
 class RecruitmentLocationInputSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
@@ -117,16 +164,6 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         required=False
     )
     sport_id = serializers.UUIDField()
-    min_age = serializers.IntegerField(
-        required=False,
-        min_value=5,
-        max_value=100
-    )
-    max_age = serializers.IntegerField(
-        required=False,
-        min_value=5,
-        max_value=100
-    )
     experience_level = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -143,6 +180,26 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         required=False,
         min_value=1
     )
+    apply_method = serializers.ChoiceField(
+        choices=Recruitment.ApplyMethod.choices,
+        default=Recruitment.ApplyMethod.GOATZA
+    )
+    external_apply_url = serializers.URLField(
+        required=False,
+        allow_blank=True
+    )
+
+    # venue
+    venue_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=255
+    )
+    venue_link = serializers.URLField(
+        required=False,
+        allow_blank=True
+    )
+
     # fee
     is_paid = serializers.BooleanField(default=False)
     fee_amount = serializers.DecimalField(
@@ -177,6 +234,30 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         many=True,
         required=False
     )
+    age_categories = (
+        RecruitmentAgeCategoryInputSerializer(
+            many=True,
+            required=False
+        )
+    )
+    contacts = (
+        RecruitmentContactInputSerializer(
+            many=True,
+            required=False
+        )
+    )
+    benefits = (
+        RecruitmentBenefitInputSerializer(
+            many=True,
+            required=False
+        )
+    )
+    requirements = (
+        RecruitmentRequirementInputSerializer(
+            many=True,
+            required=False
+        )
+    )
 
     # VALIDATIONS
     def validate_sport_id(self, value):
@@ -199,24 +280,25 @@ class RecruitmentCreateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         sport_id = attrs.get("sport_id")
-        min_age = attrs.get("min_age")
-        max_age = attrs.get("max_age")
         is_paid = attrs.get("is_paid")
         fee_amount = attrs.get("fee_amount")
         event_date = attrs.get("event_date")
         application_deadline = attrs.get("application_deadline")
         positions = attrs.get("positions", [])
 
-        # AGE VALIDATION
-        if (
-            min_age is not None
-            and max_age is not None
-            and min_age > max_age
-        ):
+        # AGE CATEGORY VALIDATION
+        age_categories = attrs.get("age_categories", [])
+        titles = [
+            a["title"].lower()
+            for a in age_categories
+        ]
+        if len(titles) != len(set(titles)):
             raise serializers.ValidationError(
-                "min_age cannot be greater than max_age"
+                "Duplicate age categories."
             )
 
+
+   
         # PAYMENT VALIDATION
         if is_paid and not fee_amount:
             raise serializers.ValidationError(
@@ -226,6 +308,21 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         if not is_paid and fee_amount:
             raise serializers.ValidationError(
                 "fee_amount should be empty for free recruitments"
+            )
+        
+
+        # apply method
+        apply_method = attrs.get("apply_method")
+        external_apply_url = attrs.get(
+            "external_apply_url"
+        )
+        if (
+            apply_method
+            == Recruitment.ApplyMethod.EXTERNAL
+            and not external_apply_url
+        ):
+            raise serializers.ValidationError(
+                "external_apply_url required."
             )
 
         # DATE VALIDATION
@@ -278,6 +375,18 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         if primary_count > 1:
             raise serializers.ValidationError(
                 "Only one primary position is allowed."
+            )
+        
+
+        # CONTACTS VALIDATION
+        contacts = attrs.get("contacts", [])
+        if (
+            apply_method
+            == Recruitment.ApplyMethod.CONTACT
+            and not contacts
+        ):
+            raise serializers.ValidationError(
+                "At least one contact required."
             )
 
         return attrs
