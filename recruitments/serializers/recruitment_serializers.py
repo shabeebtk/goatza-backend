@@ -390,3 +390,20 @@ class RecruitmentCreateSerializer(serializers.Serializer):
             )
 
         return attrs
+
+
+# UPDATE RECRUITMENT SERIALIZER
+# Subclasses the create serializer so every field + cross-field
+# validation rule is shared and can never drift between create/update.
+# Update accepts the same full-object shape the create endpoint accepts.
+class RecruitmentUpdateSerializer(RecruitmentCreateSerializer):
+    pass
+
+
+# CHANGE STATUS SERIALIZER
+# Only validates that `status` is one of the known choices. The allowed
+# transition rules (the state machine) live in the service layer.
+class ChangeRecruitmentStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=Recruitment.Status.choices
+    )

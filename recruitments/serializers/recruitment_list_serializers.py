@@ -119,6 +119,7 @@ class RecruitmentMediaSerializer(serializers.ModelSerializer):
             "id",
             "media_type",
             "file_url",
+            "public_id",
             "thumbnail_url",
             "duration",
             "order",
@@ -301,6 +302,8 @@ class RecruitmentOwnerDetailSerializer(
 
         fields = RecruitmentDetailSerializer.Meta.fields + [
             "status",
+
+            "max_applications",
 
             "shortlisted_count",
             "selected_count",
