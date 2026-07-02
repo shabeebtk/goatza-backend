@@ -101,6 +101,29 @@ class ListUserOrganizationsAPIView(APIView):
             )
         
 
+class ListAllOrganizationsAPIView(APIView):
+    """Discovery list of all organizations (used by the explore page)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            organizations = (
+                Organization.objects
+                .select_related("profile")
+                .order_by("name")
+            )
+            serializer = OrganizationMiniSerializer(organizations, many=True)
+            return response_data(success=True, data=serializer.data)
+        except Exception as e:
+            logger.error(f"ListAllOrganizationsAPIView error: {str(e)}")
+            return response_data(
+                success=False,
+                message="Failed to fetch organizations",
+                error=str(e),
+                status_code=500
+            )
+
+
 class OrganizationsDetailsAPIView(BaseAPIView):
     permission_classes = [IsAuthenticated]
 
