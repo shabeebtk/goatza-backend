@@ -2,6 +2,7 @@ from django.db import models
 from django.db.models import Q, F
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from shared.models import BaseUUIDModel, Location
 from organization.models import Organization, OrganizationMember
 from accounts.models import User
@@ -227,6 +228,30 @@ class Recruitment(BaseUUIDModel):
                 "External apply URL required."
             )
 
+    @property
+    def is_accepting_applications(self):
+        """
+        True when the recruitment can still receive applications: active,
+        deadline not passed (if set), and under the max cap (if set).
+        Used by the apply flow and surfaced on the public detail serializer.
+        """
+        if self.status != self.Status.ACTIVE:
+            return False
+
+        if (
+            self.application_deadline
+            and self.application_deadline < timezone.now()
+        ):
+            return False
+
+        if (
+            self.max_applications is not None
+            and self.applications_count >= self.max_applications
+        ):
+            return False
+
+        return True
+
     def __str__(self):
         return f"{self.title} ({self.organization.name})"
 
@@ -403,10 +428,13 @@ class RecruitmentMedia(BaseUUIDModel):
         choices=MediaType.choices
     )
 
-    file_url = models.URLField()
+    # Cloudinary URLs carry a deep nested folder path
+    # (organizations/<uuid>/recruitments/<uuid>/<uuid>.jpg) that overflows the
+    # 200-char URLField default, so give these headroom.
+    file_url = models.URLField(max_length=500)
     public_id = models.CharField(max_length=255)
 
-    thumbnail_url = models.URLField(blank=True)
+    thumbnail_url = models.URLField(blank=True, max_length=500)
 
     duration = models.PositiveIntegerField(
         null=True,

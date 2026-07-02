@@ -77,6 +77,31 @@ class CloudinaryService:
             }
 
         # -----------------------------------------
+        # RECRUITMENTS  (org only)
+        # -----------------------------------------
+        elif upload_type == "recruitments":
+            org = actor.organization
+            temp_id = str(uuid.uuid4())
+            folder = f"organizations/{org.id}/recruitments/{temp_id}"
+
+            for _ in range(count):
+                uploads.append(
+                    self._build_signed_upload(
+                        upload_url=upload_url,
+                        timestamp=timestamp,
+                        folder=folder,
+                        public_id=str(uuid.uuid4()),
+                        overwrite="false"
+                    )
+                )
+
+            return {
+                "provider": "cloudinary",
+                "temp_post_id": temp_id,
+                "uploads": uploads
+            }
+
+        # -----------------------------------------
         # ORGANIZATION LOGO
         # -----------------------------------------
         elif upload_type == "organization_logo":

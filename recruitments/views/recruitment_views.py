@@ -10,6 +10,7 @@ from recruitments.services.recruitment_service import (
     RecruitmentService
 )
 from utils.response import response_data
+from utils.errors import flatten_validation_error
 from core.decorators.actor_required import org_required
 from recruitments.selectors.recruitment_selectors import RecruitmentSelector
 from recruitments.serializers.recruitment_list_serializers import (
@@ -52,14 +53,16 @@ class CreateRecruitmentAPIView(BaseAPIView):
             )
 
         except ValidationError as e:
+            flat = flatten_validation_error(e.detail)
             logger.warning(
-                f"{TAG} | Validation Error | {str(e)}"
+                f"{TAG} | Validation Error | {flat['message']}"
             )
             return response_data(
                 success=False,
-                message="Validation error",
+                message=flat["message"],
                 status_code=400,
-                error=str(e)
+                error=flat["message"],
+                data={"errors": flat["errors"]}
             )
 
         except Exception as e:
@@ -118,7 +121,8 @@ class UpdateRecruitmentAPIView(BaseAPIView):
             serializer = RecruitmentUpdateSerializer(
                 data=request.data,
                 context={
-                    "request": request
+                    "request": request,
+                    "recruitment": recruitment
                 }
             )
             serializer.is_valid(raise_exception=True)
@@ -142,14 +146,16 @@ class UpdateRecruitmentAPIView(BaseAPIView):
             )
 
         except ValidationError as e:
+            flat = flatten_validation_error(e.detail)
             logger.warning(
-                f"{TAG} | Validation Error | {str(e)}"
+                f"{TAG} | Validation Error | {flat['message']}"
             )
             return response_data(
                 success=False,
-                message="Validation error",
+                message=flat["message"],
                 status_code=400,
-                error=str(e)
+                error=flat["message"],
+                data={"errors": flat["errors"]}
             )
 
         except Exception as e:
@@ -231,14 +237,16 @@ class ChangeRecruitmentStatusAPIView(BaseAPIView):
             )
 
         except ValidationError as e:
+            flat = flatten_validation_error(e.detail)
             logger.warning(
-                f"{TAG} | Validation Error | {str(e)}"
+                f"{TAG} | Validation Error | {flat['message']}"
             )
             return response_data(
                 success=False,
-                message="Validation error",
+                message=flat["message"],
                 status_code=400,
-                error=str(e)
+                error=flat["message"],
+                data={"errors": flat["errors"]}
             )
 
         except Exception as e:

@@ -1,3 +1,6 @@
+import re
+from django.core.validators import validate_email
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from rest_framework import serializers
 from recruitments.models import (
@@ -6,6 +9,9 @@ from recruitments.models import (
     RecruitmentContact,
 )
 from sports.models import SportPosition, Sport
+
+# E.164-ish phone: optional leading +, then 7–15 digits (separators stripped).
+PHONE_RE = re.compile(r"^\+?\d{7,15}$")
 
 # POSITION INPUT
 class RecruitmentPositionInputSerializer(serializers.Serializer):
@@ -49,6 +55,28 @@ class RecruitmentContactInputSerializer(serializers.Serializer):
         choices=RecruitmentContact.ContactType.choices
     )
     value = serializers.CharField(max_length=255)
+
+    def validate(self, attrs):
+        # bulk_create skips model.clean(), so this serializer is the only gate.
+        contact_type = attrs.get("contact_type")
+        value = (attrs.get("value") or "").strip()
+
+        if contact_type == RecruitmentContact.ContactType.PHONE:
+            normalized = re.sub(r"[\s\-().]", "", value)
+            if not PHONE_RE.match(normalized):
+                raise serializers.ValidationError(
+                    "Enter a valid phone number."
+                )
+
+        elif contact_type == RecruitmentContact.ContactType.EMAIL:
+            try:
+                validate_email(value)
+            except DjangoValidationError:
+                raise serializers.ValidationError(
+                    "Enter a valid email address."
+                )
+
+        return attrs
 
 
 # QUESTION INPUT
@@ -102,14 +130,15 @@ class RecruitmentQuestionInputSerializer(serializers.Serializer):
 
 # MEDIA INPUT
 class RecruitmentMediaInputSerializer(serializers.Serializer):
-    file_url = serializers.URLField()
+    file_url = serializers.URLField(max_length=500)
     public_id = serializers.CharField(max_length=255)
     media_type = serializers.ChoiceField(
         choices=["image", "video"]
     )
     thumbnail_url = serializers.URLField(
         required=False,
-        allow_blank=True
+        allow_blank=True,
+        max_length=500
     )
     duration = serializers.IntegerField(
         required=False,
@@ -154,6 +183,15 @@ class RecruitmentCreateSerializer(serializers.Serializer):
     )
     recruitment_type = serializers.ChoiceField(
         choices=Recruitment.Type.choices
+    )
+    # Draft vs publish on create only. Other transitions (close/cancel/reopen)
+    # go through the /status endpoint state machine, so update ignores this.
+    status = serializers.ChoiceField(
+        choices=[
+            Recruitment.Status.DRAFT,
+            Recruitment.Status.ACTIVE,
+        ],
+        default=Recruitment.Status.ACTIVE
     )
     visibility = serializers.ChoiceField(
         choices=Recruitment.Visibility.choices,
@@ -267,10 +305,7 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         return value
 
     def validate_positions(self, value):
-        if not value:
-            raise serializers.ValidationError(
-                "At least one position is required."
-            )
+        # An empty list is valid and means "open to any position".
         position_ids = [str(v["position_id"]) for v in value]
         if len(position_ids) != len(set(position_ids)):
             raise serializers.ValidationError(
@@ -316,23 +351,36 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         external_apply_url = attrs.get(
             "external_apply_url"
         )
-        if (
-            apply_method
-            == Recruitment.ApplyMethod.EXTERNAL
-            and not external_apply_url
-        ):
-            raise serializers.ValidationError(
-                "external_apply_url required."
-            )
+        if apply_method == Recruitment.ApplyMethod.EXTERNAL:
+            if not external_apply_url:
+                raise serializers.ValidationError(
+                    "external_apply_url required."
+                )
+        else:
+            # non-external methods must not carry a stray apply URL
+            attrs["external_apply_url"] = ""
 
         # DATE VALIDATION
         now = timezone.now()
 
-        if application_deadline and application_deadline < now:
+        # On UPDATE, an unchanged (already-stored) past deadline is allowed —
+        # only enforce "not in the past" when the value actually changes.
+        instance = self.context.get("recruitment")
+        deadline_unchanged = (
+            instance is not None
+            and instance.application_deadline == application_deadline
+        )
+
+        if (
+            application_deadline
+            and application_deadline < now
+            and not deadline_unchanged
+        ):
             raise serializers.ValidationError(
                 "Application deadline cannot be in the past"
             )
 
+        # deadline <= event_date always (also a DB CheckConstraint)
         if (
             application_deadline
             and event_date
@@ -395,9 +443,14 @@ class RecruitmentCreateSerializer(serializers.Serializer):
 # UPDATE RECRUITMENT SERIALIZER
 # Subclasses the create serializer so every field + cross-field
 # validation rule is shared and can never drift between create/update.
-# Update accepts the same full-object shape the create endpoint accepts.
+# Update accepts the same full-object shape the create endpoint accepts,
+# except `status` — status transitions live in the /status endpoint.
+# The view passes the existing instance via context["recruitment"] so the
+# deadline past-date rule can be skipped when the value is unchanged.
 class RecruitmentUpdateSerializer(RecruitmentCreateSerializer):
-    pass
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields.pop("status", None)
 
 
 # CHANGE STATUS SERIALIZER

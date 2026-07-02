@@ -189,6 +189,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
     questions = RecruitmentQuestionSerializer(many=True, read_only=True)
     my_application = serializers.SerializerMethodField()
     can_apply = serializers.SerializerMethodField()
+    is_accepting_applications = serializers.BooleanField(read_only=True)
     age_categories = RecruitmentAgeCategorySerializer(many=True, read_only=True)
     contacts = RecruitmentContactSerializer(many=True, read_only=True)
     benefits = RecruitmentBenefitSerializer(many=True, read_only=True)
@@ -244,6 +245,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
 
             "my_application",
             "can_apply",
+            "is_accepting_applications",
             "external_apply_url",
 
             "created_at",
