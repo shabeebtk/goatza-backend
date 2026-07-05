@@ -279,14 +279,11 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
         if actor.user.role != "player":
             return False
 
-        if obj.status != Recruitment.Status.ACTIVE:
+        # Single source of truth for status + deadline + max-applications cap,
+        # so the Apply button hides the moment the recruitment stops accepting
+        # applications (e.g. the cap is hit) — mirrors the apply endpoint's gate.
+        if not obj.is_accepting_applications:
             return False
-
-        if obj.application_deadline:
-            from django.utils import timezone
-
-            if timezone.now() > obj.application_deadline:
-                return False
 
         already_applied = obj.applications.filter(
             applicant=actor.user

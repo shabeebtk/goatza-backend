@@ -13,6 +13,7 @@ class Notification(BaseUUIDModel):
         FOLLOW_BACK = "follow_back", "Follow Back"
         LIKE = "like", "Like"
         COMMENT = "comment", "Comment"
+        RECRUITMENT_APPLICATION = "recruitment_application", "Recruitment Application"
         # future:
         # MESSAGE = "message"
         # TRIAL = "trial"
@@ -53,7 +54,7 @@ class Notification(BaseUUIDModel):
     )
 
     # TYPE
-    type = models.CharField(max_length=20, choices=Type.choices)
+    type = models.CharField(max_length=30, choices=Type.choices)
 
     # TARGET OBJECTS
     post = models.ForeignKey(
@@ -65,6 +66,13 @@ class Notification(BaseUUIDModel):
 
     comment = models.ForeignKey(
         "posts.Comment",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE
+    )
+
+    recruitment = models.ForeignKey(
+        "recruitments.Recruitment",
         null=True,
         blank=True,
         on_delete=models.CASCADE

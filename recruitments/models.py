@@ -477,6 +477,13 @@ class RecruitmentApplication(BaseUUIDModel):
         related_name="recruitment_applications"
     )
 
+    # Contact the applicant chose to share for THIS application. Prefilled from
+    # their profile on the client, but user-editable — so these are stored as
+    # submitted in the request body, NOT re-read from the profile server-side.
+    shared_name = models.CharField(max_length=255)
+    shared_email = models.EmailField(blank=True)
+    shared_phone = models.CharField(max_length=15)
+
     applied_position = models.ForeignKey(
         SportPosition,
         null=True,

@@ -144,6 +144,25 @@ class RecruitmentSelector:
 
 
     @staticmethod
+    def get_recruitment_for_apply(recruitment_id):
+        """
+        Bare fetch for the apply flow: the recruitment must exist and not be
+        soft-deleted. Deliberately does NOT apply visibility/status/deadline/cap
+        rules — those are re-checked authoritatively (under a row lock) inside
+        ApplicationService.apply, so a closed or private recruitment still
+        resolves here and the service can return a precise error instead of a
+        bare 404. Questions + options are prefetched for the apply serializer's
+        answer validation.
+        """
+        return (
+            Recruitment.objects
+            .filter(id=recruitment_id, is_deleted=False)
+            .select_related("organization")
+            .prefetch_related("questions__options")
+            .first()
+        )
+
+    @staticmethod
     def get_recruitment_detail(
         recruitment_id,
         actor

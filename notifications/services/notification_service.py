@@ -1,8 +1,15 @@
+from datetime import timedelta
 from django.db import transaction
+from django.utils import timezone
 from notifications.models import Notification
 from notifications.services.fcm_service import FCMService
 from accounts.models import User
 from organization.models import OrganizationMember
+
+# A single recruitment can attract hundreds of applies; only one push per
+# recruitment is sent within this window (extra rows are still saved so the
+# in-app grouped notification keeps counting).
+RECRUITMENT_APPLICATION_PUSH_WINDOW = timedelta(minutes=10)
 
 def _resolve_actor_display(notification: "Notification"):
     """
@@ -85,6 +92,21 @@ def build_notification_payload(notification: "Notification") -> dict:
         title = f"{actor_name} followed you back"
         body = "Tap to view profile"
         url = f"/profile/{actor_username}"
+
+    elif notification.type == Notification.Type.RECRUITMENT_APPLICATION:
+        recruitment_title = notification.data.get(
+            "recruitment_title", "your recruitment"
+        )
+        recruitment_id = (
+            notification.recruitment_id
+            or notification.data.get("recruitment_id", "")
+        )
+        title = f"{actor_name} applied to {recruitment_title}"
+        body = "Tap to view applicants"
+        url = (
+            f"/organization/admin/{notification.recipient_org_id}"
+            f"/recruitments/{recruitment_id}?tab=applicants"
+        )
 
     return {
         "type": notification.type,
@@ -277,3 +299,50 @@ class NotificationService:
                     ),
                 )
                 _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # RECRUITMENT APPLICATION
+    # ──────────────────────────────────────────
+    @staticmethod
+    def recruitment_application(actor_user, recruitment):
+        """
+        Notify the owning org that a player applied to a recruitment.
+
+        In-app rows are grouped per recruitment (group_key) so many applies
+        collapse into one "X, Y and N others applied to …" entry. Push is
+        throttled: only the first apply within a 10-minute window pushes —
+        later applies still save a row (for the grouped count) but skip the
+        push, so a popular recruitment can't storm the org's devices.
+        """
+        recipient_org = recruitment.organization
+        group_key = f"application:recruitment:{recruitment.id}"
+        dedup_key = f"application:{actor_user.id}:{recruitment.id}"
+
+        # Idempotent — re-apply is blocked upstream, but never double-notify.
+        if Notification.objects.filter(dedup_key=dedup_key).exists():
+            return
+
+        # Decide the push BEFORE inserting this row: was there already a row for
+        # this recruitment in the throttle window? (This row is always saved.)
+        window_start = timezone.now() - RECRUITMENT_APPLICATION_PUSH_WINDOW
+        recently_pushed = (
+            Notification.objects
+            .filter(group_key=group_key, created_at__gte=window_start)
+            .exists()
+        )
+
+        notification = Notification.objects.create(
+            type=Notification.Type.RECRUITMENT_APPLICATION,
+            group_key=group_key,
+            dedup_key=dedup_key,
+            recruitment=recruitment,
+            data={
+                "recruitment_id": str(recruitment.id),
+                "recruitment_title": recruitment.title,
+            },
+            **NotificationService._actor_kwargs(actor_user=actor_user),
+            **NotificationService._recipient_kwargs(recipient_org=recipient_org),
+        )
+
+        if not recently_pushed:
+            _dispatch(notification)

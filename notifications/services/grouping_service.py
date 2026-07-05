@@ -71,10 +71,30 @@ class NotificationGroupingService:
         top_actors = [a for a in actors if a][:2]
         others_count = max(0, total_count - len(top_actors))
 
+        # ----------------------------------------
+        # RECRUITMENT DATA (applicants notifications)
+        # Small inline dict — no heavy serializer. recruitment is select_related
+        # on the list queryset, so this touches no extra query.
+        # ----------------------------------------
+        recruitment_data = None
+        if primary.recruitment:
+            recruitment_data = {
+                "id": str(primary.recruitment.id),
+                "title": primary.recruitment.title,
+                "status": primary.recruitment.status,
+            }
+
+        recruitment_title = (
+            recruitment_data["title"]
+            if recruitment_data
+            else primary.data.get("recruitment_title")
+        )
+
         text = NotificationGroupingService._build_text(
             primary.type,
             top_actors,
-            others_count
+            others_count,
+            recruitment_title=recruitment_title
         )
 
         # ----------------------------------------
@@ -104,13 +124,14 @@ class NotificationGroupingService:
             "created_at": primary.created_at,
 
             "post": post_data,
-            "comment": comment_data
+            "comment": comment_data,
+            "recruitment": recruitment_data
         }
 
     # ----------------------------------------
 
     @staticmethod
-    def _build_text(notification_type, actors, others_count):
+    def _build_text(notification_type, actors, others_count, recruitment_title=None):
         names = [a["name"] for a in actors if a]
 
         if notification_type == "like":
@@ -125,8 +146,14 @@ class NotificationGroupingService:
 
         if notification_type == "follow":
             return f"{names[0]} started following you" if names else "You have a new follower"
-        
+
         if notification_type == "follow_back":
             return f"{names[0]} followed you back"
+
+        if notification_type == "recruitment_application":
+            title = recruitment_title or "your recruitment"
+            if others_count > 0:
+                return f"{', '.join(names)} and {others_count} others applied to {title}"
+            return f"{', '.join(names)} applied to {title}"
 
         return "You have a new notification"
