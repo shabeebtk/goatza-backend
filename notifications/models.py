@@ -14,6 +14,7 @@ class Notification(BaseUUIDModel):
         LIKE = "like", "Like"
         COMMENT = "comment", "Comment"
         RECRUITMENT_APPLICATION = "recruitment_application", "Recruitment Application"
+        RECRUITMENT_APPLICATION_STATUS = "recruitment_application_status", "Recruitment Application Status"
         # future:
         # MESSAGE = "message"
         # TRIAL = "trial"

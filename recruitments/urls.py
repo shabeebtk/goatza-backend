@@ -6,7 +6,10 @@ from recruitments.views.recruitment_views import (
 from recruitments.views.application_views import (
     ApplyRecruitmentAPIView,
     ListRecruitmentApplicationsAPIView,
-    RecruitmentApplicationDetailAPIView
+    RecruitmentApplicationDetailAPIView,
+    WithdrawApplicationAPIView,
+    BulkApplicationStatusAPIView,
+    ApplicationStatusAPIView
 )
 
 # base endpoint - "/recruitments"
@@ -19,5 +22,8 @@ urlpatterns = [
     path('<uuid:recruitment_id>/status', ChangeRecruitmentStatusAPIView.as_view()),
     path('<uuid:recruitment_id>/apply', ApplyRecruitmentAPIView.as_view()),
     path('<uuid:recruitment_id>/applications', ListRecruitmentApplicationsAPIView.as_view()),
+    path('<uuid:recruitment_id>/applications/bulk-status', BulkApplicationStatusAPIView.as_view()),
     path('applications/<uuid:application_id>/details', RecruitmentApplicationDetailAPIView.as_view()),
+    path('applications/<uuid:application_id>/withdraw', WithdrawApplicationAPIView.as_view()),
+    path('applications/<uuid:application_id>/status', ApplicationStatusAPIView.as_view()),
 ]

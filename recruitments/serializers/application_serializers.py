@@ -311,3 +311,50 @@ class ApplicationDetailSerializer(ApplicantListItemSerializer):
             entry.pop("_display_order")
 
         return result
+
+
+# =========================================================
+# ORG STATUS-CHANGE REQUEST SERIALIZERS
+# =========================================================
+
+# Bulk multi-select targets (Invited is single-only, per product decision #3).
+BULK_STATUS_TARGETS = [
+    RecruitmentApplication.Status.REVIEWING,
+    RecruitmentApplication.Status.SHORTLISTED,
+    RecruitmentApplication.Status.SELECTED,
+    RecruitmentApplication.Status.REJECTED,
+]
+
+# Single-change (drawer) targets — free transitions. `invited` is reserved for
+# the future personal-invite feature and is NOT offered in the org UI/API.
+SINGLE_STATUS_TARGETS = [
+    RecruitmentApplication.Status.REVIEWING,
+    RecruitmentApplication.Status.SHORTLISTED,
+    RecruitmentApplication.Status.SELECTED,
+    RecruitmentApplication.Status.REJECTED,
+]
+
+
+class BulkApplicationStatusSerializer(serializers.Serializer):
+    application_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=False,
+        max_length=100,
+    )
+    status = serializers.ChoiceField(choices=BULK_STATUS_TARGETS)
+    note = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="",
+        max_length=1000,
+    )
+
+
+class SingleApplicationStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=SINGLE_STATUS_TARGETS)
+    note = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="",
+        max_length=1000,
+    )

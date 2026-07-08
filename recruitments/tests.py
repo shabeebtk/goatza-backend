@@ -15,8 +15,17 @@ from accounts.models import User
 from organization.models import Organization, OrganizationMember
 from connections.models import Follow
 from sports.models import Sport, SportPosition
-from recruitments.models import Recruitment, RecruitmentMedia, RecruitmentPosition
+from recruitments.models import (
+    Recruitment,
+    RecruitmentMedia,
+    RecruitmentPosition,
+    RecruitmentApplication,
+    RecruitmentApplicationAnswer,
+    RecruitmentApplicationStatusHistory,
+    RecruitmentQuestion,
+)
 from recruitments.selectors.recruitment_selectors import RecruitmentSelector
+from notifications.models import Notification
 
 SIGNATURE_URL = "/user/get/upload/signature"
 CREATE_URL = "/recruitments/create"
@@ -635,3 +644,459 @@ class RecruitmentValidationTests(APITestCase):
             actor=follower_actor, username=self.org.username
         )
         self.assertNotIn(draft.id, [r.id for r in qs])
+
+
+class RecruitmentApplicationLifecycleTests(APITestCase):
+    """Withdraw + reapply, org bulk/single status changes, and the player
+    status-change notifications."""
+
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            email="own_l@example.com", password="pass1234", username="owner_l"
+        )
+        self.org = Organization.objects.create(
+            name="Lion FC", username="lionfc", type=Organization.Type.CLUB
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.player = User.objects.create_user(
+            email="p1_l@example.com", password="pass1234", username="player1_l"
+        )
+        self.other = User.objects.create_user(
+            email="p2_l@example.com", password="pass1234", username="player2_l"
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.recruitment = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            status=Recruitment.Status.ACTIVE, title="U17 Trials",
+            recruitment_type="open_trial", apply_method="goatza",
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+
+    # ── helpers ──────────────────────────────────────────────────
+
+    def _org_headers(self, org=None):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str((org or self.org).id),
+        }
+
+    def _make_app(self, applicant, status="applied"):
+        return RecruitmentApplication.objects.create(
+            recruitment=self.recruitment, applicant=applicant,
+            shared_name="Name", shared_phone="+919876543210", status=status,
+        )
+
+    def _apply_payload(self, answers=None):
+        payload = {
+            "shared_name": "Player One",
+            "shared_phone": "+919876543210",
+            "shared_email": "p1@example.com",
+        }
+        if answers is not None:
+            payload["answers"] = answers
+        return payload
+
+    def _apply(self, answers=None):
+        self.client.force_authenticate(user=self.player)
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(
+                f"/recruitments/{self.recruitment.id}/apply",
+                self._apply_payload(answers), format="json",
+            )
+
+    def _withdraw(self, application_id, user=None):
+        self.client.force_authenticate(user=user or self.player)
+        return self.client.post(
+            f"/recruitments/applications/{application_id}/withdraw"
+        )
+
+    def _bulk_url(self, recruitment=None):
+        rid = (recruitment or self.recruitment).id
+        return f"/recruitments/{rid}/applications/bulk-status"
+
+    # ── WITHDRAW ─────────────────────────────────────────────────
+
+    def test_withdraw_success_decrements_and_logs_history(self):
+        app = self._make_app(self.player, status="shortlisted")
+        Recruitment.objects.filter(id=self.recruitment.id).update(
+            applications_count=1
+        )
+
+        resp = self._withdraw(app.id)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        app.refresh_from_db()
+        self.assertEqual(app.status, "withdrawn")
+        self.recruitment.refresh_from_db()
+        self.assertEqual(self.recruitment.applications_count, 0)
+        self.assertTrue(
+            RecruitmentApplicationStatusHistory.objects.filter(
+                application=app, from_status="shortlisted",
+                to_status="withdrawn", note="Withdrawn by applicant",
+            ).exists()
+        )
+
+    def test_withdraw_other_players_application_404(self):
+        app = self._make_app(self.other, status="applied")
+        resp = self._withdraw(app.id)  # acting as self.player
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_withdraw_missing_application_404(self):
+        resp = self._withdraw(uuid.uuid4())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_double_withdraw_400(self):
+        app = self._make_app(self.player, status="withdrawn")
+        resp = self._withdraw(app.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already withdrawn", resp.data["message"].lower())
+
+    def test_withdraw_counter_floors_at_zero(self):
+        app = self._make_app(self.player, status="applied")
+        # applications_count is already 0 — must not go negative.
+        resp = self._withdraw(app.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.recruitment.refresh_from_db()
+        self.assertEqual(self.recruitment.applications_count, 0)
+
+    # ── REAPPLY (via the apply endpoint) ─────────────────────────
+
+    def test_reapply_reuses_row_and_reincrements(self):
+        r1 = self._apply()
+        self.assertEqual(r1.status_code, status.HTTP_200_OK)
+        app_id = r1.data["data"]["application_id"]
+        self.recruitment.refresh_from_db()
+        self.assertEqual(self.recruitment.applications_count, 1)
+
+        self.assertEqual(self._withdraw(app_id).status_code, status.HTTP_200_OK)
+        self.recruitment.refresh_from_db()
+        self.assertEqual(self.recruitment.applications_count, 0)
+
+        r2 = self._apply()
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        # SAME row reused, not a second application.
+        self.assertEqual(r2.data["data"]["application_id"], app_id)
+        self.assertEqual(
+            RecruitmentApplication.objects.filter(
+                recruitment=self.recruitment, applicant=self.player
+            ).count(),
+            1,
+        )
+        app = RecruitmentApplication.objects.get(id=app_id)
+        self.assertEqual(app.status, "applied")
+        self.recruitment.refresh_from_db()
+        self.assertEqual(self.recruitment.applications_count, 1)
+
+    def test_reapply_replaces_answers_resets_review_restamps_applied_at(self):
+        question = RecruitmentQuestion.objects.create(
+            recruitment=self.recruitment, question="City?",
+            field_type="short_text", is_required=False, display_order=0,
+        )
+        r1 = self._apply(
+            answers=[{"question_id": str(question.id), "answer_text": "Kannur"}]
+        )
+        app_id = r1.data["data"]["application_id"]
+
+        # Simulate an org review before the player withdraws.
+        RecruitmentApplication.objects.filter(id=app_id).update(
+            reviewed_by=self.member, reviewed_at=timezone.now(),
+        )
+        self._withdraw(app_id)
+        # Push applied_at into the past so the re-stamp is unambiguous.
+        RecruitmentApplication.objects.filter(id=app_id).update(
+            applied_at=timezone.now() - timedelta(days=1)
+        )
+
+        r2 = self._apply(
+            answers=[{"question_id": str(question.id), "answer_text": "Kochi"}]
+        )
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+
+        app = RecruitmentApplication.objects.get(id=app_id)
+        self.assertEqual(app.status, "applied")
+        self.assertIsNone(app.reviewed_by)
+        self.assertIsNone(app.reviewed_at)
+        self.assertGreater(app.applied_at, timezone.now() - timedelta(minutes=1))
+
+        # Answers replaced wholesale — only the new one remains.
+        texts = list(
+            RecruitmentApplicationAnswer.objects
+            .filter(application=app)
+            .values_list("answer_text", flat=True)
+        )
+        self.assertEqual(texts, ["Kochi"])
+
+        self.assertTrue(
+            RecruitmentApplicationStatusHistory.objects.filter(
+                application=app, from_status="withdrawn",
+                to_status="applied", note="Reapplied",
+            ).exists()
+        )
+
+    def test_reapply_blocked_when_closed(self):
+        r1 = self._apply()
+        app_id = r1.data["data"]["application_id"]
+        self._withdraw(app_id)
+        Recruitment.objects.filter(id=self.recruitment.id).update(
+            status=Recruitment.Status.CLOSED
+        )
+
+        resp = self._apply()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("not accepting", resp.data["message"].lower())
+
+    def test_reapply_blocked_when_cap_rehit(self):
+        r1 = self._apply()
+        app_id = r1.data["data"]["application_id"]
+        self._withdraw(app_id)
+        # Someone else took the only slot while this applicant was withdrawn.
+        Recruitment.objects.filter(id=self.recruitment.id).update(
+            max_applications=1, applications_count=1
+        )
+
+        resp = self._apply()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("limit", resp.data["message"].lower())
+
+    def test_apply_twice_without_withdraw_blocked(self):
+        self.assertEqual(self._apply().status_code, status.HTTP_200_OK)
+        resp = self._apply()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already applied", resp.data["message"].lower())
+        self.assertEqual(
+            RecruitmentApplication.objects.filter(
+                recruitment=self.recruitment, applicant=self.player
+            ).count(),
+            1,
+        )
+
+    def test_detail_after_withdraw_surfaces_reapply(self):
+        # Regression: after withdraw the detail response must let the player
+        # reapply — my_application=withdrawn AND can_apply=true AND the
+        # apply_method the FE gate reads is present.
+        r1 = self._apply()
+        app_id = r1.data["data"]["application_id"]
+        self.assertEqual(self._withdraw(app_id).status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(user=self.player)
+        resp = self.client.get(f"/recruitments/{self.recruitment.id}/details")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data["data"]
+        self.assertIsNotNone(data["my_application"])
+        self.assertEqual(data["my_application"]["status"], "withdrawn")
+        self.assertTrue(data["can_apply"])
+        self.assertEqual(data["apply_method"], "goatza")
+
+    # ── BULK STATUS ──────────────────────────────────────────────
+
+    def test_bulk_status_happy(self):
+        a1 = self._make_app(self.player, "applied")
+        a2 = self._make_app(self.other, "reviewing")
+
+        self.client.force_authenticate(user=self.owner)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                self._bulk_url(),
+                {"application_ids": [str(a1.id), str(a2.id)], "status": "shortlisted"},
+                format="json", **self._org_headers(),
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(resp.data["data"]["updated"]), {str(a1.id), str(a2.id)})
+        self.assertIn("status_counts", resp.data["data"])
+
+        a1.refresh_from_db()
+        self.assertEqual(a1.status, "shortlisted")
+        self.assertEqual(a1.reviewed_by, self.member)
+        self.assertIsNotNone(a1.reviewed_at)
+        self.assertTrue(
+            RecruitmentApplicationStatusHistory.objects.filter(
+                application=a1, to_status="shortlisted", changed_by=self.member,
+            ).exists()
+        )
+        # One status notification per updated applicant.
+        self.assertEqual(
+            Notification.objects.filter(
+                type="recruitment_application_status", recipient_user=self.player
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            Notification.objects.filter(
+                type="recruitment_application_status", recipient_user=self.other
+            ).count(),
+            1,
+        )
+
+    def test_bulk_status_partial_results(self):
+        a_ok = self._make_app(self.player, "applied")
+        a_withdrawn = self._make_app(self.other, "withdrawn")
+        third = User.objects.create_user(
+            email="p3_l@example.com", password="pass1234", username="player3_l"
+        )
+        a_nochange = self._make_app(third, "shortlisted")
+        missing = str(uuid.uuid4())
+
+        self.client.force_authenticate(user=self.owner)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                self._bulk_url(),
+                {
+                    "application_ids": [
+                        str(a_ok.id), str(a_withdrawn.id),
+                        str(a_nochange.id), missing,
+                    ],
+                    "status": "shortlisted",
+                },
+                format="json", **self._org_headers(),
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data["data"]
+        self.assertEqual(data["updated"], [str(a_ok.id)])
+        reasons = {s["id"]: s["reason"] for s in data["skipped"]}
+        self.assertEqual(reasons[str(a_withdrawn.id)], "withdrawn")
+        self.assertEqual(reasons[str(a_nochange.id)], "no_change")
+        self.assertEqual(reasons[missing], "not_found")
+
+        a_withdrawn.refresh_from_db()
+        self.assertEqual(a_withdrawn.status, "withdrawn")  # untouched
+        # Notification only for the one actually updated.
+        self.assertEqual(
+            Notification.objects.filter(
+                type="recruitment_application_status"
+            ).count(),
+            1,
+        )
+
+    def test_bulk_status_over_100_rejected(self):
+        ids = [str(uuid.uuid4()) for _ in range(101)]
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.post(
+            self._bulk_url(),
+            {"application_ids": ids, "status": "shortlisted"},
+            format="json", **self._org_headers(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bulk_status_invalid_target_rejected(self):
+        a = self._make_app(self.player, "applied")
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.post(
+            self._bulk_url(),
+            {"application_ids": [str(a.id)], "status": "withdrawn"},
+            format="json", **self._org_headers(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bulk_status_cross_org_404(self):
+        other_org = Organization.objects.create(
+            name="Rival FC", username="rivalfc_l", type=Organization.Type.CLUB
+        )
+        OrganizationMember.objects.create(
+            organization=other_org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        a = self._make_app(self.player, "applied")
+
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.post(
+            self._bulk_url(),  # recruitment belongs to self.org
+            {"application_ids": [str(a.id)], "status": "shortlisted"},
+            format="json", **self._org_headers(org=other_org),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ── SINGLE STATUS ────────────────────────────────────────────
+
+    def test_single_status_success(self):
+        a = self._make_app(self.player, "applied")
+        self.client.force_authenticate(user=self.owner)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/recruitments/applications/{a.id}/status",
+                {"status": "reviewing"}, format="json", **self._org_headers(),
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        a.refresh_from_db()
+        self.assertEqual(a.status, "reviewing")
+        self.assertEqual(a.reviewed_by, self.member)
+        self.assertEqual(
+            Notification.objects.filter(
+                type="recruitment_application_status", recipient_user=self.player
+            ).count(),
+            1,
+        )
+
+    def test_single_status_invited_rejected(self):
+        # `invited` is reserved for the future personal-invite feature — the org
+        # status API must reject it as a target.
+        a = self._make_app(self.player, "applied")
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.post(
+            f"/recruitments/applications/{a.id}/status",
+            {"status": "invited"}, format="json", **self._org_headers(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_single_status_withdrawn_400(self):
+        a = self._make_app(self.player, "withdrawn")
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.post(
+            f"/recruitments/applications/{a.id}/status",
+            {"status": "shortlisted"}, format="json", **self._org_headers(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("withdrew", resp.data["message"].lower())
+
+    def test_single_status_cross_org_404(self):
+        other_org = Organization.objects.create(
+            name="Rival Two", username="rival2_l", type=Organization.Type.CLUB
+        )
+        OrganizationMember.objects.create(
+            organization=other_org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        a = self._make_app(self.player, "applied")
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.post(
+            f"/recruitments/applications/{a.id}/status",
+            {"status": "shortlisted"}, format="json",
+            **self._org_headers(org=other_org),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ── STATUS NOTIFICATION payload ──────────────────────────────
+
+    def test_status_notification_data_and_payload_copy(self):
+        from notifications.services.notification_service import (
+            build_notification_payload,
+        )
+
+        a = self._make_app(self.player, "applied")
+        self.client.force_authenticate(user=self.owner)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                f"/recruitments/applications/{a.id}/status",
+                {"status": "shortlisted"}, format="json", **self._org_headers(),
+            )
+
+        notif = Notification.objects.get(
+            type="recruitment_application_status", recipient_user=self.player
+        )
+        self.assertEqual(notif.recruitment_id, self.recruitment.id)
+        self.assertEqual(str(notif.actor_org_id), str(self.org.id))
+        self.assertEqual(notif.data["to_status"], "shortlisted")
+        self.assertEqual(notif.data["application_id"], str(a.id))
+
+        payload = build_notification_payload(notif)
+        self.assertEqual(payload["type"], "recruitment_application_status")
+        self.assertIn("shortlisted your application", payload["title"])
+        self.assertIn("was shortlisted", payload["body"])
+        self.assertEqual(payload["url"], f"/recruitments/{self.recruitment.id}")
+        self.assertEqual(payload["recruitment_id"], str(self.recruitment.id))

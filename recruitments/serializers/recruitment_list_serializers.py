@@ -285,8 +285,12 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
         if not obj.is_accepting_applications:
             return False
 
+        # A withdrawn application does NOT block re-applying — the apply endpoint
+        # revives the same row. Only a live application hides the button.
         already_applied = obj.applications.filter(
             applicant=actor.user
+        ).exclude(
+            status=RecruitmentApplication.Status.WITHDRAWN
         ).exists()
 
         return not already_applied
