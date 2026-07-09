@@ -23,6 +23,7 @@ from recruitments.models import (
     RecruitmentApplicationAnswer,
     RecruitmentApplicationStatusHistory,
     RecruitmentQuestion,
+    RecruitmentAgeCategory,
 )
 from recruitments.selectors.recruitment_selectors import RecruitmentSelector
 from notifications.models import Notification
@@ -1100,3 +1101,264 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         self.assertIn("was shortlisted", payload["body"])
         self.assertEqual(payload["url"], f"/recruitments/{self.recruitment.id}")
         self.assertEqual(payload["recruitment_id"], str(self.recruitment.id))
+
+
+class RecruitmentDiscoveryTests(APITestCase):
+    """Player-facing discovery: the extended list filters (search /
+    experience_level / apply_method / birth_year) and the my-applications
+    endpoint."""
+
+    LIST_URL = "/recruitments/list"
+    MY_APPS_URL = "/recruitments/applications/my"
+
+    def setUp(self):
+        cache.clear()  # username→profile lookups are cached
+        self.player = User.objects.create_user(
+            email="disc_p@example.com", password="pass1234",
+            username="disc_player",
+        )
+        self.owner = User.objects.create_user(
+            email="disc_o@example.com", password="pass1234",
+            username="disc_owner",
+        )
+        self.org = Organization.objects.create(
+            name="Falcon Academy", username="falconacademy",
+            type=Organization.Type.CLUB,
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.other_org = Organization.objects.create(
+            name="United Trials Club", username="unitedtrials",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.sport2 = Sport.objects.create(
+            name="Basketball", icon_name="mdi:basketball"
+        )
+
+    # ── helpers ──────────────────────────────────────────────────
+
+    def _make_recruitment(self, org=None, sport=None, **overrides):
+        # Active + public so a non-owner player sees it in the list.
+        data = dict(
+            organization=org or self.org,
+            sport=sport or self.sport,
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            title="Trials",
+            recruitment_type="open_trial",
+            apply_method="goatza",
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _make_app(self, recruitment, applicant=None, status="applied"):
+        return RecruitmentApplication.objects.create(
+            recruitment=recruitment,
+            applicant=applicant or self.player,
+            shared_name="Name", shared_phone="+919876543210", status=status,
+        )
+
+    def _list(self, **params):
+        self.client.force_authenticate(user=self.player)
+        return self.client.get(self.LIST_URL, params)
+
+    def _ids(self, resp):
+        return [str(r["id"]) for r in resp.data["data"]["results"]]
+
+    def _my_apps(self, user=None, org=None, **params):
+        self.client.force_authenticate(user=user or self.player)
+        headers = {}
+        if org is not None:
+            headers = {
+                "HTTP_X_ACTOR_TYPE": "organization",
+                "HTTP_X_ACTOR_ID": str(org.id),
+            }
+        return self.client.get(self.MY_APPS_URL, params, **headers)
+
+    # ── LIST: search ─────────────────────────────────────────────
+
+    def test_list_search_matches_title_description_and_org_name(self):
+        r_title = self._make_recruitment(title="Goalkeeper Wanted")
+        r_desc = self._make_recruitment(
+            title="Midfield Program",
+            short_description="Elite goalkeeper training included",
+        )
+        r_org = self._make_recruitment(
+            org=self.other_org, title="Striker Search"
+        )
+
+        # title + short_description both hit on "goalkeeper" (case-insensitive).
+        resp = self._list(search="GOALKEEPER")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = self._ids(resp)
+        self.assertIn(str(r_title.id), ids)
+        self.assertIn(str(r_desc.id), ids)
+        self.assertNotIn(str(r_org.id), ids)
+
+        # organization name match.
+        resp = self._list(search="united")
+        ids = self._ids(resp)
+        self.assertEqual(ids, [str(r_org.id)])
+
+    # ── LIST: experience_level ───────────────────────────────────
+
+    def test_list_experience_level_filter_case_insensitive(self):
+        r_pro = self._make_recruitment(experience_level="Professional")
+        r_am = self._make_recruitment(experience_level="Amateur")
+
+        resp = self._list(experience_level="professional")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = self._ids(resp)
+        self.assertEqual(ids, [str(r_pro.id)])
+        self.assertNotIn(str(r_am.id), ids)
+
+    # ── LIST: apply_method (junk ignored) ────────────────────────
+
+    def test_list_apply_method_valid_and_junk_ignored(self):
+        r_goatza = self._make_recruitment(apply_method="goatza")
+        r_ext = self._make_recruitment(
+            apply_method="external",
+            external_apply_url="https://example.com/apply",
+        )
+
+        # honoured value → only external.
+        resp = self._list(apply_method="external")
+        self.assertEqual(self._ids(resp), [str(r_ext.id)])
+
+        # junk value → ignored, both returned.
+        resp = self._list(apply_method="not-a-method")
+        ids = self._ids(resp)
+        self.assertIn(str(r_goatza.id), ids)
+        self.assertIn(str(r_ext.id), ids)
+
+    # ── LIST: birth_year ─────────────────────────────────────────
+
+    def test_list_birth_year_inside_and_outside_range(self):
+        r = self._make_recruitment()
+        RecruitmentAgeCategory.objects.create(
+            recruitment=r, title="U15",
+            min_birth_year=2008, max_birth_year=2010,
+        )
+
+        # inside the range → matched.
+        resp = self._list(birth_year=2009)
+        self.assertEqual(self._ids(resp), [str(r.id)])
+
+        # boundary years are inclusive.
+        self.assertEqual(self._ids(self._list(birth_year=2008)), [str(r.id)])
+        self.assertEqual(self._ids(self._list(birth_year=2010)), [str(r.id)])
+
+        # outside the range → excluded.
+        resp = self._list(birth_year=2005)
+        self.assertEqual(resp.data["data"]["count"], 0)
+        self.assertEqual(self._ids(resp), [])
+
+        # non-integer junk → filter ignored entirely, recruitment still listed.
+        resp = self._list(birth_year="abc")
+        self.assertIn(str(r.id), self._ids(resp))
+
+    def test_list_birth_year_distinct_with_multiple_matching_categories(self):
+        r = self._make_recruitment()
+        # Two categories BOTH containing 2008 — the join would duplicate the
+        # recruitment row without .distinct().
+        RecruitmentAgeCategory.objects.create(
+            recruitment=r, title="U15",
+            min_birth_year=2005, max_birth_year=2010,
+        )
+        RecruitmentAgeCategory.objects.create(
+            recruitment=r, title="Open",
+            min_birth_year=2000, max_birth_year=2015,
+        )
+
+        resp = self._list(birth_year=2008)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["data"]["count"], 1)
+        self.assertEqual(self._ids(resp), [str(r.id)])
+
+    # ── MY APPLICATIONS ──────────────────────────────────────────
+
+    def test_my_applications_happy_path(self):
+        r1 = self._make_recruitment(title="Keeper Trials")
+        r2 = self._make_recruitment(sport=self.sport2, title="Guard Trials")
+        app1 = self._make_app(r1)
+        app2 = self._make_app(r2)
+        # Another player's application must never leak into this player's list.
+        other = User.objects.create_user(
+            email="disc_x@example.com", password="pass1234", username="disc_x"
+        )
+        self._make_app(r1, applicant=other)
+
+        resp = self._my_apps()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data["data"]
+        self.assertEqual(data["count"], 2)
+        returned_ids = {str(r["id"]) for r in data["results"]}
+        self.assertEqual(returned_ids, {str(app1.id), str(app2.id)})
+
+        # nested recruitment summary shape.
+        row = next(
+            r for r in data["results"] if str(r["id"]) == str(app1.id)
+        )
+        recruitment = row["recruitment"]
+        self.assertEqual(str(recruitment["id"]), str(r1.id))
+        self.assertEqual(recruitment["title"], "Keeper Trials")
+        for key in (
+            "recruitment_type", "status", "city",
+            "event_date", "application_deadline",
+        ):
+            self.assertIn(key, recruitment)
+        self.assertEqual(
+            set(recruitment["organization"].keys()),
+            {"id", "name", "username", "logo", "is_verified"},
+        )
+        self.assertEqual(
+            set(recruitment["sport"].keys()),
+            {"id", "name", "icon_name", "icon_url"},
+        )
+
+    def test_my_applications_status_filter(self):
+        r = self._make_recruitment()
+        r2 = self._make_recruitment(title="Second")
+        applied = self._make_app(r, status="applied")
+        shortlisted = self._make_app(r2, status="shortlisted")
+
+        resp = self._my_apps(status="shortlisted")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["data"]["count"], 1)
+        self.assertEqual(self._ids(resp), [str(shortlisted.id)])
+
+        # junk status → ignored (lenient), both returned.
+        resp = self._my_apps(status="not-a-status")
+        self.assertEqual(resp.data["data"]["count"], 2)
+
+    def test_my_applications_pagination(self):
+        for i in range(3):
+            r = self._make_recruitment(title=f"R{i}")
+            self._make_app(r)
+
+        resp = self._my_apps(limit=1, offset=0)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data["data"]
+        self.assertEqual(data["count"], 3)
+        self.assertEqual(data["limit"], 1)
+        self.assertEqual(len(data["results"]), 1)
+
+    def test_my_applications_org_actor_rejected(self):
+        # Acting as the org (owner is a verified member) → not a player actor.
+        resp = self._my_apps(user=self.owner, org=self.org)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_my_applications_withdrawn_still_listed_with_status(self):
+        r = self._make_recruitment()
+        withdrawn = self._make_app(r, status="withdrawn")
+
+        resp = self._my_apps()
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["data"]["count"], 1)
+        row = resp.data["data"]["results"][0]
+        self.assertEqual(str(row["id"]), str(withdrawn.id))
+        self.assertEqual(row["status"], "withdrawn")

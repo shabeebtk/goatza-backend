@@ -278,6 +278,23 @@ class ListRecruitmentsAPIView(BaseAPIView):
             )
             status_filter = request.query_params.get("status")
             city = request.query_params.get("city")
+            search = request.query_params.get("search")
+            experience_level = request.query_params.get(
+                "experience_level"
+            )
+            apply_method = request.query_params.get("apply_method")
+
+            # birth_year is a lenient int filter — a non-integer value is simply
+            # ignored (dropped to None) instead of 500ing the whole list.
+            birth_year = request.query_params.get("birth_year")
+            try:
+                birth_year = (
+                    int(birth_year)
+                    if birth_year not in (None, "")
+                    else None
+                )
+            except (ValueError, TypeError):
+                birth_year = None
 
             limit = min(
                 int(request.query_params.get("limit", 10)),
@@ -298,6 +315,10 @@ class ListRecruitmentsAPIView(BaseAPIView):
                     recruitment_type=recruitment_type,
                     status=status_filter,
                     city=city,
+                    search=search,
+                    experience_level=experience_level,
+                    apply_method=apply_method,
+                    birth_year=birth_year,
                     limit=limit,
                     offset=offset
                 )

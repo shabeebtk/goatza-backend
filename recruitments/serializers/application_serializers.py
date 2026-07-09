@@ -3,7 +3,11 @@ import re
 from decimal import Decimal, InvalidOperation
 from rest_framework import serializers
 from accounts.models import User
-from recruitments.models import RecruitmentQuestion, RecruitmentApplication
+from organization.models import Organization
+from recruitments.models import (
+    RecruitmentQuestion, RecruitmentApplication, Recruitment
+)
+from sports.serializers.sports_serializers import SportSerializer
 # Reuse the exact same E.164-ish phone pattern the recruitment contact
 # validation already uses, so the two can never drift.
 from recruitments.serializers.recruitment_serializers import PHONE_RE
@@ -311,6 +315,69 @@ class ApplicationDetailSerializer(ApplicantListItemSerializer):
             entry.pop("_display_order")
 
         return result
+
+
+# =========================================================
+# PLAYER-SIDE READ SERIALIZERS (my applications)
+# =========================================================
+
+# ORG MINI — the recruiting org behind an application, as the player sees it.
+# `logo` lives on the one-to-one org profile (loaded via
+# select_related("recruitment__organization__profile"), so no N+1).
+class MyApplicationOrgMiniSerializer(serializers.ModelSerializer):
+    logo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Organization
+        fields = [
+            "id",
+            "name",
+            "username",
+            "logo",
+            "is_verified",
+        ]
+
+    def get_logo(self, obj):
+        profile = getattr(obj, "profile", None)
+        if profile and profile.logo:
+            return profile.logo
+        return ""
+
+
+# RECRUITMENT SUMMARY — the slice of the recruitment the player's applications
+# list needs, with the org + sport nested.
+class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
+    organization = MyApplicationOrgMiniSerializer(read_only=True)
+    sport = SportSerializer(read_only=True)
+
+    class Meta:
+        model = Recruitment
+        fields = [
+            "id",
+            "title",
+            "recruitment_type",
+            "status",
+            "city",
+            "event_date",
+            "application_deadline",
+            "organization",
+            "sport",
+        ]
+
+
+# LIST ITEM — one row in the authenticated player's own applications list.
+class MyApplicationListSerializer(serializers.ModelSerializer):
+    recruitment = MyApplicationRecruitmentSerializer(read_only=True)
+
+    class Meta:
+        model = RecruitmentApplication
+        fields = [
+            "id",
+            "status",
+            "applied_at",
+            "updated_at",
+            "recruitment",
+        ]
 
 
 # =========================================================

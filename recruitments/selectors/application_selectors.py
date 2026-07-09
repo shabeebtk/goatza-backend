@@ -49,6 +49,42 @@ class ApplicationSelector:
         return page, total_count
 
     @staticmethod
+    def list_my_applications(
+        user,
+        status=None,
+        limit=20,
+        offset=0
+    ):
+        """
+        Player-side listing of the authenticated user's own applications across
+        every recruitment they applied to. Returns (page_queryset, total_count).
+
+        Withdrawn applications are kept (the player still sees their own history
+        with the withdrawn status); the status filter only narrows the list when
+        a known status is passed — junk values are ignored (lenient, same spirit
+        as the org-side list). The recruitment + its org/sport are select_related
+        (org profile too, for the logo) so the serializer issues no extra query.
+        """
+        queryset = RecruitmentApplication.objects.filter(
+            applicant=user
+        )
+
+        if status and status in RecruitmentApplication.Status.values:
+            queryset = queryset.filter(status=status)
+
+        # COUNT on the filtered queryset, before slicing.
+        total_count = queryset.count()
+
+        page = queryset.select_related(
+            "recruitment",
+            "recruitment__organization",
+            "recruitment__organization__profile",
+            "recruitment__sport",
+        ).order_by("-applied_at")[offset: offset + limit]
+
+        return page, total_count
+
+    @staticmethod
     def status_counts(recruitment):
         """
         {status: count} for every application status of this recruitment, in a

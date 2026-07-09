@@ -11,7 +11,8 @@ from recruitments.serializers.application_serializers import (
     ApplicantListItemSerializer,
     ApplicationDetailSerializer,
     BulkApplicationStatusSerializer,
-    SingleApplicationStatusSerializer
+    SingleApplicationStatusSerializer,
+    MyApplicationListSerializer
 )
 from recruitments.services.application_service import ApplicationService
 from utils.response import response_data
@@ -176,6 +177,74 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
                     "offset": offset,
                     "results": serializer.data,
                     "status_counts": status_counts,
+                }
+            )
+
+        except Exception as e:
+            logger.error(
+                f"{TAG} | Error | {str(e)}"
+            )
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=str(e)
+            )
+
+
+class MyApplicationsAPIView(BaseAPIView):
+
+    @player_required
+    def get(self, request):
+        TAG = "MyApplicationsAPIView"
+        try:
+            actor = request.actor
+
+            status_filter = request.query_params.get("status")
+
+            # Validate + clamp pagination — same shape as the org-side list.
+            try:
+                limit = min(
+                    int(request.query_params.get("limit", 20)),
+                    50
+                )
+                offset = max(
+                    int(request.query_params.get("offset", 0)),
+                    0
+                )
+            except (ValueError, TypeError):
+                return response_data(
+                    False,
+                    "Invalid pagination params",
+                    status_code=400
+                )
+
+            applications, total_count = (
+                ApplicationSelector.list_my_applications(
+                    user=actor.user,
+                    status=status_filter,
+                    limit=limit,
+                    offset=offset
+                )
+            )
+
+            serializer = MyApplicationListSerializer(
+                applications,
+                many=True
+            )
+
+            logger.info(
+                f"{TAG} | user={actor.user.id} | "
+                f"total={total_count} | returned={len(serializer.data)}"
+            )
+
+            return response_data(
+                success=True,
+                data={
+                    "count": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "results": serializer.data,
                 }
             )
 
