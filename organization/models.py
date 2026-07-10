@@ -102,6 +102,10 @@ class OrganizationProfile(BaseUUIDModel):
 
     class Meta:
         db_table = "organization_profiles"
+        indexes = [
+            # Explore "popular" mode orders organizations by follower count.
+            models.Index(fields=["followers_count"]),
+        ]
 
     def __str__(self):
         return f"{self.organization.name} Profile"
