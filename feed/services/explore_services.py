@@ -85,17 +85,17 @@ class ExploreService:
     # GEO HELPERS
     # ------------------------------------------------------------------ #
     @classmethod
-    def _bounding_box(cls, lat, lng):
+    def _bounding_box(cls, lat, lng, radius):
         """
-        Lat/lng min/max box of NEARBY_RADIUS_KM around (lat, lng). Used as a
-        cheap, index-friendly prefilter before the exact haversine distance.
+        Lat/lng min/max box of ``radius`` km around (lat, lng). Used as a cheap,
+        index-friendly prefilter before the exact haversine distance.
         """
-        lat_delta = cls.NEARBY_RADIUS_KM / cls.KM_PER_DEG_LAT
+        lat_delta = radius / cls.KM_PER_DEG_LAT
 
         # Longitude degrees shrink toward the poles; guard cos()→0 so the box
         # never blows up to an infinite width near ±90°.
         cos_lat = max(abs(math.cos(math.radians(lat))), 0.01)
-        lng_delta = cls.NEARBY_RADIUS_KM / (cls.KM_PER_DEG_LAT * cos_lat)
+        lng_delta = radius / (cls.KM_PER_DEG_LAT * cos_lat)
 
         return {
             "min_lat": max(lat - lat_delta, -90.0),
@@ -134,37 +134,89 @@ class ExploreService:
         )
 
     # ------------------------------------------------------------------ #
+    # FILTER HELPERS
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _has_any_filter(filters):
+        """
+        True when a search / sport / position / location filter is active.
+        Drives two behaviours: forcing the mode (see ``_discover``) and letting
+        followed accounts back into the results.
+        """
+        return bool(
+            filters.get("search")
+            or filters.get("sport_id")
+            or filters.get("position_id")
+            or filters.get("lat") is not None
+        )
+
+    # ------------------------------------------------------------------ #
     # SHARED ORCHESTRATION
     # ------------------------------------------------------------------ #
     @classmethod
-    def _discover(cls, actor, request, build_queryset):
+    def _discover(cls, actor, request, build_queryset, filters):
         """
         Shared paginate-with-mode flow for both endpoints.
 
-        ``build_queryset(mode, location)`` returns the queryset for a mode.
+        ``build_queryset(mode, center, radius)`` returns the queryset for a mode.
 
-        - With a cursor: the mode is locked to whatever the cursor carries — no
-          re-decision, no fallback (keeps the scroll on one track).
-        - No cursor: pick "nearby" when the actor has a location, else "popular".
-          If nearby's first page is empty, fall back to "popular" once.
+        Mode selection (first page):
+          1. A location filter (lat/lng) forces "nearby" centered on the FILTER
+             coords with ``radius_km`` — and there is NO popular fallback (an
+             empty radius result is correct, not a reason to ignore the filter).
+          2. A "search" with no location filter forces "popular" (global) — a
+             name search must not be geo-restricted to the actor's radius.
+          3. Otherwise the original behaviour: actor-location nearby with a
+             one-time popular fallback when the first page is empty.
+
+        With a cursor the mode is locked to whatever the cursor carries (the
+        client resets the cursor when filters change), so no re-decision happens.
         """
-        location = cls.resolve_location(actor)
-        paginator = ExploreCursorPagination()
         cursor = request.query_params.get("cursor")
+
+        filter_lat = filters.get("lat")
+        filter_lng = filters.get("lng")
+        has_location_filter = filter_lat is not None and filter_lng is not None
+        has_search = bool(filters.get("search"))
+
+        # Center precedence: filter coords > actor location.
+        if has_location_filter:
+            center = (filter_lat, filter_lng)
+            radius = filters.get("radius_km") or cls.NEARBY_RADIUS_KM
+        else:
+            center = cls.resolve_location(actor)
+            radius = cls.NEARBY_RADIUS_KM
+
+        paginator = ExploreCursorPagination()
 
         if cursor:
             # Raises NotFound on a malformed cursor (handled by the view).
             mode = paginator.decode_mode(cursor)
+        elif has_location_filter:
+            mode = cls.NEARBY
+        elif has_search:
+            mode = cls.POPULAR
         else:
-            mode = cls.NEARBY if location else cls.POPULAR
+            mode = cls.NEARBY if center else cls.POPULAR
 
-        queryset = build_queryset(mode, location)
+        # A nearby request with no usable center (e.g. actor location cleared
+        # mid-scroll) can't run — degrade to popular instead of erroring.
+        if mode == cls.NEARBY and center is None:
+            mode = cls.POPULAR
+
+        queryset = build_queryset(mode, center, radius)
         page = paginator.paginate_queryset(queryset, request, mode)
 
-        # First-page nearby found nobody → switch to popular for this request.
-        if not cursor and mode == cls.NEARBY and not page:
+        # One-time popular fallback ONLY for the plain actor-nearby case:
+        # never when a location filter is active (empty is the correct answer).
+        allow_fallback = (
+            not cursor
+            and mode == cls.NEARBY
+            and not has_location_filter
+        )
+        if allow_fallback and not page:
             mode = cls.POPULAR
-            queryset = build_queryset(mode, location)
+            queryset = build_queryset(mode, center, radius)
             page = paginator.paginate_queryset(queryset, request, mode)
 
         return {
@@ -177,30 +229,60 @@ class ExploreService:
     # PLAYERS
     # ------------------------------------------------------------------ #
     @classmethod
-    def discover_players(cls, actor, request):
+    def discover_players(cls, actor, request, filters=None):
+        filters = filters or {}
         followed = FollowService.get_following_ids(actor)
 
-        def build_queryset(mode, location):
-            return cls._players_queryset(actor, mode, location, followed)
+        def build_queryset(mode, center, radius):
+            return cls._players_queryset(actor, mode, center, radius, followed, filters)
 
-        return cls._discover(actor, request, build_queryset)
+        result = cls._discover(actor, request, build_queryset, filters)
+        # Hand the followed id sets to the view for the ``is_following`` field —
+        # no extra query, reuses the sets we already resolved above.
+        result["followed_user_ids"] = set(followed["user_ids"])
+        result["followed_org_ids"] = set(followed["org_ids"])
+        return result
 
     @classmethod
-    def _players_queryset(cls, actor, mode, location, followed):
+    def _players_queryset(cls, actor, mode, center, radius, followed, filters):
         # Base pool: players that actually have a profile.
         queryset = User.objects.filter(
             role=User.Role.PLAYER,
             profile__isnull=False,
         )
 
-        # Never surface the current user or anyone the actor already follows.
+        # Always hide the actor's own account.
         if actor.is_user:
             queryset = queryset.exclude(id=actor.user.id)
-        queryset = queryset.exclude(id__in=followed["user_ids"])
+
+        # Discovery semantics: exclude followed ONLY when browsing the raw rails.
+        # As soon as any filter/search is active, followed accounts are allowed
+        # back in (searching a name you follow must find them).
+        if not cls._has_any_filter(filters):
+            queryset = queryset.exclude(id__in=followed["user_ids"])
+
+        # search / sport / position filters
+        search = filters.get("search")
+        if search:
+            queryset = queryset.filter(
+                Q(profile__name__icontains=search) | Q(username__icontains=search)
+            )
+        sport_id = filters.get("sport_id")
+        if sport_id:
+            # Unique (user, sport) → no row multiplication, no distinct() needed.
+            queryset = queryset.filter(sports__sport_id=sport_id)
+        position_id = filters.get("position_id")
+        if position_id:
+            # Only reachable with sport_id (validated in the view). Unique
+            # (user, position) → still no duplicates.
+            queryset = queryset.filter(
+                positions__sport_id=sport_id,
+                positions__position_id=position_id,
+            )
 
         if mode == cls.NEARBY:
-            lat, lng = location
-            box = cls._bounding_box(lat, lng)
+            lat, lng = center
+            box = cls._bounding_box(lat, lng, radius)
             queryset = (
                 queryset
                 .filter(
@@ -214,8 +296,13 @@ class ExploreService:
                         lat, lng, "profile__latitude", "profile__longitude"
                     )
                 )
-                .order_by("distance_km", "id")
             )
+            # An explicit location filter wants the exact circle, not just the
+            # square prefilter. The rails (no location filter) keep their
+            # box-only behaviour unchanged.
+            if filters.get("lat") is not None:
+                queryset = queryset.filter(distance_km__lte=radius)
+            queryset = queryset.order_by("distance_km", "id")
         else:  # POPULAR
             queryset = queryset.annotate(
                 followers_count=Coalesce(F("profile__followers_count"), Value(0)),
@@ -227,25 +314,43 @@ class ExploreService:
     # ORGANIZATIONS
     # ------------------------------------------------------------------ #
     @classmethod
-    def discover_organizations(cls, actor, request, types):
+    def discover_organizations(cls, actor, request, types, filters=None):
+        filters = filters or {}
         followed = FollowService.get_following_ids(actor)
 
-        def build_queryset(mode, location):
-            return cls._orgs_queryset(actor, mode, location, followed, types)
+        def build_queryset(mode, center, radius):
+            return cls._orgs_queryset(actor, mode, center, radius, followed, types, filters)
 
-        return cls._discover(actor, request, build_queryset)
+        result = cls._discover(actor, request, build_queryset, filters)
+        result["followed_user_ids"] = set(followed["user_ids"])
+        result["followed_org_ids"] = set(followed["org_ids"])
+        return result
 
     @classmethod
-    def _orgs_queryset(cls, actor, mode, location, followed, types):
+    def _orgs_queryset(cls, actor, mode, center, radius, followed, types, filters):
         queryset = Organization.objects.filter(
             is_active=True,
             type__in=types,
         )
 
-        # Exclude followed orgs, and the actor's own org when acting as one.
-        queryset = queryset.exclude(id__in=followed["org_ids"])
+        # Always hide the actor's own org.
         if actor.is_org:
             queryset = queryset.exclude(id=actor.organization.id)
+
+        # Exclude followed ONLY when browsing the raw rails (see players).
+        if not cls._has_any_filter(filters):
+            queryset = queryset.exclude(id__in=followed["org_ids"])
+
+        # search / sport filters
+        search = filters.get("search")
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(username__icontains=search)
+            )
+        sport_id = filters.get("sport_id")
+        if sport_id:
+            # Unique (organization, sport) → no duplicates, no distinct() needed.
+            queryset = queryset.filter(sports__sport_id=sport_id)
 
         # A single, condition-scoped join to the primary location. Because
         # is_primary is unique per org (unique_primary_location_per_org), this
@@ -258,8 +363,8 @@ class ExploreService:
         )
 
         if mode == cls.NEARBY:
-            lat, lng = location
-            box = cls._bounding_box(lat, lng)
+            lat, lng = center
+            box = cls._bounding_box(lat, lng, radius)
             queryset = (
                 queryset
                 .filter(
@@ -274,8 +379,10 @@ class ExploreService:
                     ),
                     city=F("primary_loc__city"),
                 )
-                .order_by("distance_km", "id")
             )
+            if filters.get("lat") is not None:
+                queryset = queryset.filter(distance_km__lte=radius)
+            queryset = queryset.order_by("distance_km", "id")
         else:  # POPULAR
             queryset = queryset.annotate(
                 followers_count=Coalesce(F("profile__followers_count"), Value(0)),

@@ -16,6 +16,8 @@ class ExploreUserSerializer(serializers.ModelSerializer):
     )
     # Present only in "nearby" mode; null in "popular" mode.
     distance_km = serializers.SerializerMethodField()
+    # Followed accounts can appear once a filter/search is active — flag them.
+    is_following = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -29,11 +31,17 @@ class ExploreUserSerializer(serializers.ModelSerializer):
             "city",
             "followers_count",
             "distance_km",
+            "is_following",
         )
 
     def get_distance_km(self, obj):
         value = getattr(obj, "distance_km", None)
         return round(value, 2) if value is not None else None
+
+    def get_is_following(self, obj):
+        # Membership test against a set passed in via context — zero extra
+        # queries. False when the context is absent (other callers stay safe).
+        return obj.id in self.context.get("followed_user_ids", set())
 
 
 class ExploreOrgSerializer(serializers.ModelSerializer):
@@ -47,6 +55,8 @@ class ExploreOrgSerializer(serializers.ModelSerializer):
     city = serializers.SerializerMethodField()
     # Present only in "nearby" mode; null in "popular" mode.
     distance_km = serializers.SerializerMethodField()
+    # Followed orgs can appear once a filter/search is active — flag them.
+    is_following = serializers.SerializerMethodField()
 
     class Meta:
         model = Organization
@@ -62,6 +72,7 @@ class ExploreOrgSerializer(serializers.ModelSerializer):
             "city",
             "followers_count",
             "distance_km",
+            "is_following",
         )
 
     def _profile(self, obj):
@@ -91,3 +102,6 @@ class ExploreOrgSerializer(serializers.ModelSerializer):
     def get_distance_km(self, obj):
         value = getattr(obj, "distance_km", None)
         return round(value, 2) if value is not None else None
+
+    def get_is_following(self, obj):
+        return obj.id in self.context.get("followed_org_ids", set())

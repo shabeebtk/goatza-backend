@@ -10,9 +10,11 @@ from organization.models import (
     OrganizationProfile,
     OrganizationLocation,
     OrganizationMember,
+    OrganizationSport,
 )
 from connections.models import Follow
 from posts.models import Post, Like
+from sports.models import Sport, UserSport, SportPosition, UserSportPosition
 
 PLAYERS_URL = "/feed/explore/players"
 ORGS_URL = "/feed/explore/organizations"
@@ -656,3 +658,373 @@ class ExploreTrendingPostsTests(APITestCase):
         self.assertNotIn(str(own.id), ids)                    # own org post
         # org follows followed_user → their post is deprioritized vs stranger.
         self.assertLess(ids.index(str(s_post.id)), ids.index(str(f_post.id)))
+
+
+PLAYER_KEYS = {
+    "id", "name", "username", "role", "headline", "profile_photo",
+    "city", "followers_count", "distance_km", "is_following",
+}
+ORG_KEYS = {
+    "id", "name", "username", "type", "is_verified", "logo", "headline",
+    "level", "city", "followers_count", "distance_km", "is_following",
+}
+
+
+class ExplorePlayersFilterTests(APITestCase):
+    """GET /feed/explore/players — search / sport / position / location filters."""
+
+    def setUp(self):
+        # Actor anchored at BASE with a location.
+        self.me = self._player("me", "Me Myself")
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.other_sport = Sport.objects.create(name="Cricket", icon_name="mdi:cricket")
+        self.striker = SportPosition.objects.create(sport=self.sport, name="Striker")
+        self.keeper = SportPosition.objects.create(sport=self.sport, name="Keeper")
+        self.batsman = SportPosition.objects.create(
+            sport=self.other_sport, name="Batsman"
+        )
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _player(self, username, name, lat=BASE_LAT, lng=BASE_LNG, followers=0):
+        user = User.objects.create_user(
+            email=f"{username}@example.com",
+            password="pass1234",
+            username=username,
+            role=User.Role.PLAYER,
+        )
+        UserProfile.objects.create(
+            user=user,
+            name=name,
+            headline=f"{name} headline",
+            city=f"{username}-city",
+            latitude=lat,
+            longitude=lng,
+            followers_count=followers,
+        )
+        return user
+
+    def _add_sport(self, user, sport):
+        return UserSport.objects.create(user=user, sport=sport)
+
+    def _add_position(self, user, sport, position):
+        return UserSportPosition.objects.create(
+            user=user, sport=sport, position=position
+        )
+
+    def _get(self, actor_user=None, **params):
+        self.client.force_authenticate(user=actor_user or self.me)
+        return self.client.get(PLAYERS_URL, params)
+
+    def _ids(self, resp):
+        return [str(r["id"]) for r in resp.data["data"]["results"]]
+
+    def _row(self, resp, obj):
+        return next(
+            (r for r in resp.data["data"]["results"] if str(r["id"]) == str(obj.id)),
+            None,
+        )
+
+    # ── search ───────────────────────────────────────────────────
+
+    def test_search_matches_name_and_username_case_insensitive(self):
+        alice = self._player("alice", "Alice Wonder")
+        bob = self._player("bobby", "Bob Builder")
+
+        self.assertEqual(self._ids(self._get(search="alice")), [str(alice.id)])
+        self.assertEqual(self._ids(self._get(search="WONDER")), [str(alice.id)])
+        self.assertEqual(self._ids(self._get(search="bobby")), [str(bob.id)])
+
+    # ── sport / position ─────────────────────────────────────────
+
+    def test_sport_filter_via_usersport(self):
+        footballer = self._player("footballer", "Foot Baller")
+        self._add_sport(footballer, self.sport)
+        cricketer = self._player("cricketer", "Crick Eter")
+        self._add_sport(cricketer, self.other_sport)
+        nosport = self._player("nosport", "No Sport")
+
+        ids = self._ids(self._get(sport_id=str(self.sport.id)))
+        self.assertIn(str(footballer.id), ids)
+        self.assertNotIn(str(cricketer.id), ids)
+        self.assertNotIn(str(nosport.id), ids)
+
+    def test_position_happy_path(self):
+        striker_player = self._player("strikerp", "Striker Player")
+        self._add_sport(striker_player, self.sport)
+        self._add_position(striker_player, self.sport, self.striker)
+        keeper_player = self._player("keeperp", "Keeper Player")
+        self._add_sport(keeper_player, self.sport)
+        self._add_position(keeper_player, self.sport, self.keeper)
+
+        ids = self._ids(
+            self._get(sport_id=str(self.sport.id), position_id=str(self.striker.id))
+        )
+        self.assertIn(str(striker_player.id), ids)
+        self.assertNotIn(str(keeper_player.id), ids)
+
+    def test_position_from_wrong_sport_returns_400(self):
+        resp = self._get(
+            sport_id=str(self.sport.id), position_id=str(self.batsman.id)
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("does not belong", resp.data["message"])
+
+    def test_position_without_sport_returns_400(self):
+        resp = self._get(position_id=str(self.striker.id))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("sport_id", resp.data["message"])
+
+    def test_invalid_sport_id_returns_400(self):
+        resp = self._get(sport_id="not-a-uuid")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unknown_sport_id_returns_400(self):
+        import uuid as _uuid
+
+        resp = self._get(sport_id=str(_uuid.uuid4()))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("not found", resp.data["message"].lower())
+
+    # ── location ─────────────────────────────────────────────────
+
+    def test_location_filter_inside_outside_and_ordered(self):
+        near = self._player("near", "Near", lat=11.0, lng=76.0)   # ~0 km
+        mid = self._player("mid", "Mid", lat=11.3, lng=76.0)      # ~33 km
+        far = self._player("far", "Far", lat=11.6, lng=76.0)      # ~66 km
+
+        resp = self._get(lat=11.0, lng=76.0, radius_km=50)
+        self.assertEqual(resp.data["data"]["mode"], "nearby")
+
+        ids = self._ids(resp)
+        self.assertEqual(ids, [str(near.id), str(mid.id)])
+        self.assertNotIn(str(far.id), ids)
+
+        dists = [r["distance_km"] for r in resp.data["data"]["results"]]
+        self.assertEqual(dists, sorted(dists))
+
+    def test_location_default_radius_is_50(self):
+        inside = self._player("inside", "Inside", lat=11.3, lng=76.0)    # ~33 km
+        outside = self._player("outside", "Outside", lat=11.6, lng=76.0)  # ~66 km
+
+        ids = self._ids(self._get(lat=11.0, lng=76.0))  # no radius → 50
+        self.assertIn(str(inside.id), ids)
+        self.assertNotIn(str(outside.id), ids)
+
+    def test_radius_clamped_to_max_500(self):
+        near = self._player("near", "Near", lat=11.0, lng=76.0)           # ~0 km
+        veryfar = self._player("veryfar", "Very Far", lat=20.0, lng=76.0)  # ~999 km
+
+        ids = self._ids(self._get(lat=11.0, lng=76.0, radius_km=100000))
+        self.assertIn(str(near.id), ids)
+        self.assertNotIn(str(veryfar.id), ids)  # 999 km > clamped 500
+
+    def test_lat_without_lng_returns_400(self):
+        resp = self._get(lat=11.0)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("together", resp.data["message"])
+
+    def test_lat_out_of_range_returns_400(self):
+        resp = self._get(lat=120, lng=76)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ── mode rules ───────────────────────────────────────────────
+
+    def test_search_forces_popular_mode_globally(self):
+        # Far outside the actor's nearby radius, found only because search is global.
+        farstar = self._player("farstar", "Far Star", lat=40.0, lng=76.0)
+
+        resp = self._get(search="far star")
+        self.assertEqual(resp.data["data"]["mode"], "popular")
+        self.assertIn(str(farstar.id), self._ids(resp))
+
+    def test_location_filter_forces_nearby_and_never_falls_back(self):
+        # A popular player exists, but nobody is inside the filter radius.
+        self._player("pop", "Pop One", lat=11.0, lng=76.0, followers=99)
+
+        resp = self._get(lat=40.0, lng=76.0, radius_km=50)  # empty area
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["data"]["mode"], "nearby")  # NOT popular
+        self.assertEqual(self._ids(resp), [])
+
+    # ── followed inclusion + is_following ────────────────────────
+
+    def test_followed_hidden_in_rails_visible_when_searching(self):
+        zoe = self._player("zoe", "Zoe Zebra")
+        Follow.objects.create(follower_user=self.me, following_user=zoe)
+
+        # rails (no params) → followed hidden
+        self.assertNotIn(str(zoe.id), self._ids(self._get()))
+
+        # searching → followed visible, flagged is_following
+        resp = self._get(search="zoe")
+        row = self._row(resp, zoe)
+        self.assertIsNotNone(row)
+        self.assertTrue(row["is_following"])
+
+    # ── no-param regression guard ────────────────────────────────
+
+    def test_no_params_shape_and_behaviour_unchanged(self):
+        p1 = self._player("p1", "P One")
+        followed = self._player("fol", "Fol Lowed")
+        Follow.objects.create(follower_user=self.me, following_user=followed)
+
+        resp = self._get()
+        data = resp.data["data"]
+
+        self.assertEqual(set(data.keys()), {"next_cursor", "mode", "results"})
+        self.assertEqual(data["mode"], "nearby")  # actor has a location
+
+        ids = [str(r["id"]) for r in data["results"]]
+        self.assertIn(str(p1.id), ids)
+        self.assertNotIn(str(followed.id), ids)  # rails still exclude followed
+
+        self.assertEqual(set(data["results"][0].keys()), PLAYER_KEYS)
+        self.assertFalse(any(r["is_following"] for r in data["results"]))
+
+    # ── pagination with a filter ─────────────────────────────────
+
+    def test_pagination_with_search_no_dupes(self):
+        created = [
+            self._player(f"k{i}", f"Kicker {i}", followers=i) for i in range(12)
+        ]
+
+        seen, cursor, pages = [], None, 0
+        while True:
+            params = {"search": "kicker"}
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._get(**params)
+            self.assertEqual(resp.data["data"]["mode"], "popular")
+            page = self._ids(resp)
+            self.assertLessEqual(len(page), 10)
+            seen.extend(page)
+            cursor = resp.data["data"]["next_cursor"]
+            pages += 1
+            if not cursor or pages > 5:
+                break
+
+        self.assertEqual(len(seen), 12)
+        self.assertEqual(set(seen), {str(p.id) for p in created})
+
+
+class ExploreOrganizationsFilterTests(APITestCase):
+    """GET /feed/explore/organizations — search / sport / location filters."""
+
+    def setUp(self):
+        self.me = User.objects.create_user(
+            email="me@example.com", password="pass1234", username="me"
+        )
+        UserProfile.objects.create(
+            user=self.me, name="Me", latitude=BASE_LAT, longitude=BASE_LNG
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.other_sport = Sport.objects.create(name="Cricket", icon_name="mdi:cricket")
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _org(self, username, name, type=Organization.Type.CLUB,
+             followers=0, lat=BASE_LAT, lng=BASE_LNG):
+        org = Organization.objects.create(name=name, username=username, type=type)
+        OrganizationProfile.objects.create(
+            organization=org,
+            logo=f"https://cdn.example.com/{username}.png",
+            followers_count=followers,
+        )
+        if lat is not None and lng is not None:
+            OrganizationLocation.objects.create(
+                organization=org, city=f"{username}-city", country_code="IN",
+                latitude=lat, longitude=lng, is_primary=True,
+            )
+        return org
+
+    def _add_sport(self, org, sport):
+        return OrganizationSport.objects.create(organization=org, sport=sport)
+
+    def _get(self, actor_user=None, **params):
+        self.client.force_authenticate(user=actor_user or self.me)
+        return self.client.get(ORGS_URL, params)
+
+    def _ids(self, resp):
+        return [str(r["id"]) for r in resp.data["data"]["results"]]
+
+    def _row(self, resp, obj):
+        return next(
+            (r for r in resp.data["data"]["results"] if str(r["id"]) == str(obj.id)),
+            None,
+        )
+
+    # ── search ───────────────────────────────────────────────────
+
+    def test_search_matches_name_and_username(self):
+        united = self._org("unitedfc", "United FC")
+        rovers = self._org("roversclub", "Rovers Club")
+
+        self.assertEqual(self._ids(self._get(search="united")), [str(united.id)])
+        self.assertEqual(self._ids(self._get(search="ROVERSCLUB")), [str(rovers.id)])
+
+    # ── sport ────────────────────────────────────────────────────
+
+    def test_sport_filter_via_org_sport(self):
+        footy = self._org("footy", "Footy FC")
+        self._add_sport(footy, self.sport)
+        cricky = self._org("cricky", "Cricky CC")
+        self._add_sport(cricky, self.other_sport)
+
+        ids = self._ids(self._get(sport_id=str(self.sport.id)))
+        self.assertIn(str(footy.id), ids)
+        self.assertNotIn(str(cricky.id), ids)
+
+    # ── location ─────────────────────────────────────────────────
+
+    def test_location_filter_inside_outside(self):
+        near = self._org("near", "Near FC", lat=11.0, lng=76.0)   # ~0 km
+        far = self._org("far", "Far FC", lat=11.6, lng=76.0)      # ~66 km
+
+        resp = self._get(lat=11.0, lng=76.0, radius_km=50)
+        self.assertEqual(resp.data["data"]["mode"], "nearby")
+        ids = self._ids(resp)
+        self.assertIn(str(near.id), ids)
+        self.assertNotIn(str(far.id), ids)
+
+    def test_lat_without_lng_returns_400(self):
+        resp = self._get(lat=11.0)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_position_id_rejected_for_orgs(self):
+        import uuid as _uuid
+
+        resp = self._get(
+            sport_id=str(self.sport.id), position_id=str(_uuid.uuid4())
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("not supported", resp.data["message"])
+
+    # ── followed inclusion + is_following ────────────────────────
+
+    def test_followed_hidden_visible_with_search_and_is_following(self):
+        acme = self._org("acme", "Acme United")
+        Follow.objects.create(follower_user=self.me, following_org=acme)
+
+        self.assertNotIn(str(acme.id), self._ids(self._get()))
+
+        resp = self._get(search="acme")
+        row = self._row(resp, acme)
+        self.assertIsNotNone(row)
+        self.assertTrue(row["is_following"])
+
+    # ── no-param regression guard ────────────────────────────────
+
+    def test_no_params_shape_unchanged(self):
+        near = self._org("nearfc", "Near FC", lat=11.0, lng=76.0)
+        followed = self._org("folfc", "Fol FC", lat=11.0, lng=76.0)
+        Follow.objects.create(follower_user=self.me, following_org=followed)
+
+        resp = self._get()
+        data = resp.data["data"]
+
+        self.assertEqual(set(data.keys()), {"next_cursor", "mode", "results"})
+        ids = [str(r["id"]) for r in data["results"]]
+        self.assertIn(str(near.id), ids)
+        self.assertNotIn(str(followed.id), ids)   # rails still exclude followed
+        self.assertEqual(set(data["results"][0].keys()), ORG_KEYS)
