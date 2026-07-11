@@ -32,7 +32,8 @@ class NotificationListAPIView(BaseAPIView):
                     "actor_org__profile",
                     "actor_org",
                     "post",
-                    "comment"
+                    "comment",
+                    "recruitment"
                 )
                 .order_by("-created_at")
             )

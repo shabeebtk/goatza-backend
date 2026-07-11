@@ -64,7 +64,9 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     class Meta:
         indexes = [
             models.Index(fields=["email"]),
-            models.Index(fields=["phone"]), 
+            models.Index(fields=["phone"]),
+            # Explore discovery filters players by role.
+            models.Index(fields=["role"]),
         ]
         constraints = [
             models.CheckConstraint(
@@ -148,6 +150,8 @@ class UserProfile(BaseUUIDModel):
             models.Index(fields=["user"]),
             models.Index(fields=["city"]),
             models.Index(fields=["latitude", "longitude"]),
+            # Explore "popular" mode orders players by follower count.
+            models.Index(fields=["followers_count"]),
         ]
 
     def __str__(self):

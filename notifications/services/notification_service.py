@@ -1,8 +1,28 @@
+from datetime import timedelta
 from django.db import transaction
+from django.utils import timezone
 from notifications.models import Notification
 from notifications.services.fcm_service import FCMService
 from accounts.models import User
 from organization.models import OrganizationMember
+
+# A single recruitment can attract hundreds of applies; only one push per
+# recruitment is sent within this window (extra rows are still saved so the
+# in-app grouped notification keeps counting).
+RECRUITMENT_APPLICATION_PUSH_WINDOW = timedelta(minutes=10)
+
+# Copy for org-initiated application status changes, keyed by the new status.
+# `verb` attaches to the org name ("{Org} shortlisted your application"); `body`
+# attaches to "Your application for {title} …". Rejected copy stays gentle.
+# Shared with grouping_service so in-app + push text can't drift.
+RECRUITMENT_STATUS_COPY = {
+    "reviewing":   {"verb": "is reviewing your application", "body": "is now being reviewed"},
+    "shortlisted": {"verb": "shortlisted your application",  "body": "was shortlisted"},
+    "invited":     {"verb": "invited you to the trial",      "body": "has an invitation for you"},
+    "selected":    {"verb": "selected you 🎉",               "body": "— you've been selected 🎉"},
+    "rejected":    {"verb": "reviewed your application",      "body": "was not selected this time"},
+}
+RECRUITMENT_STATUS_COPY_DEFAULT = {"verb": "updated your application", "body": "was updated"}
 
 def _resolve_actor_display(notification: "Notification"):
     """
@@ -86,6 +106,37 @@ def build_notification_payload(notification: "Notification") -> dict:
         body = "Tap to view profile"
         url = f"/profile/{actor_username}"
 
+    elif notification.type == Notification.Type.RECRUITMENT_APPLICATION:
+        recruitment_title = notification.data.get(
+            "recruitment_title", "your recruitment"
+        )
+        recruitment_id = (
+            notification.recruitment_id
+            or notification.data.get("recruitment_id", "")
+        )
+        title = f"{actor_name} applied to {recruitment_title}"
+        body = "Tap to view applicants"
+        url = (
+            f"/organization/admin/{notification.recipient_org_id}"
+            f"/recruitments/{recruitment_id}?tab=applicants"
+        )
+
+    elif notification.type == Notification.Type.RECRUITMENT_APPLICATION_STATUS:
+        to_status = notification.data.get("to_status", "")
+        recruitment_title = getattr(
+            notification.recruitment, "title", "your recruitment"
+        )
+        recruitment_id = (
+            notification.recruitment_id
+            or notification.data.get("recruitment_id", "")
+        )
+        copy = RECRUITMENT_STATUS_COPY.get(
+            to_status, RECRUITMENT_STATUS_COPY_DEFAULT
+        )
+        title = f"{actor_name} {copy['verb']}"
+        body = f"Your application for {recruitment_title} {copy['body']}"
+        url = f"/recruitments/{recruitment_id}"
+
     return {
         "type": notification.type,
         "notification_id": str(notification.id),
@@ -98,6 +149,8 @@ def build_notification_payload(notification: "Notification") -> dict:
 
         # target
         "target_id": str(notification.post_id or ""),
+        # recruitment deep-link id (empty for non-recruitment types)
+        "recruitment_id": str(notification.recruitment_id or ""),
 
         # push content
         "title": title,
@@ -277,3 +330,78 @@ class NotificationService:
                     ),
                 )
                 _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # RECRUITMENT APPLICATION
+    # ──────────────────────────────────────────
+    @staticmethod
+    def recruitment_application(actor_user, recruitment):
+        """
+        Notify the owning org that a player applied to a recruitment.
+
+        In-app rows are grouped per recruitment (group_key) so many applies
+        collapse into one "X, Y and N others applied to …" entry. Push is
+        throttled: only the first apply within a 10-minute window pushes —
+        later applies still save a row (for the grouped count) but skip the
+        push, so a popular recruitment can't storm the org's devices.
+        """
+        recipient_org = recruitment.organization
+        group_key = f"application:recruitment:{recruitment.id}"
+        dedup_key = f"application:{actor_user.id}:{recruitment.id}"
+
+        # Idempotent — re-apply is blocked upstream, but never double-notify.
+        if Notification.objects.filter(dedup_key=dedup_key).exists():
+            return
+
+        # Decide the push BEFORE inserting this row: was there already a row for
+        # this recruitment in the throttle window? (This row is always saved.)
+        window_start = timezone.now() - RECRUITMENT_APPLICATION_PUSH_WINDOW
+        recently_pushed = (
+            Notification.objects
+            .filter(group_key=group_key, created_at__gte=window_start)
+            .exists()
+        )
+
+        notification = Notification.objects.create(
+            type=Notification.Type.RECRUITMENT_APPLICATION,
+            group_key=group_key,
+            dedup_key=dedup_key,
+            recruitment=recruitment,
+            data={
+                "recruitment_id": str(recruitment.id),
+                "recruitment_title": recruitment.title,
+            },
+            **NotificationService._actor_kwargs(actor_user=actor_user),
+            **NotificationService._recipient_kwargs(recipient_org=recipient_org),
+        )
+
+        if not recently_pushed:
+            _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # RECRUITMENT APPLICATION STATUS (org → applicant)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def recruitment_application_status(
+        actor_org, recipient_user, recruitment, to_status, application_id
+    ):
+        """
+        Notify the applicant that the org changed their application status.
+
+        One notification per change (no dedup) — flip a status twice and the
+        player gets two rows. group_key is left empty so grouping renders each
+        as its own entry (ungrouped).
+        """
+        notification = Notification.objects.create(
+            type=Notification.Type.RECRUITMENT_APPLICATION_STATUS,
+            recruitment=recruitment,
+            data={
+                "application_id": str(application_id),
+                "recruitment_id": str(recruitment.id),
+                "recruitment_title": recruitment.title,
+                "to_status": to_status,
+            },
+            **NotificationService._actor_kwargs(actor_org=actor_org),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        _dispatch(notification)

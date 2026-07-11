@@ -14,7 +14,7 @@ from accounts.views.user_google_auth_views import (
 )
 from accounts.views.user_views import (
     GetUserDetails, GetUserDetailsByID, UpdateUserMediaAPIView, UpdateUserProfileAPIView,
-    CheckUsernameAvailabilityAPIView, ListAllUsersAPIView
+    CheckUsernameAvailabilityAPIView
 )
 from accounts.views.user_upload_signature_views import GetUploadConfigAPIView
 # base url - /user/
@@ -39,8 +39,6 @@ urlpatterns = [
     path('update/profile/cover', UpdateUserMediaAPIView.as_view()),
     path('update/profile/data', UpdateUserProfileAPIView.as_view()),
 
-    # user upload media signature 
+    # user upload media signature
     path('get/upload/signature', GetUploadConfigAPIView.as_view()),
-
-    path('list/all', ListAllUsersAPIView.as_view()),
 ]

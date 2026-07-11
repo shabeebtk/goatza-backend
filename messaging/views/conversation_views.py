@@ -1,8 +1,8 @@
 from rest_framework.views import APIView
-from django.db.models import Q
+from django.db.models import Q, Exists, OuterRef, Case, When, BooleanField
 from rest_framework import status
 from core.views.base_views import BaseAPIView
-from messaging.models import Conversation, ConversationParticipant
+from messaging.models import Conversation, ConversationParticipant, Message
 from messaging.serializers.conversation_serializers import (
      ConversationListSerializer, ConversationDetailSerializer
 )
@@ -270,6 +270,71 @@ class ConversationDetailAPIView(BaseAPIView):
                 True,
                 "Conversation fetched",
                 data=serializer.data
+            )
+
+        except Exception as e:
+            return response_data(
+                False,
+                "Something went wrong",
+                status_code=500,
+                error=str(e)
+            )
+
+
+class ConversationUnreadSummaryAPIView(BaseAPIView):
+    """
+    Aggregate unread badge counts for the current actor, split into
+    accepted chats vs. pending message requests. Powers the nav-bar
+    message badge and the Chats / Requests tab badges.
+
+    Returns: {"chats": int, "requests": int, "total": int}
+    where each count is the number of conversations that have at least
+    one unread message from the other side (not the raw message total).
+    """
+
+    def get(self, request):
+        try:
+            actor = request.actor
+
+            # The actor's own participant rows (user XOR org).
+            participants = ConversationParticipant.objects.filter(
+                user=actor.user if actor.is_user else None,
+                org=actor.organization if actor.is_org else None,
+            )
+
+            # Messages in the same conversation from the OTHER side.
+            other_messages = Message.objects.filter(
+                conversation=OuterRef("conversation"),
+                is_deleted=False,
+            )
+            if actor.is_user:
+                other_messages = other_messages.exclude(sender_user=actor.user)
+            else:
+                other_messages = other_messages.exclude(sender_org=actor.organization)
+
+            # A conversation is unread when it has any such message newer than
+            # the participant's last_read_at (or any at all if never read).
+            has_unread = Case(
+                When(last_read_at__isnull=True, then=Exists(other_messages)),
+                default=Exists(
+                    other_messages.filter(created_at__gt=OuterRef("last_read_at"))
+                ),
+                output_field=BooleanField(),
+            )
+
+            unread = participants.annotate(has_unread=has_unread).filter(has_unread=True)
+
+            chats = unread.filter(has_accepted=True).count()
+            requests = unread.filter(has_accepted=False).count()
+
+            return response_data(
+                True,
+                "Unread summary fetched",
+                data={
+                    "chats": chats,
+                    "requests": requests,
+                    "total": chats + requests,
+                },
             )
 
         except Exception as e:

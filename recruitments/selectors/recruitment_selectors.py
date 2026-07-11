@@ -18,6 +18,10 @@ class RecruitmentSelector:
         recruitment_type=None,
         status=None,
         city=None,
+        search=None,
+        experience_level=None,
+        apply_method=None,
+        birth_year=None,
         limit=10,
         offset=0
     ):
@@ -121,6 +125,38 @@ class RecruitmentSelector:
                 city__iexact=city
             )
 
+        # SEARCH — case-insensitive across title, short_description and the
+        # organization name (OR'd). Junk is harmless — a no-match just narrows.
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search)
+                | Q(short_description__icontains=search)
+                | Q(organization__name__icontains=search)
+            )
+
+        # EXPERIENCE LEVEL — free-text field, matched case-insensitively.
+        if experience_level:
+            queryset = queryset.filter(
+                experience_level__icontains=experience_level
+            )
+
+        # APPLY METHOD — only honour a known value; junk is ignored (lenient,
+        # same spirit as the status/apply filters elsewhere).
+        if apply_method and apply_method in Recruitment.ApplyMethod.values:
+            queryset = queryset.filter(
+                apply_method=apply_method
+            )
+
+        # BIRTH YEAR — keep recruitments with at least one age category whose
+        # [min_birth_year, max_birth_year] range contains the year. The related
+        # join can duplicate a recruitment across matching categories, so
+        # .distinct() collapses it back to one row.
+        if birth_year is not None:
+            queryset = queryset.filter(
+                age_categories__min_birth_year__lte=birth_year,
+                age_categories__max_birth_year__gte=birth_year,
+            ).distinct()
+
         # COUNT
         total_count = queryset.count()
 
@@ -142,6 +178,25 @@ class RecruitmentSelector:
 
         return queryset, total_count
 
+
+    @staticmethod
+    def get_recruitment_for_apply(recruitment_id):
+        """
+        Bare fetch for the apply flow: the recruitment must exist and not be
+        soft-deleted. Deliberately does NOT apply visibility/status/deadline/cap
+        rules — those are re-checked authoritatively (under a row lock) inside
+        ApplicationService.apply, so a closed or private recruitment still
+        resolves here and the service can return a precise error instead of a
+        bare 404. Questions + options are prefetched for the apply serializer's
+        answer validation.
+        """
+        return (
+            Recruitment.objects
+            .filter(id=recruitment_id, is_deleted=False)
+            .select_related("organization")
+            .prefetch_related("questions__options")
+            .first()
+        )
 
     @staticmethod
     def get_recruitment_detail(

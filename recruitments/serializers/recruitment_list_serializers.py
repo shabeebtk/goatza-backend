@@ -119,6 +119,7 @@ class RecruitmentMediaSerializer(serializers.ModelSerializer):
             "id",
             "media_type",
             "file_url",
+            "public_id",
             "thumbnail_url",
             "duration",
             "order",
@@ -188,6 +189,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
     questions = RecruitmentQuestionSerializer(many=True, read_only=True)
     my_application = serializers.SerializerMethodField()
     can_apply = serializers.SerializerMethodField()
+    is_accepting_applications = serializers.BooleanField(read_only=True)
     age_categories = RecruitmentAgeCategorySerializer(many=True, read_only=True)
     contacts = RecruitmentContactSerializer(many=True, read_only=True)
     benefits = RecruitmentBenefitSerializer(many=True, read_only=True)
@@ -243,6 +245,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
 
             "my_application",
             "can_apply",
+            "is_accepting_applications",
             "external_apply_url",
 
             "created_at",
@@ -276,17 +279,18 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
         if actor.user.role != "player":
             return False
 
-        if obj.status != Recruitment.Status.ACTIVE:
+        # Single source of truth for status + deadline + max-applications cap,
+        # so the Apply button hides the moment the recruitment stops accepting
+        # applications (e.g. the cap is hit) — mirrors the apply endpoint's gate.
+        if not obj.is_accepting_applications:
             return False
 
-        if obj.application_deadline:
-            from django.utils import timezone
-
-            if timezone.now() > obj.application_deadline:
-                return False
-
+        # A withdrawn application does NOT block re-applying — the apply endpoint
+        # revives the same row. Only a live application hides the button.
         already_applied = obj.applications.filter(
             applicant=actor.user
+        ).exclude(
+            status=RecruitmentApplication.Status.WITHDRAWN
         ).exists()
 
         return not already_applied
@@ -301,6 +305,8 @@ class RecruitmentOwnerDetailSerializer(
 
         fields = RecruitmentDetailSerializer.Meta.fields + [
             "status",
+
+            "max_applications",
 
             "shortlisted_count",
             "selected_count",

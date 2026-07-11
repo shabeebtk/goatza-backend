@@ -3,12 +3,14 @@ from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from core.views.base_views import BaseAPIView
 from recruitments.serializers.recruitment_serializers import (
-    RecruitmentCreateSerializer
+    RecruitmentCreateSerializer, RecruitmentUpdateSerializer,
+    ChangeRecruitmentStatusSerializer
 )
 from recruitments.services.recruitment_service import (
     RecruitmentService
 )
 from utils.response import response_data
+from utils.errors import flatten_validation_error
 from core.decorators.actor_required import org_required
 from recruitments.selectors.recruitment_selectors import RecruitmentSelector
 from recruitments.serializers.recruitment_list_serializers import (
@@ -51,14 +53,16 @@ class CreateRecruitmentAPIView(BaseAPIView):
             )
 
         except ValidationError as e:
+            flat = flatten_validation_error(e.detail)
             logger.warning(
-                f"{TAG} | Validation Error | {str(e)}"
+                f"{TAG} | Validation Error | {flat['message']}"
             )
             return response_data(
                 success=False,
-                message="Validation error",
+                message=flat["message"],
                 status_code=400,
-                error=str(e)
+                error=flat["message"],
+                data={"errors": flat["errors"]}
             )
 
         except Exception as e:
@@ -72,6 +76,190 @@ class CreateRecruitmentAPIView(BaseAPIView):
                 error=str(e)
             )
         
+
+
+
+class UpdateRecruitmentAPIView(BaseAPIView):
+
+    @org_required
+    def patch(self, request, recruitment_id):
+        TAG = "UpdateRecruitmentAPIView"
+        try:
+            actor = request.actor
+
+            # FETCH RECRUITMENT (reuses the visibility-aware selector)
+            recruitment = (
+                RecruitmentSelector.get_recruitment_detail(
+                    recruitment_id=recruitment_id,
+                    actor=actor
+                )
+            )
+            if not recruitment:
+                return response_data(
+                    success=False,
+                    message="Recruitment not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+
+            # OWNER CHECK (same pattern as RecruitmentDetailAPIView)
+            is_owner = (
+                actor
+                and actor.is_org
+                and str(actor.organization.id)
+                == str(recruitment.organization_id)
+            )
+            if not is_owner:
+                return response_data(
+                    success=False,
+                    message=(
+                        "You do not have permission "
+                        "to edit this recruitment"
+                    ),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+
+            serializer = RecruitmentUpdateSerializer(
+                data=request.data,
+                context={
+                    "request": request,
+                    "recruitment": recruitment
+                }
+            )
+            serializer.is_valid(raise_exception=True)
+            recruitment = RecruitmentService.update_recruitment(
+                actor=request.actor,
+                recruitment=recruitment,
+                validated_data=serializer.validated_data
+            )
+
+            logger.info(
+                f"{TAG} | Recruitment updated | "
+                f"recruitment_id={recruitment.id}"
+            )
+
+            return response_data(
+                success=True,
+                message="Recruitment updated successfully",
+                data={
+                    "recruitment_id": str(recruitment.id)
+                }
+            )
+
+        except ValidationError as e:
+            flat = flatten_validation_error(e.detail)
+            logger.warning(
+                f"{TAG} | Validation Error | {flat['message']}"
+            )
+            return response_data(
+                success=False,
+                message=flat["message"],
+                status_code=400,
+                error=flat["message"],
+                data={"errors": flat["errors"]}
+            )
+
+        except Exception as e:
+            logger.error(
+                f"{TAG} | Error | {str(e)}"
+            )
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=str(e)
+            )
+
+
+
+
+class ChangeRecruitmentStatusAPIView(BaseAPIView):
+
+    @org_required
+    def patch(self, request, recruitment_id):
+        TAG = "ChangeRecruitmentStatusAPIView"
+        try:
+            actor = request.actor
+
+            # FETCH RECRUITMENT (reuses the visibility-aware selector)
+            recruitment = (
+                RecruitmentSelector.get_recruitment_detail(
+                    recruitment_id=recruitment_id,
+                    actor=actor
+                )
+            )
+            if not recruitment:
+                return response_data(
+                    success=False,
+                    message="Recruitment not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+
+            # OWNER CHECK (same pattern as UpdateRecruitmentAPIView)
+            is_owner = (
+                actor
+                and actor.is_org
+                and str(actor.organization.id)
+                == str(recruitment.organization_id)
+            )
+            if not is_owner:
+                return response_data(
+                    success=False,
+                    message=(
+                        "You do not have permission "
+                        "to change this recruitment"
+                    ),
+                    status_code=status.HTTP_403_FORBIDDEN
+                )
+
+            serializer = ChangeRecruitmentStatusSerializer(
+                data=request.data
+            )
+            serializer.is_valid(raise_exception=True)
+            recruitment = RecruitmentService.change_status(
+                actor=request.actor,
+                recruitment=recruitment,
+                new_status=serializer.validated_data["status"]
+            )
+
+            logger.info(
+                f"{TAG} | Recruitment status updated | "
+                f"recruitment_id={recruitment.id} | "
+                f"status={recruitment.status}"
+            )
+
+            return response_data(
+                success=True,
+                message="Recruitment status updated",
+                data={
+                    "recruitment_id": str(recruitment.id),
+                    "status": recruitment.status
+                }
+            )
+
+        except ValidationError as e:
+            flat = flatten_validation_error(e.detail)
+            logger.warning(
+                f"{TAG} | Validation Error | {flat['message']}"
+            )
+            return response_data(
+                success=False,
+                message=flat["message"],
+                status_code=400,
+                error=flat["message"],
+                data={"errors": flat["errors"]}
+            )
+
+        except Exception as e:
+            logger.error(
+                f"{TAG} | Error | {str(e)}"
+            )
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=str(e)
+            )
+
 
 
 
@@ -90,6 +278,23 @@ class ListRecruitmentsAPIView(BaseAPIView):
             )
             status_filter = request.query_params.get("status")
             city = request.query_params.get("city")
+            search = request.query_params.get("search")
+            experience_level = request.query_params.get(
+                "experience_level"
+            )
+            apply_method = request.query_params.get("apply_method")
+
+            # birth_year is a lenient int filter — a non-integer value is simply
+            # ignored (dropped to None) instead of 500ing the whole list.
+            birth_year = request.query_params.get("birth_year")
+            try:
+                birth_year = (
+                    int(birth_year)
+                    if birth_year not in (None, "")
+                    else None
+                )
+            except (ValueError, TypeError):
+                birth_year = None
 
             limit = min(
                 int(request.query_params.get("limit", 10)),
@@ -110,6 +315,10 @@ class ListRecruitmentsAPIView(BaseAPIView):
                     recruitment_type=recruitment_type,
                     status=status_filter,
                     city=city,
+                    search=search,
+                    experience_level=experience_level,
+                    apply_method=apply_method,
+                    birth_year=birth_year,
                     limit=limit,
                     offset=offset
                 )
@@ -156,8 +365,6 @@ class RecruitmentDetailAPIView(BaseAPIView):
     def get(self, request, recruitment_id):
 
         TAG = "RecruitmentDetailAPIView"
-
-        print(recruitment_id, '---')
 
         try:
             actor = request.actor

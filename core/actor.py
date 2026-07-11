@@ -3,10 +3,13 @@ from organization.models import OrganizationMember
 from utils.validations import is_valid_uuid
 
 class Actor:
-    def __init__(self, actor_type, user=None, organization=None):
+    def __init__(self, actor_type, user=None, organization=None, organization_member=None):
         self.actor_type = actor_type
         self.user = user
         self.organization = organization
+        # The OrganizationMember the logged-in user acts through (org actors
+        # only). Used to stamp created_by/reviewed_by/changed_by audit FKs.
+        self.organization_member = organization_member
 
     @property
     def is_user(self):
@@ -43,7 +46,8 @@ def resolve_actor(request):
 
         return Actor(
             actor_type="organization",
-            organization=membership.organization
+            organization=membership.organization,
+            organization_member=membership
         )
 
     raise PermissionDenied("Invalid actor type")
