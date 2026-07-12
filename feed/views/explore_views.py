@@ -39,12 +39,23 @@ def parse_explore_filters(request, *, allow_position):
         "lat": None,
         "lng": None,
         "radius_km": None,
+        "mode": None,
     }
 
     # ── search ── trim, drop if empty, cap length ─────────────────
     search = (request.query_params.get("search") or "").strip()
     if search:
         filters["search"] = search[:SEARCH_MAX_LEN]
+
+    # ── mode ── explicit rail mode override ("nearby" | "popular") ──
+    # Lets a rail request one discovery mode instead of the auto
+    # nearby-else-popular pick. The org explore page uses this to show
+    # "Popular players" and "Players near you" as two distinct rails.
+    mode = (request.query_params.get("mode") or "").strip().lower()
+    if mode:
+        if mode not in ("nearby", "popular"):
+            return None, "Invalid mode"
+        filters["mode"] = mode
 
     # ── sport_id ── valid UUID + Sport must exist ─────────────────
     sport_id = (request.query_params.get("sport_id") or "").strip()
