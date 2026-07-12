@@ -86,6 +86,60 @@ class GetOrCreateConversationAPIView(BaseAPIView):
 
 
 
+class MessageTargetSearchAPIView(BaseAPIView):
+    """
+    GET /conversations/search?q=<query>&limit=<n>
+
+    Prioritised people / organization search for the messages screen so the
+    actor can start a NEW conversation straight from the search box, not just
+    filter existing ones. Priority: people already in the conversation list →
+    people the actor follows → everyone else (users + organizations).
+
+    Each result carries ``conversation_id`` when a direct conversation already
+    exists (open it directly) or ``null`` (open via the get-or-create flow).
+    """
+
+    def get(self, request):
+        try:
+            actor = request.actor
+
+            # Actor guard — users and organizations only.
+            if not actor or (not actor.is_user and not actor.is_org):
+                return response_data(
+                    False,
+                    "Search is only available for users and organizations",
+                    status_code=400,
+                )
+
+            query = (
+                request.query_params.get("q")
+                or request.query_params.get("search")
+                or ""
+            ).strip()
+
+            if not query:
+                return response_data(True, "No query", data=[])
+
+            try:
+                limit = int(request.query_params.get("limit", 20))
+            except (TypeError, ValueError):
+                limit = 20
+
+            results = ConversationService.search_message_targets(
+                actor, query, limit=limit
+            )
+
+            return response_data(True, "Search results", data=results)
+
+        except Exception as e:
+            return response_data(
+                False,
+                "Something went wrong",
+                status_code=500,
+                error=str(e),
+            )
+
+
 class ConversationListAPIView(BaseAPIView):
 
     def get(self, request):
@@ -118,7 +172,12 @@ class ConversationListAPIView(BaseAPIView):
                     participants__has_accepted=True
                 )
 
-            
+            # HIDE EMPTY THREADS
+            # A conversation created via get-or-create but never messaged has no
+            # last_message — don't surface those empty threads in either the
+            # Chats or the Requests list.
+            queryset = queryset.filter(last_message__isnull=False)
+
             # SEARCH
             if search:
                 queryset = queryset.filter(

@@ -178,6 +178,8 @@ class ExploreService:
         filter_lng = filters.get("lng")
         has_location_filter = filter_lat is not None and filter_lng is not None
         has_search = bool(filters.get("search"))
+        # Explicit "nearby" | "popular" a rail asked for (see parse_explore_filters).
+        forced_mode = filters.get("mode")
 
         # Center precedence: filter coords > actor location.
         if has_location_filter:
@@ -192,6 +194,11 @@ class ExploreService:
         if cursor:
             # Raises NotFound on a malformed cursor (handled by the view).
             mode = paginator.decode_mode(cursor)
+        elif forced_mode:
+            # A rail explicitly asked for one mode — honor it verbatim (no auto
+            # pick, no popular fallback) so popular + nearby can be shown side by
+            # side as separate rails.
+            mode = forced_mode
         elif has_location_filter:
             mode = cls.NEARBY
         elif has_search:
@@ -199,20 +206,26 @@ class ExploreService:
         else:
             mode = cls.NEARBY if center else cls.POPULAR
 
-        # A nearby request with no usable center (e.g. actor location cleared
-        # mid-scroll) can't run — degrade to popular instead of erroring.
+        # Nearby needs a usable center. Without one, an EXPLICIT nearby request
+        # returns nothing (its rail self-hides → "no location, no nearby rail"),
+        # while the auto pick degrades to popular instead of erroring.
         if mode == cls.NEARBY and center is None:
+            if forced_mode == cls.NEARBY:
+                return {"results": [], "mode": cls.NEARBY, "next_cursor": None}
             mode = cls.POPULAR
 
         queryset = build_queryset(mode, center, radius)
         page = paginator.paginate_queryset(queryset, request, mode)
 
-        # One-time popular fallback ONLY for the plain actor-nearby case:
-        # never when a location filter is active (empty is the correct answer).
+        # One-time popular fallback ONLY for the plain actor-nearby case: never
+        # when a location filter is active (empty is the correct answer), and
+        # never for an explicit rail mode (an empty forced-nearby rail must stay
+        # empty, not silently show popular results under a "nearby" heading).
         allow_fallback = (
             not cursor
             and mode == cls.NEARBY
             and not has_location_filter
+            and not forced_mode
         )
         if allow_fallback and not page:
             mode = cls.POPULAR

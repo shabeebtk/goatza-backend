@@ -3,6 +3,9 @@ from django.db import transaction, IntegrityError
 from django.db.models import Q, Count
 from messaging.models import Conversation, ConversationParticipant
 from connections.services.follow_services import FollowService
+from connections.models import Follow
+from accounts.models import User
+from organization.models import Organization
 from django.utils import timezone
 
 
@@ -263,4 +266,190 @@ class ConversationService:
             raise Exception("Participant not found")
 
         return True
+
+    # ----------------------------------------
+    # MESSAGE TARGET SEARCH
+    # ----------------------------------------
+    @staticmethod
+    def search_message_targets(actor, query, limit=20):
+        """
+        Prioritised people / organization search for starting or resuming a chat
+        from the messages screen.
+
+        Result ordering (deduped by identity, the actor itself excluded):
+          1. Actors the current actor already has a direct conversation with.
+          2. Actors the current actor follows.
+          3. Everyone else (global user + organization search).
+
+        Each item carries ``conversation_id`` when a direct conversation already
+        exists, so the client can open it directly instead of round-tripping
+        through get-or-create. Items without one are opened via the normal
+        get-or-create flow (same as the profile "Message" button).
+        """
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        limit = max(1, min(int(limit or 20), 30))
+
+        actor_user = actor.user if actor.is_user else None
+        actor_org = actor.organization if actor.is_org else None
+
+        results = []
+        seen_users = set()
+        seen_orgs = set()
+
+        def remaining():
+            return limit - len(results)
+
+        def add_user(user, conversation_id=None, source=""):
+            if user is None or user.id in seen_users:
+                return
+            if actor_user and user.id == actor_user.id:
+                return
+            seen_users.add(user.id)
+            results.append(
+                ConversationService._target_item_user(user, conversation_id, source)
+            )
+
+        def add_org(org, conversation_id=None, source=""):
+            if org is None or org.id in seen_orgs:
+                return
+            if actor_org and org.id == actor_org.id:
+                return
+            seen_orgs.add(org.id)
+            results.append(
+                ConversationService._target_item_org(org, conversation_id, source)
+            )
+
+        match_user = (
+            Q(user__username__icontains=query)
+            | Q(user__profile__name__icontains=query)
+        )
+        match_org = (
+            Q(org__username__icontains=query)
+            | Q(org__name__icontains=query)
+        )
+
+        # ----------------------------------------
+        # 1. EXISTING CONVERSATIONS
+        # ----------------------------------------
+        # Conversation ids the actor participates in …
+        my_conversation_ids = list(
+            ConversationParticipant.objects.filter(
+                user=actor_user,
+                org=actor_org,
+            ).values_list("conversation_id", flat=True)
+        )
+
+        if my_conversation_ids:
+            # … then the OTHER participant of each, matching the query. Excluding
+            # the actor's own participant row means the query is matched only
+            # against the person we'd actually be messaging.
+            other_participants = (
+                ConversationParticipant.objects
+                .filter(conversation_id__in=my_conversation_ids)
+                .exclude(user=actor_user, org=actor_org)
+                .filter(match_user | match_org)
+                .select_related("user__profile", "org__profile")
+                .order_by("-conversation__last_message_at", "-conversation__created_at")
+            )
+
+            for part in other_participants:
+                if remaining() <= 0:
+                    break
+                if part.user_id:
+                    add_user(part.user, conversation_id=part.conversation_id, source="conversation")
+                elif part.org_id:
+                    add_org(part.org, conversation_id=part.conversation_id, source="conversation")
+
+        # ----------------------------------------
+        # 2. FOLLOWINGS
+        # ----------------------------------------
+        if remaining() > 0:
+            if actor_user:
+                follows = Follow.objects.filter(follower_user=actor_user)
+            else:
+                follows = Follow.objects.filter(follower_org=actor_org)
+
+            follows = (
+                follows.filter(
+                    Q(following_user__username__icontains=query)
+                    | Q(following_user__profile__name__icontains=query)
+                    | Q(following_org__username__icontains=query)
+                    | Q(following_org__name__icontains=query)
+                )
+                .select_related("following_user__profile", "following_org__profile")
+                .order_by("-created_at")
+            )
+
+            for follow in follows:
+                if remaining() <= 0:
+                    break
+                if follow.following_user_id:
+                    add_user(follow.following_user, source="following")
+                elif follow.following_org_id:
+                    add_org(follow.following_org, source="following")
+
+        # ----------------------------------------
+        # 3. EVERYONE ELSE (global search)
+        # ----------------------------------------
+        if remaining() > 0:
+            users = (
+                User.objects
+                .filter(Q(username__icontains=query) | Q(profile__name__icontains=query))
+                .select_related("profile")
+            )
+            if actor_user:
+                users = users.exclude(id=actor_user.id)
+            if seen_users:
+                users = users.exclude(id__in=seen_users)
+
+            for user in users.order_by("username")[: remaining()]:
+                add_user(user, source="all")
+
+        if remaining() > 0:
+            orgs = (
+                Organization.objects
+                .filter(is_active=True)
+                .filter(Q(username__icontains=query) | Q(name__icontains=query))
+                .select_related("profile")
+            )
+            if actor_org:
+                orgs = orgs.exclude(id=actor_org.id)
+            if seen_orgs:
+                orgs = orgs.exclude(id__in=seen_orgs)
+
+            for org in orgs.order_by("name")[: remaining()]:
+                add_org(org, source="all")
+
+        return results
+
+    @staticmethod
+    def _target_item_user(user, conversation_id=None, source=""):
+        profile = getattr(user, "profile", None)
+        return {
+            "id": str(user.id),
+            "username": user.username,
+            "name": (getattr(profile, "name", "") or "") if profile else "",
+            "avatar": (getattr(profile, "profile_photo", "") or "") if profile else "",
+            "headline": (getattr(profile, "headline", "") or "") if profile else "",
+            "type": "user",
+            "conversation_id": str(conversation_id) if conversation_id else None,
+            "source": source,
+        }
+
+    @staticmethod
+    def _target_item_org(org, conversation_id=None, source=""):
+        profile = getattr(org, "profile", None)
+        return {
+            "id": str(org.id),
+            "username": org.username,
+            "name": org.name or "",
+            "avatar": (getattr(profile, "logo", "") or "") if profile else "",
+            "headline": (getattr(profile, "headline", "") or "") if profile else "",
+            "type": "organization",
+            "conversation_id": str(conversation_id) if conversation_id else None,
+            "source": source,
+        }
 
