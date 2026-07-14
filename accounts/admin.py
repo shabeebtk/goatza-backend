@@ -126,7 +126,7 @@ class UserAdmin(BaseUserAdmin):
             "fields": ("role", "is_active", "is_staff", "is_superuser")
         }),
         ("Verification", {
-            "fields": ("is_email_verified", "is_phone_verified")
+            "fields": ("is_email_verified", "is_phone_verified", "is_onboarding_completed")
         }),
         ("Permissions", {
             "fields": ("groups", "user_permissions"),

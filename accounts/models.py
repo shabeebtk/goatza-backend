@@ -39,6 +39,7 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
         PLAYER = "player", "Player"
         COACH = "coach", "Coach"
         SCOUT = "scout", "Scout"
+        ORG_USER = "org_user", "Org User"
 
     email = models.EmailField(unique=True, null=True, blank=True)
     phone = models.CharField(max_length=15, unique=True, null=True, blank=True)
@@ -46,6 +47,15 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     username = models.CharField(max_length=50, unique=True, null=True, blank=True)
 
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.PLAYER)
+    # True once the user has explicitly chosen their role. Email/OTP signups pick a
+    # role at signup so they stay True; new Google OAuth users start False until they
+    # complete the one-time role-selection step.
+    is_role_confirmed = models.BooleanField(default=True)
+
+    # True once the user has finished (or dismissed with role saved) the post-signup
+    # onboarding flow. New users start False and see onboarding; a data migration
+    # backfills all pre-existing users to True so they never get thrown into it.
+    is_onboarding_completed = models.BooleanField(default=False)
 
     is_email_verified = models.BooleanField(default=False)
     is_phone_verified = models.BooleanField(default=False)

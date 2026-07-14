@@ -13,6 +13,8 @@ class BaseUserSerializer(serializers.ModelSerializer):
             'username',
             'email',
             'role',
+            'is_role_confirmed',
+            'is_onboarding_completed',
             'name',
             'profile_photo',
             'is_email_verified'
@@ -45,6 +47,7 @@ class UserFullSerializer(BaseUserSerializer):
     connections_count = serializers.CharField(source='profile.connections_count', read_only=True)
     height_cm = serializers.CharField(source='profile.height_cm', read_only=True)
     weight_kg = serializers.CharField(source='profile.weight_kg', read_only=True)
+    gender = serializers.CharField(source='profile.gender', read_only=True)
     primary_sport = serializers.SerializerMethodField()
     location = serializers.SerializerMethodField()
 
@@ -53,11 +56,12 @@ class UserFullSerializer(BaseUserSerializer):
             'cover_photo',
             'headline',
             'about',
-            'followers_count', 
-            'following_count', 
+            'followers_count',
+            'following_count',
             'connections_count',
             'height_cm',
             'weight_kg',
+            'gender',
             'created_at',
             'primary_sport',
             'location'

@@ -417,3 +417,77 @@ class UpdateUserProfileAPIView(APIView):
                 error=str(e),
                 status_code=500
             )
+
+
+class SetUserRoleAPIView(APIView):
+    """
+    One-time onboarding action that lets a user set their role.
+
+    Used by OAuth users who signed up without choosing a role (they land here with
+    is_role_confirmed=False). This is NOT a general role editor — once the role is
+    confirmed the endpoint rejects further changes, and role is deliberately absent
+    from UpdateUserProfileSerializer so it can't be edited elsewhere.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        TAG = "[SET ROLE]"
+        user = request.user
+        role = request.data.get("role")
+
+        if role not in User.Role.values:
+            logger.warning(f"{TAG} Invalid role user={user.id}, role={role}")
+            return response_data(False, "Invalid role", status_code=400)
+
+        # Role stays editable throughout the onboarding window and is locked only
+        # once onboarding is finished. A user still onboarding (is_onboarding_completed
+        # False) may freely change their role; after that it's permanent.
+        if user.is_role_confirmed and user.is_onboarding_completed:
+            logger.warning(f"{TAG} Role locked (onboarding complete) user={user.id}")
+            return response_data(False, "Role already set", status_code=400)
+
+        user.role = role
+        user.is_role_confirmed = True
+        user.save(update_fields=["role", "is_role_confirmed", "updated_at"])
+
+        logger.info(f"{TAG} Role set user={user.id}, role={role}")
+
+        return response_data(
+            success=True,
+            message="Role updated successfully",
+            data=UserSerializer(user).data
+        )
+
+
+class CompleteOnboardingAPIView(APIView):
+    """
+    Marks the post-signup onboarding flow as finished for the current user.
+
+    Idempotent: calling it again once onboarding is already complete still returns
+    success. After this succeeds the user's role becomes permanently locked (see
+    SetUserRoleAPIView).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        TAG = "[COMPLETE ONBOARDING]"
+        user = request.user
+
+        if user.is_onboarding_completed:
+            logger.info(f"{TAG} Already complete user={user.id}")
+            return response_data(
+                success=True,
+                message="Onboarding already completed",
+                data=UserSerializer(user).data
+            )
+
+        user.is_onboarding_completed = True
+        user.save(update_fields=["is_onboarding_completed", "updated_at"])
+
+        logger.info(f"{TAG} Completed user={user.id}")
+
+        return response_data(
+            success=True,
+            message="Onboarding completed",
+            data=UserSerializer(user).data
+        )

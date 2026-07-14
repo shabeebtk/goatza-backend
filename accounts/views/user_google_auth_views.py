@@ -120,6 +120,9 @@ class GoogleAuthCallbackView(APIView):
                     username = generate_unique_username(email.split("@")[0])
                     user.username = username
                     user.set_password(generate_random_password())
+                    # New OAuth users haven't picked a role yet — route them through
+                    # the one-time role-selection step before they reach the app.
+                    user.is_role_confirmed = False
                     user.save()
 
                     logger.info(f"New Google user created: {email}")
