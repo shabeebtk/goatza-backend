@@ -4,7 +4,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import User, UserProfile
-from accounts.serializers.user_serializers import UserSerializer
+from accounts.serializers.user_serializers import UserSerializer, UserFullSerializer
 
 # accounts.urls is mounted under /user/ (see core/urls.py)
 SIGNUP_URL = "/user/signup"
@@ -87,13 +87,20 @@ class SetUserRoleTests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
-    def _make_user(self, is_role_confirmed, role=User.Role.PLAYER, email="oauth@example.com"):
+    def _make_user(
+        self,
+        is_role_confirmed,
+        role=User.Role.PLAYER,
+        email="oauth@example.com",
+        is_onboarding_completed=False,
+    ):
         user = User.objects.create_user(
             email=email,
             username=email.split("@")[0],
             password="password123",
             role=role,
             is_role_confirmed=is_role_confirmed,
+            is_onboarding_completed=is_onboarding_completed,
         )
         UserProfile.objects.create(user=user, name="OAuth User")
         return user
@@ -125,8 +132,32 @@ class SetUserRoleTests(TestCase):
         self.assertEqual(user.role, "org_user")
         self.assertTrue(user.is_role_confirmed)
 
-    def test_confirmed_user_cannot_change_role(self):
-        user = self._make_user(is_role_confirmed=True, role=User.Role.PLAYER)
+    def test_confirmed_user_can_change_role_mid_onboarding(self):
+        # Role stays editable while onboarding is still in progress, even though
+        # is_role_confirmed is already True.
+        user = self._make_user(
+            is_role_confirmed=True,
+            role=User.Role.PLAYER,
+            is_onboarding_completed=False,
+        )
+        self.client.force_authenticate(user=user)
+
+        res = self.client.post(ROLE_URL, {"role": "scout"}, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(res.data["success"])
+
+        user.refresh_from_db()
+        self.assertEqual(user.role, "scout")
+        self.assertTrue(user.is_role_confirmed)
+
+    def test_confirmed_user_cannot_change_role_after_onboarding(self):
+        # Once onboarding is complete the role is permanently locked.
+        user = self._make_user(
+            is_role_confirmed=True,
+            role=User.Role.PLAYER,
+            is_onboarding_completed=True,
+        )
         self.client.force_authenticate(user=user)
 
         res = self.client.post(ROLE_URL, {"role": "scout"}, format="json")
@@ -175,3 +206,119 @@ class UserSerializerRoleTests(TestCase):
         self.assertIn("is_role_confirmed", data)
         self.assertEqual(data["role"], "scout")
         self.assertTrue(data["is_role_confirmed"])
+
+    def test_serializer_includes_onboarding_flag(self):
+        user = User.objects.create_user(
+            email="onb@example.com",
+            username="onbuser",
+            password="password123",
+        )
+        UserProfile.objects.create(user=user, name="Onb User")
+
+        data = UserSerializer(user).data
+
+        self.assertIn("is_onboarding_completed", data)
+        self.assertFalse(data["is_onboarding_completed"])
+
+    def test_full_serializer_includes_gender(self):
+        # The identity onboarding step prefills gender, so the full "me" payload
+        # must carry it.
+        user = User.objects.create_user(
+            email="gender@example.com",
+            username="genderuser",
+            password="password123",
+        )
+        UserProfile.objects.create(user=user, name="Gender User", gender="female")
+
+        data = UserFullSerializer(user).data
+
+        self.assertIn("gender", data)
+        self.assertEqual(data["gender"], "female")
+
+
+COMPLETE_URL = "/user/onboarding/complete"
+
+
+class CompleteOnboardingTests(TestCase):
+    """POST /user/onboarding/complete finishes onboarding and locks the role."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _make_user(self, is_onboarding_completed=False, email="onb@example.com"):
+        user = User.objects.create_user(
+            email=email,
+            username=email.split("@")[0],
+            password="password123",
+            is_onboarding_completed=is_onboarding_completed,
+        )
+        UserProfile.objects.create(user=user, name="Onb User")
+        return user
+
+    def test_complete_marks_onboarding_done(self):
+        user = self._make_user(is_onboarding_completed=False)
+        self.client.force_authenticate(user=user)
+
+        res = self.client.post(COMPLETE_URL, {}, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(res.data["success"])
+        self.assertTrue(res.data["data"]["is_onboarding_completed"])
+
+        user.refresh_from_db()
+        self.assertTrue(user.is_onboarding_completed)
+
+    def test_complete_is_idempotent(self):
+        user = self._make_user(is_onboarding_completed=True)
+        self.client.force_authenticate(user=user)
+
+        res = self.client.post(COMPLETE_URL, {}, format="json")
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(res.data["success"])
+        self.assertTrue(res.data["data"]["is_onboarding_completed"])
+
+        user.refresh_from_db()
+        self.assertTrue(user.is_onboarding_completed)
+
+    def test_complete_requires_authentication(self):
+        res = self.client.post(COMPLETE_URL, {}, format="json")
+        self.assertEqual(res.status_code, 401)
+
+
+class OnboardingBackfillMigrationTests(TestCase):
+    """The 0009 data migration must backfill existing users to onboarded=True."""
+
+    migrate_from = ("accounts", "0008_add_org_user_role_and_is_role_confirmed")
+    migrate_to = ("accounts", "0009_user_is_onboarding_completed")
+
+    def test_existing_users_are_marked_onboarded(self):
+        from django.db.migrations.executor import MigrationExecutor
+        from django.db import connection
+
+        # Rewind to just before the onboarding migration.
+        executor = MigrationExecutor(connection)
+        executor.migrate([self.migrate_from])
+        executor.loader.build_graph()
+
+        OldUser = executor.loader.project_state(self.migrate_from).apps.get_model(
+            "accounts", "User"
+        )
+        # A user created before the onboarding column existed.
+        OldUser.objects.create(
+            email="legacy@example.com",
+            username="legacy",
+            password="x",
+            role="player",
+        )
+
+        # Apply the onboarding migration (runs the backfill).
+        executor = MigrationExecutor(connection)
+        executor.migrate([self.migrate_to])
+        executor.loader.build_graph()
+
+        NewUser = executor.loader.project_state(self.migrate_to).apps.get_model(
+            "accounts", "User"
+        )
+        legacy = NewUser.objects.get(email="legacy@example.com")
+        self.assertTrue(legacy.is_onboarding_completed)

@@ -439,8 +439,11 @@ class SetUserRoleAPIView(APIView):
             logger.warning(f"{TAG} Invalid role user={user.id}, role={role}")
             return response_data(False, "Invalid role", status_code=400)
 
-        if user.is_role_confirmed:
-            logger.warning(f"{TAG} Role already set user={user.id}")
+        # Role stays editable throughout the onboarding window and is locked only
+        # once onboarding is finished. A user still onboarding (is_onboarding_completed
+        # False) may freely change their role; after that it's permanent.
+        if user.is_role_confirmed and user.is_onboarding_completed:
+            logger.warning(f"{TAG} Role locked (onboarding complete) user={user.id}")
             return response_data(False, "Role already set", status_code=400)
 
         user.role = role
@@ -452,5 +455,39 @@ class SetUserRoleAPIView(APIView):
         return response_data(
             success=True,
             message="Role updated successfully",
+            data=UserSerializer(user).data
+        )
+
+
+class CompleteOnboardingAPIView(APIView):
+    """
+    Marks the post-signup onboarding flow as finished for the current user.
+
+    Idempotent: calling it again once onboarding is already complete still returns
+    success. After this succeeds the user's role becomes permanently locked (see
+    SetUserRoleAPIView).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        TAG = "[COMPLETE ONBOARDING]"
+        user = request.user
+
+        if user.is_onboarding_completed:
+            logger.info(f"{TAG} Already complete user={user.id}")
+            return response_data(
+                success=True,
+                message="Onboarding already completed",
+                data=UserSerializer(user).data
+            )
+
+        user.is_onboarding_completed = True
+        user.save(update_fields=["is_onboarding_completed", "updated_at"])
+
+        logger.info(f"{TAG} Completed user={user.id}")
+
+        return response_data(
+            success=True,
+            message="Onboarding completed",
             data=UserSerializer(user).data
         )

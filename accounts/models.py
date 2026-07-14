@@ -52,6 +52,11 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     # complete the one-time role-selection step.
     is_role_confirmed = models.BooleanField(default=True)
 
+    # True once the user has finished (or dismissed with role saved) the post-signup
+    # onboarding flow. New users start False and see onboarding; a data migration
+    # backfills all pre-existing users to True so they never get thrown into it.
+    is_onboarding_completed = models.BooleanField(default=False)
+
     is_email_verified = models.BooleanField(default=False)
     is_phone_verified = models.BooleanField(default=False)
 
