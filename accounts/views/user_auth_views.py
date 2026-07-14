@@ -33,6 +33,7 @@ class UserSignupAPIView(APIView):
         email = request.data.get("email")
         password = request.data.get("password")
         name = request.data.get("name")
+        role = request.data.get("role")
 
         if not email or not password:
             return response_data(False, "Email and password are required", status_code=400)
@@ -42,7 +43,10 @@ class UserSignupAPIView(APIView):
 
         if not is_valid_password(password):
             return response_data(False, "Password must be at least 6 characters", status_code=400)
-        
+
+        if role not in User.Role.values:
+            return response_data(False, "Invalid role", status_code=400)
+
         if not name:
             name = email.split("@")[0]
 
@@ -56,6 +60,7 @@ class UserSignupAPIView(APIView):
                     email=email,
                     username=username,
                     password=password,
+                    role=role,
                     is_active=False
                 )
 

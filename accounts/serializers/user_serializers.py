@@ -13,6 +13,7 @@ class BaseUserSerializer(serializers.ModelSerializer):
             'username',
             'email',
             'role',
+            'is_role_confirmed',
             'name',
             'profile_photo',
             'is_email_verified'
