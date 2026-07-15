@@ -13,6 +13,7 @@ from connections.models import Follow
 from core.constant import TYPE_USER
 from posts.serializers.posts_serializers import PostListSerializer
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS
+from services.storage.factory import get_storage_service
 from services.location.location_service import LocationService
 from posts.services.post_service import PostService
 from organization.services.user_organization_services import UserOrganizationService
@@ -114,6 +115,9 @@ class CreatePostAPIView(BaseAPIView):
             image_count = 0
             video_count = 0
 
+            # Storage provider — used to read intrinsic dimensions server-side.
+            storage = get_storage_service()
+
             for idx, media in enumerate(media_list):
 
                 if not isinstance(media, dict):
@@ -175,6 +179,18 @@ class CreatePostAPIView(BaseAPIView):
                 if order < 0:
                     return response_data(False, "Invalid media order", status_code=400)
 
+                # -------------------------
+                # SERVER-SIDE DIMENSIONS
+                # -------------------------
+                # Read width/height (and, for video, an authoritative duration)
+                # straight from the storage provider — client values are never
+                # trusted. Failures degrade to NULL and never block the post.
+                meta = storage.get_media_metadata(public_id, media_type)
+                media["width"] = meta.get("width")
+                media["height"] = meta.get("height")
+                if meta.get("duration") is not None:
+                    media["duration"] = meta["duration"]
+
             # -------------------------
             # MEDIA RULES
             # -------------------------
@@ -226,6 +242,8 @@ class CreatePostAPIView(BaseAPIView):
                             media_type=media.get("media_type"),
                             thumbnail_url=media.get("thumbnail_url", ""),
                             duration=media.get("duration"),
+                            width=media.get("width"),
+                            height=media.get("height"),
                             order=media.get("order", idx),
                         )
                     )

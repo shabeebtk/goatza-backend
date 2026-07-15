@@ -1,7 +1,11 @@
-import time, uuid
+import time, uuid, logging
 import cloudinary
 import cloudinary.utils
+import cloudinary.api
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
 
 class CloudinaryService:
 
@@ -186,3 +190,64 @@ class CloudinaryService:
     def delete_folder_data(self, folder_path: str):
         cloudinary.api.delete_resources_by_prefix(folder_path)
         cloudinary.api.delete_folder(folder_path)
+
+    # -----------------------------------------
+    # media metadata (server-side, never trust client)
+    # -----------------------------------------
+    def _ensure_config(self):
+        """
+        Idempotently point the global cloudinary client at our credentials.
+        `django-cloudinary-storage` normally configures this lazily; setting it
+        explicitly guarantees `cloudinary.api.resource` has creds in every
+        process (web worker, management command, etc.).
+        """
+        cloudinary.config(
+            cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+            api_key=settings.CLOUDINARY_API_KEY,
+            api_secret=settings.CLOUDINARY_API_SECRET,
+        )
+
+    def get_media_metadata(self, public_id: str, media_type: str) -> dict:
+        """
+        Fetch intrinsic width/height (and duration for video) directly from
+        Cloudinary using the stored public_id. The client never supplies these.
+
+        Returns {"width": int, "height": int, ["duration": int]} on success, or
+        an empty dict on any failure — extraction must never block an upload.
+        """
+        if not public_id:
+            return {}
+
+        # Videos live under a different resource_type; default is "image".
+        resource_type = "video" if media_type == "video" else "image"
+
+        try:
+            self._ensure_config()
+            resource = cloudinary.api.resource(
+                public_id,
+                resource_type=resource_type,
+            )
+        except Exception as e:  # cloudinary.exceptions.*, network, auth, ...
+            logger.error(
+                f"CloudinaryService | get_media_metadata failed | "
+                f"public_id={public_id} | type={media_type} | {str(e)}"
+            )
+            return {}
+
+        width = resource.get("width")
+        height = resource.get("height")
+
+        meta = {}
+        if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+            meta["width"] = width
+            meta["height"] = height
+
+        if resource_type == "video":
+            duration = resource.get("duration")
+            if duration is not None:
+                try:
+                    meta["duration"] = int(round(float(duration)))
+                except (TypeError, ValueError):
+                    pass
+
+        return meta

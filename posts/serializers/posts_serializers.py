@@ -13,6 +13,8 @@ class PostMediaSerializer(serializers.ModelSerializer):
             "media_type",
             "thumbnail_url",
             "duration",
+            "width",
+            "height",
             "order"
         ]
 
@@ -115,5 +117,7 @@ class PostMiniSerializer(serializers.ModelSerializer):
         return {
             "type": first.media_type,
             "url": first.file_url,
-            "thumbnail": first.thumbnail_url
+            "thumbnail": first.thumbnail_url,
+            "width": first.width,
+            "height": first.height,
         }
