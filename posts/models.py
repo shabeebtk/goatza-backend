@@ -112,6 +112,11 @@ class PostMedia(BaseUUIDModel):
     media_type = models.CharField(max_length=10, choices=MediaType.choices)
     thumbnail_url = models.URLField(blank=True)
     duration = models.PositiveIntegerField(null=True, blank=True)
+    # Intrinsic media dimensions (px), extracted server-side from the storage
+    # provider on upload. Nullable so extraction failures and legacy rows never
+    # block a post; the client falls back to a square ratio when absent.
+    width = models.PositiveIntegerField(null=True, blank=True)
+    height = models.PositiveIntegerField(null=True, blank=True)
     # For ordering (carousel)
     order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -1,3 +1,6 @@
+from unittest.mock import patch
+
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -7,9 +10,11 @@ from organization.models import (
     OrganizationProfile,
     OrganizationMember,
 )
-from posts.models import Post, Like, Hashtag, PostHashtag
+from posts.models import Post, PostMedia, Like, Hashtag, PostHashtag
 
 SEARCH_URL = "/posts/search"
+LIST_URL = "/posts/list"
+CREATE_URL = "/posts/create"
 
 
 class PostSearchTests(APITestCase):
@@ -222,3 +227,168 @@ class PostSearchTests(APITestCase):
     def test_invalid_cursor_returns_400(self):
         resp = self._get(q="football", cursor="not-a-real-cursor")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# =====================================================================
+# Media dimensions — server-side extraction + API exposure + fallback
+# =====================================================================
+
+CLOUD = "democloud"
+
+
+@override_settings(
+    CLOUDINARY_CLOUD_NAME=CLOUD,
+    CLOUDINARY_API_KEY="key",
+    CLOUDINARY_API_SECRET="secret",
+)
+class PostMediaDimensionsTests(APITestCase):
+    """
+    width/height are extracted server-side on upload (never trusted from the
+    client), persisted on PostMedia, returned in list responses, and degrade to
+    NULL when extraction fails — so legacy/failed rows still render.
+    """
+
+    def setUp(self):
+        self.me = self._user("me", "Me")
+        self.client.force_authenticate(user=self.me)
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com",
+            password="pass1234",
+            username=username,
+        )
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _image_payload(self, order=0):
+        """A create-request media item whose URL/public_id pass validate_media."""
+        public_id = f"users/{self.me.id}/posts/temp/pic{order}"
+        file_url = (
+            f"https://res.cloudinary.com/{CLOUD}/image/upload/v1/{public_id}.jpg"
+        )
+        return {
+            "file_url": file_url,
+            "public_id": public_id,
+            "media_type": "image",
+            "order": order,
+        }
+
+    def _video_payload(self, order=0, duration=10):
+        public_id = f"users/{self.me.id}/posts/temp/clip{order}"
+        file_url = (
+            f"https://res.cloudinary.com/{CLOUD}/video/upload/v1/{public_id}.mp4"
+        )
+        return {
+            "file_url": file_url,
+            "public_id": public_id,
+            "media_type": "video",
+            "thumbnail_url": (
+                f"https://res.cloudinary.com/{CLOUD}/video/upload/so_0/{public_id}.jpg"
+            ),
+            "duration": duration,
+            "order": order,
+        }
+
+    def _list_media(self, post_id):
+        resp = self.client.get(LIST_URL, {"post_id": str(post_id)})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data["data"]["results"]
+        self.assertEqual(len(results), 1)
+        return results[0]["media"]
+
+    # ── create flow: extraction persists trusted dimensions ──────
+
+    @patch("services.storage.cloudinary.CloudinaryService.get_media_metadata")
+    def test_create_persists_server_extracted_dimensions(self, mock_meta):
+        mock_meta.return_value = {"width": 1920, "height": 1080}
+
+        resp = self.client.post(
+            CREATE_URL,
+            {"content": "nice shot", "media": [self._image_payload()]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        media = PostMedia.objects.get()
+        self.assertEqual(media.width, 1920)
+        self.assertEqual(media.height, 1080)
+        # Extraction was driven by the stored public_id, not client dimensions.
+        mock_meta.assert_called_once_with(media.public_id, "image")
+
+    @patch("services.storage.cloudinary.CloudinaryService.get_media_metadata")
+    def test_server_duration_overrides_client_for_video(self, mock_meta):
+        # Client claims 10s; Cloudinary reports 45s → server value wins.
+        mock_meta.return_value = {"width": 1280, "height": 720, "duration": 45}
+
+        resp = self.client.post(
+            CREATE_URL,
+            {"content": "clip", "media": [self._video_payload(duration=10)]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        media = PostMedia.objects.get()
+        self.assertEqual(media.width, 1280)
+        self.assertEqual(media.height, 720)
+        self.assertEqual(media.duration, 45)
+
+    @patch("services.storage.cloudinary.CloudinaryService.get_media_metadata")
+    def test_extraction_failure_stores_null_but_creates_post(self, mock_meta):
+        # Cloudinary hiccup → empty dict → NULL dims, upload NOT blocked.
+        mock_meta.return_value = {}
+
+        resp = self.client.post(
+            CREATE_URL,
+            {"content": "still works", "media": [self._image_payload()]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        media = PostMedia.objects.get()
+        self.assertIsNone(media.width)
+        self.assertIsNone(media.height)
+
+    # ── API exposure ─────────────────────────────────────────────
+
+    def test_list_response_exposes_width_and_height(self):
+        post = Post.objects.create(author_user=self.me, content="hi")
+        PostMedia.objects.create(
+            post=post,
+            file_url="https://cdn.example.com/x.jpg",
+            public_id="users/x/posts/temp/x",
+            media_type=PostMedia.MediaType.IMAGE,
+            width=1080,
+            height=1350,
+            order=0,
+        )
+
+        media = self._list_media(post.id)
+        self.assertEqual(media[0]["width"], 1080)
+        self.assertEqual(media[0]["height"], 1350)
+
+    def test_legacy_media_without_dimensions_serializes_null(self):
+        post = Post.objects.create(author_user=self.me, content="old")
+        PostMedia.objects.create(
+            post=post,
+            file_url="https://cdn.example.com/old.jpg",
+            public_id="users/x/posts/temp/old",
+            media_type=PostMedia.MediaType.IMAGE,
+            order=0,
+        )
+
+        media = self._list_media(post.id)
+        self.assertIsNone(media[0]["width"])
+        self.assertIsNone(media[0]["height"])
+
+    # ── storage helper degrades gracefully ───────────────────────
+
+    def test_get_media_metadata_returns_empty_on_provider_error(self):
+        from services.storage.cloudinary import CloudinaryService
+
+        with patch("cloudinary.api.resource", side_effect=Exception("boom")):
+            meta = CloudinaryService().get_media_metadata("users/x/pic", "image")
+
+        self.assertEqual(meta, {})
