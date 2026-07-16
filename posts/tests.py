@@ -11,10 +11,12 @@ from organization.models import (
     OrganizationMember,
 )
 from posts.models import Post, PostMedia, Like, Hashtag, PostHashtag
+from sports.models import Sport
 
 SEARCH_URL = "/posts/search"
 LIST_URL = "/posts/list"
 CREATE_URL = "/posts/create"
+UPDATE_URL = "/posts/update"
 
 
 class PostSearchTests(APITestCase):
@@ -392,3 +394,113 @@ class PostMediaDimensionsTests(APITestCase):
             meta = CloudinaryService().get_media_metadata("users/x/pic", "image")
 
         self.assertEqual(meta, {})
+
+
+# =====================================================================
+# Edit post — text fields only (content / visibility / sport / location)
+# =====================================================================
+
+class PostUpdateTests(APITestCase):
+    """PATCH /posts/update — owner edits text fields; media is never touched."""
+
+    def setUp(self):
+        self.me = self._user("me", "Me")
+        self.client.force_authenticate(user=self.me)
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234", username=username,
+        )
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _org(self, username, name):
+        org = Organization.objects.create(
+            name=name, username=username, type=Organization.Type.CLUB
+        )
+        OrganizationProfile.objects.create(organization=org, logo="")
+        return org
+
+    def _patch(self, payload, org=None):
+        headers = {}
+        if org is not None:
+            headers = {"HTTP_X_ACTOR_TYPE": "organization", "HTTP_X_ACTOR_ID": str(org.id)}
+        return self.client.patch(UPDATE_URL, payload, format="json", **headers)
+
+    # ── owner edits ──────────────────────────────────────────────
+
+    def test_owner_updates_content_and_visibility(self):
+        post = Post.objects.create(author_user=self.me, content="old")
+        resp = self._patch({
+            "post_id": str(post.id), "content": "new text", "visibility": "followers",
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        post.refresh_from_db()
+        self.assertEqual(post.content, "new text")
+        self.assertEqual(post.visibility, "followers")
+
+    def test_non_owner_cannot_update(self):
+        other = self._user("o", "O")
+        post = Post.objects.create(author_user=other, content="theirs")
+        resp = self._patch({"post_id": str(post.id), "content": "hacked"})
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        post.refresh_from_db()
+        self.assertEqual(post.content, "theirs")
+
+    def test_clear_sport_and_location(self):
+        sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        post = Post.objects.create(
+            author_user=self.me, content="x", sport=sport,
+            location_name="Stadium", city="Kannur", latitude=11.0, longitude=75.0,
+        )
+        resp = self._patch({"post_id": str(post.id), "sport_id": None, "location": None})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        post.refresh_from_db()
+        self.assertIsNone(post.sport)
+        self.assertIsNone(post.latitude)
+        self.assertEqual(post.location_name, "")
+
+    def test_location_absent_leaves_it_unchanged(self):
+        post = Post.objects.create(
+            author_user=self.me, content="x",
+            location_name="Stadium", city="Kannur", latitude=11.0, longitude=75.0,
+        )
+        resp = self._patch({"post_id": str(post.id), "content": "edited"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        post.refresh_from_db()
+        self.assertEqual(post.location_name, "Stadium")   # untouched
+        self.assertEqual(post.content, "edited")
+
+    def test_set_sport(self):
+        sport = Sport.objects.create(name="Cricket", icon_name="mdi:cricket")
+        post = Post.objects.create(author_user=self.me, content="x")
+        resp = self._patch({"post_id": str(post.id), "sport_id": str(sport.id)})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        post.refresh_from_db()
+        self.assertEqual(post.sport_id, sport.id)
+
+    def test_media_untouched_on_update(self):
+        post = Post.objects.create(author_user=self.me, content="x")
+        PostMedia.objects.create(
+            post=post, file_url="https://cdn.example.com/x.jpg",
+            public_id="users/x/posts/temp/x", media_type=PostMedia.MediaType.IMAGE, order=0,
+        )
+        resp = self._patch({"post_id": str(post.id), "content": "edited"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(post.media.count(), 1)
+
+    def test_empty_content_without_media_rejected(self):
+        post = Post.objects.create(author_user=self.me, content="something")
+        resp = self._patch({"post_id": str(post.id), "content": "   "})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_org_actor_updates_org_post(self):
+        org = self._org("dreamfc", "Dream FC")
+        OrganizationMember.objects.create(
+            organization=org, user=self.me, role=OrganizationMember.Role.OWNER
+        )
+        post = Post.objects.create(author_org=org, content="org old")
+        resp = self._patch({"post_id": str(post.id), "content": "org new"}, org=org)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        post.refresh_from_db()
+        self.assertEqual(post.content, "org new")

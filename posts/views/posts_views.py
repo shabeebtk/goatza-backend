@@ -277,6 +277,153 @@ class CreatePostAPIView(BaseAPIView):
 
 
 
+class UpdatePostAPIView(BaseAPIView):
+    '''
+    Edit a post's text fields only — media is never touched here.
+
+    PATCH /posts/update
+    {
+        "post_id": "uuid",
+        "content": "updated text",
+        "visibility": "public" | "followers",
+        "sport_id": "uuid" | null,          # null clears the sport
+        "location": { ...place... } | null   # omit = unchanged, null = clear
+    }
+    '''
+    def patch(self, request):
+        TAG = "UpdatePostAPIView"
+
+        try:
+            actor = request.actor
+            data = request.data
+            post_id = data.get("post_id")
+
+            if not post_id:
+                return response_data(False, message="post_id is required", status_code=400)
+
+            # -------------------------
+            # OWNERSHIP (active actor must be the author)
+            # -------------------------
+            if actor.is_user:
+                post = Post.objects.filter(
+                    id=post_id, author_user=actor.user, is_deleted=False
+                ).first()
+            elif actor.is_org:
+                post = Post.objects.filter(
+                    id=post_id, author_org=actor.organization, is_deleted=False
+                ).first()
+            else:
+                return response_data(False, message="Invalid actor", status_code=400)
+
+            if not post:
+                return response_data(False, message="Post not found", status_code=404)
+
+            with transaction.atomic():
+                # -------------------------
+                # CONTENT
+                # -------------------------
+                if "content" in data:
+                    content = (data.get("content") or "").strip()
+                    if not content and not post.media.exists():
+                        return response_data(False, message="Post cannot be empty", status_code=400)
+                    post.content = content
+
+                # -------------------------
+                # VISIBILITY
+                # -------------------------
+                if "visibility" in data:
+                    visibility = data.get("visibility")
+                    if visibility not in Post.Visibility.values:
+                        return response_data(False, message="Invalid visibility", status_code=400)
+                    post.visibility = visibility
+
+                # -------------------------
+                # SPORT  (null / "" clears)
+                # -------------------------
+                if "sport_id" in data:
+                    sport_id = data.get("sport_id")
+                    if sport_id:
+                        sport = Sport.objects.filter(id=sport_id).only("id").first()
+                        if not sport:
+                            return response_data(False, message="Invalid sport_id", status_code=400)
+                        post.sport = sport
+                    else:
+                        post.sport = None
+
+                # -------------------------
+                # LOCATION  (absent = unchanged, null = clear, dict = set)
+                # -------------------------
+                if "location" in data:
+                    location_data = data.get("location")
+
+                    if location_data:
+                        if not isinstance(location_data, dict):
+                            return response_data(False, message="Invalid location format", status_code=400)
+                        if not location_data.get("latitude") or not location_data.get("longitude"):
+                            return response_data(False, message="Location must include latitude and longitude", status_code=400)
+
+                        try:
+                            location = LocationService.get_or_create_location(location_data)
+                        except ValueError as ve:
+                            return response_data(False, error=str(ve), status_code=400)
+
+                        denorm = LocationService.build_denormalized(location)
+                        post.location = denorm.get("location")
+                        post.location_name = denorm.get("location_name", "")
+                        post.city = denorm.get("city", "")
+                        post.country_code = denorm.get("country_code", "")
+                        post.latitude = denorm.get("latitude")
+                        post.longitude = denorm.get("longitude")
+                    else:
+                        post.location = None
+                        post.location_name = ""
+                        post.city = ""
+                        post.country_code = ""
+                        post.latitude = None
+                        post.longitude = None
+
+                post.save()
+
+            # -------------------------
+            # SERIALIZE (with this actor's reaction)
+            # -------------------------
+            post = (
+                Post.objects
+                .select_related("author_user__profile", "author_org", "sport")
+                .prefetch_related("media")
+                .get(id=post.id)
+            )
+
+            user_reactions = {}
+            if actor.is_user:
+                reaction = Like.objects.filter(user=actor.user, post_id=post.id).values("post_id", "type").first()
+            else:
+                reaction = Like.objects.filter(organization=actor.organization, post_id=post.id).values("post_id", "type").first()
+            if reaction:
+                user_reactions[reaction["post_id"]] = reaction["type"]
+
+            serializer = PostListSerializer(post, context={"user_reactions": user_reactions})
+
+            logger.info(f"{TAG} | Post updated | post_id={post.id}")
+
+            return response_data(
+                success=True,
+                message="Post updated successfully",
+                data=serializer.data,
+            )
+
+        except Exception as e:
+            logger.error(f"{TAG} | Error | {str(e)}")
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=str(e),
+            )
+
+
+
+
 class ListPostsAPIView(BaseAPIView):
 
     def get(self, request):
