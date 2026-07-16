@@ -1,5 +1,5 @@
 from django.urls import path
-from posts.views.posts_views import CreatePostAPIView, ListPostsAPIView, DeletePost
+from posts.views.posts_views import CreatePostAPIView, ListPostsAPIView, DeletePost, UpdatePostAPIView
 from posts.views.like_views import ToggleLikeAPIView, ListPostLikesAPIView
 from posts.views.comments_views import ListCommentsAPIView, CreateCommentAPIView, ListRepliesAPIView
 from posts.views.search_views import PostSearchAPIView
@@ -8,6 +8,7 @@ from posts.views.search_views import PostSearchAPIView
 
 urlpatterns = [
     path('create', CreatePostAPIView.as_view(), name='create-post'),
+    path('update', UpdatePostAPIView.as_view(), name='update-post'),
     path('list', ListPostsAPIView.as_view(), name='list-posts'),
     path('search', PostSearchAPIView.as_view(), name='search-posts'),
     path('delete', DeletePost.as_view(), name='delete-posts'),
