@@ -163,8 +163,13 @@ class RecruitmentRequirementInputSerializer(serializers.Serializer):
 # LOCATION INPUT
 class RecruitmentLocationInputSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
-    city = serializers.CharField(max_length=100)
-    country_code = serializers.CharField(max_length=5)
+    # city / country_code are denormalized display strings — the model allows
+    # them blank and the service reads them with a default, so don't hard-require
+    # them. Mapbox results other than type "place" may carry no city/country.
+    city = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    country_code = serializers.CharField(
+        max_length=5, required=False, allow_blank=True
+    )
     latitude = serializers.FloatField()
     longitude = serializers.FloatField()
 
