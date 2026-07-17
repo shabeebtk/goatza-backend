@@ -48,6 +48,7 @@ class UserFullSerializer(BaseUserSerializer):
     height_cm = serializers.CharField(source='profile.height_cm', read_only=True)
     weight_kg = serializers.CharField(source='profile.weight_kg', read_only=True)
     gender = serializers.CharField(source='profile.gender', read_only=True)
+    birthdate = serializers.DateField(source='profile.birthdate', read_only=True, allow_null=True)
     primary_sport = serializers.SerializerMethodField()
     location = serializers.SerializerMethodField()
 
@@ -62,6 +63,7 @@ class UserFullSerializer(BaseUserSerializer):
             'height_cm',
             'weight_kg',
             'gender',
+            'birthdate',
             'created_at',
             'primary_sport',
             'location'

@@ -1,6 +1,7 @@
 import logging
 from django.db import transaction
-from django.db.models import F, Prefetch
+from django.db.models import F, Prefetch, Value
+from django.db.models.functions import Greatest
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 
@@ -103,6 +104,95 @@ class CreateCommentAPIView(BaseAPIView):
                 message="Comment added",
                 data={"comment_id": str(comment.id)}
             )
+
+        except Exception as e:
+            logger.error(f"{TAG} | Error | {str(e)}", exc_info=True)
+            return response_data(False, "Something went wrong", status_code=500, error=str(e))
+
+
+class DeleteCommentAPIView(BaseAPIView):
+    '''
+    Soft-delete a comment.
+
+    DELETE /posts/comments/delete?comment_id=<uuid>
+
+    Allowed for: the comment's author OR the post's owner (active actor).
+    Deleting a top-level comment cascades to its replies. Denormalized counters
+    (post.comments_count, root.reply_count) are decremented accordingly.
+    '''
+    def delete(self, request):
+        TAG = "DeleteCommentAPIView"
+
+        try:
+            actor = request.actor
+            comment_id = request.query_params.get("comment_id")
+
+            if not actor or (not actor.is_user and not actor.is_org):
+                return response_data(False, "Invalid actor", status_code=400)
+
+            if not comment_id:
+                return response_data(False, "comment_id is required", status_code=400)
+
+            with transaction.atomic():
+                comment = (
+                    Comment.objects
+                    .select_for_update()
+                    .select_related("post")
+                    .filter(id=comment_id, is_deleted=False)
+                    .first()
+                )
+
+                if not comment:
+                    return response_data(False, "Comment not found", status_code=404)
+
+                post = comment.post
+
+                # -------------------------
+                # PERMISSION — comment author OR post owner
+                # -------------------------
+                if actor.is_user:
+                    is_author = comment.user_id == actor.user.id
+                    is_post_owner = post.author_user_id == actor.user.id
+                else:
+                    is_author = comment.organization_id == actor.organization.id
+                    is_post_owner = post.author_org_id == actor.organization.id
+
+                if not (is_author or is_post_owner):
+                    return response_data(False, "Not allowed to delete this comment", status_code=403)
+
+                # -------------------------
+                # SOFT DELETE (+ cascade for a top-level comment)
+                # -------------------------
+                if comment.parent_id is None:
+                    reply_ids = list(
+                        Comment.objects.filter(parent_id=comment.id, is_deleted=False)
+                        .values_list("id", flat=True)
+                    )
+                    removed = 1 + len(reply_ids)
+
+                    if reply_ids:
+                        Comment.objects.filter(id__in=reply_ids).update(is_deleted=True)
+
+                    comment.is_deleted = True
+                    comment.save(update_fields=["is_deleted"])
+                else:
+                    removed = 1
+                    comment.is_deleted = True
+                    comment.save(update_fields=["is_deleted"])
+
+                    # Drop the reply from its root's denormalized count
+                    Comment.objects.filter(id=comment.parent_id).update(
+                        reply_count=Greatest(F("reply_count") - 1, Value(0))
+                    )
+
+                # Decrement the post's total comment count (never below zero)
+                Post.objects.filter(id=post.id).update(
+                    comments_count=Greatest(F("comments_count") - removed, Value(0))
+                )
+
+            logger.info(f"{TAG} | comment={comment_id} | removed={removed}")
+
+            return response_data(True, message="Comment deleted")
 
         except Exception as e:
             logger.error(f"{TAG} | Error | {str(e)}", exc_info=True)

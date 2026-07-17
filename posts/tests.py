@@ -10,13 +10,14 @@ from organization.models import (
     OrganizationProfile,
     OrganizationMember,
 )
-from posts.models import Post, PostMedia, Like, Hashtag, PostHashtag
+from posts.models import Post, PostMedia, Like, Comment, Hashtag, PostHashtag
 from sports.models import Sport
 
 SEARCH_URL = "/posts/search"
 LIST_URL = "/posts/list"
 CREATE_URL = "/posts/create"
 UPDATE_URL = "/posts/update"
+COMMENT_DELETE_URL = "/posts/comments/delete"
 
 
 class PostSearchTests(APITestCase):
@@ -504,3 +505,115 @@ class PostUpdateTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         post.refresh_from_db()
         self.assertEqual(post.content, "org new")
+
+
+# =====================================================================
+# Delete comment — comment author OR post owner
+# =====================================================================
+
+class CommentDeleteTests(APITestCase):
+    """DELETE /posts/comments/delete — author or post owner; cascades replies."""
+
+    def setUp(self):
+        self.me = self._user("me", "Me")
+        self.client.force_authenticate(user=self.me)
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234", username=username,
+        )
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _org(self, username, name):
+        org = Organization.objects.create(
+            name=name, username=username, type=Organization.Type.CLUB
+        )
+        OrganizationProfile.objects.create(organization=org, logo="")
+        return org
+
+    def _comment(self, post, author, parent=None, reply_count=0):
+        return Comment.objects.create(
+            post=post, user=author, comment="c", parent=parent, reply_count=reply_count,
+        )
+
+    def _delete(self, comment_id, org=None):
+        headers = {}
+        if org is not None:
+            headers = {"HTTP_X_ACTOR_TYPE": "organization", "HTTP_X_ACTOR_ID": str(org.id)}
+        return self.client.delete(f"{COMMENT_DELETE_URL}?comment_id={comment_id}", **headers)
+
+    # ── permission ───────────────────────────────────────────────
+
+    def test_author_deletes_own_comment(self):
+        post = Post.objects.create(author_user=self.me, content="p", comments_count=1)
+        c = self._comment(post, self.me)
+        resp = self._delete(c.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        c.refresh_from_db()
+        self.assertTrue(c.is_deleted)
+        post.refresh_from_db()
+        self.assertEqual(post.comments_count, 0)
+
+    def test_post_owner_deletes_others_comment(self):
+        stranger = self._user("s", "S")
+        post = Post.objects.create(author_user=self.me, content="p", comments_count=1)
+        c = self._comment(post, stranger)
+        resp = self._delete(c.id)   # I own the post
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        c.refresh_from_db()
+        self.assertTrue(c.is_deleted)
+
+    def test_unrelated_user_cannot_delete(self):
+        owner = self._user("o", "O")
+        stranger = self._user("s", "S")
+        post = Post.objects.create(author_user=owner, content="p", comments_count=1)
+        c = self._comment(post, stranger)
+        resp = self._delete(c.id)   # me: neither owner nor author
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        c.refresh_from_db()
+        self.assertFalse(c.is_deleted)
+
+    # ── cascade + counters ───────────────────────────────────────
+
+    def test_delete_top_level_cascades_replies(self):
+        post = Post.objects.create(author_user=self.me, content="p", comments_count=3)
+        root = self._comment(post, self.me, reply_count=2)
+        r1 = self._comment(post, self.me, parent=root)
+        r2 = self._comment(post, self.me, parent=root)
+        resp = self._delete(root.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        for obj in (root, r1, r2):
+            obj.refresh_from_db()
+            self.assertTrue(obj.is_deleted)
+        post.refresh_from_db()
+        self.assertEqual(post.comments_count, 0)   # 3 − (1 + 2)
+
+    def test_delete_reply_decrements_root_and_post(self):
+        post = Post.objects.create(author_user=self.me, content="p", comments_count=2)
+        root = self._comment(post, self.me, reply_count=1)
+        reply = self._comment(post, self.me, parent=root)
+        resp = self._delete(reply.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        reply.refresh_from_db(); root.refresh_from_db(); post.refresh_from_db()
+        self.assertTrue(reply.is_deleted)
+        self.assertEqual(root.reply_count, 0)
+        self.assertEqual(post.comments_count, 1)
+
+    def test_missing_comment_returns_404(self):
+        import uuid as _uuid
+        resp = self._delete(_uuid.uuid4())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_org_owner_deletes_comment_on_org_post(self):
+        org = self._org("dreamfc", "Dream FC")
+        OrganizationMember.objects.create(
+            organization=org, user=self.me, role=OrganizationMember.Role.OWNER
+        )
+        stranger = self._user("s", "S")
+        post = Post.objects.create(author_org=org, content="p", comments_count=1)
+        c = self._comment(post, stranger)
+        resp = self._delete(c.id, org=org)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        c.refresh_from_db()
+        self.assertTrue(c.is_deleted)

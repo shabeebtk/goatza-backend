@@ -35,6 +35,37 @@ def _first_message(value):
     return str(value)
 
 
+# Friendly labels for field keys, so the top-level message reads like a
+# sentence ("Positions: This field is required.") instead of exposing raw
+# serializer keys. Anything not listed falls back to a title-cased key.
+_FIELD_LABELS = {
+    "sport_id": "Sport",
+    "recruitment_type": "Type",
+    "short_description": "Short description",
+    "event_date": "Trial / event date",
+    "application_deadline": "Application deadline",
+    "external_apply_url": "Application link",
+    "apply_method": "Apply method",
+    "fee_amount": "Fee amount",
+    "max_applications": "Max applications",
+    "age_categories": "Age categories",
+    "positions": "Positions",
+    "questions": "Questions",
+    "contacts": "Contacts",
+    "media": "Media",
+    "shared_name": "Name",
+    "shared_email": "Email",
+    "shared_phone": "Phone",
+}
+
+
+def _humanize_field(field):
+    """A field key → human label ('event_date' → 'Trial / event date')."""
+    if field in _FIELD_LABELS:
+        return _FIELD_LABELS[field]
+    return field.replace("_", " ").strip().capitalize()
+
+
 def flatten_validation_error(detail):
     """
     Flatten a DRF ValidationError.detail into:
@@ -46,7 +77,10 @@ def flatten_validation_error(detail):
 
     Field errors keep their field name; list / string details are keyed under
     "non_field_errors". The top-level message is the non_field_errors message
-    when present, otherwise the first field message.
+    when present (already a full sentence), otherwise the first FIELD message
+    prefixed with the field's human label — so a bare "This field is required."
+    becomes "Positions: This field is required." and the client can tell which
+    input actually failed.
     """
     errors = {}
 
@@ -61,9 +95,13 @@ def flatten_validation_error(detail):
             errors["non_field_errors"] = message
 
     if "non_field_errors" in errors:
+        # Cross-field / object-level errors are already full sentences.
         message = errors["non_field_errors"]
     elif errors:
-        message = next(iter(errors.values()))
+        # Field errors: prefix the human label so a bare "This field is
+        # required." tells the client which field actually failed.
+        field, first = next(iter(errors.items()))
+        message = f"{_humanize_field(field)}: {first}"
     else:
         message = "Validation error"
 
