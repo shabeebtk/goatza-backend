@@ -24,6 +24,13 @@ RECRUITMENT_STATUS_COPY = {
 }
 RECRUITMENT_STATUS_COPY_DEFAULT = {"verb": "updated your application", "body": "was updated"}
 
+# Copy for shared-content messages, keyed by what was shared. Shared with
+# grouping_service so in-app + push text can't drift.
+MESSAGE_SHARE_NOUN = {
+    "post": "a post",
+    "recruitment": "a recruitment",
+}
+
 def _resolve_actor_display(notification: "Notification"):
     """
     Return (name, username, avatar) for whichever actor
@@ -120,6 +127,16 @@ def build_notification_payload(notification: "Notification") -> dict:
             f"/organization/admin/{notification.recipient_org_id}"
             f"/recruitments/{recruitment_id}?tab=applicants"
         )
+
+    elif notification.type == Notification.Type.MESSAGE:
+        conversation_id = notification.data.get("conversation_id", "")
+        shared_kind = notification.data.get("shared_kind", "")
+        noun = MESSAGE_SHARE_NOUN.get(shared_kind, "something")
+        title = f"{actor_name} shared {noun} with you"
+        # The note is the sender's own caption — safe to surface, and it's what
+        # makes the push worth opening. Falls back to a generic nudge.
+        body = notification.data.get("note", "") or "Tap to view"
+        url = f"/messages/{conversation_id}"
 
     elif notification.type == Notification.Type.RECRUITMENT_APPLICATION_STATUS:
         to_status = notification.data.get("to_status", "")
@@ -330,6 +347,68 @@ class NotificationService:
                     ),
                 )
                 _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # MESSAGE SHARE
+    # ──────────────────────────────────────────
+    @staticmethod
+    def message_share(
+        message,
+        recipient_user=None,
+        recipient_org=None,
+    ):
+        """
+        Notify the other side of a conversation that content was shared with
+        them.
+
+        Grouped per conversation, so a burst of shares into one thread collapses
+        into a single "X shared 3 things with you" entry rather than three.
+        Deduplicated per message, so a retried send can never double-notify.
+
+        Unlike recruitment applies there is no push throttle: a share is a
+        deliberate 1:1 message, and every message pushes today (see
+        MessageService._trigger_push). Grouping only affects the in-app list.
+        """
+        conversation_id = message.conversation_id
+        dedup_key = f"message_share:{message.id}"
+
+        if Notification.objects.filter(dedup_key=dedup_key).exists():
+            return
+
+        shared_kind = (
+            "post"
+            if message.message_type == "shared_post"
+            else "recruitment"
+        )
+
+        notification = Notification.objects.create(
+            type=Notification.Type.MESSAGE,
+            group_key=f"message_share:conversation:{conversation_id}",
+            dedup_key=dedup_key,
+            # Deliberately NOT setting the post/recruitment FK. The grouped
+            # notification list renders those with PostMiniSerializer, which
+            # applies no visibility check — safe for likes/comments (the
+            # recipient IS the author) but not here, where the recipient may
+            # not be allowed to see what was shared. The notification only says
+            # "X shared something"; the visibility-checked preview lives on the
+            # message. Ids stay in `data` for deep-linking.
+            data={
+                "conversation_id": str(conversation_id),
+                "message_id": str(message.id),
+                "shared_kind": shared_kind,
+                "shared_id": str(
+                    message.shared_post_id or message.shared_recruitment_id
+                ),
+                "note": message.content[:120],
+            },
+            **NotificationService._actor_kwargs(
+                message.sender_user, message.sender_org
+            ),
+            **NotificationService._recipient_kwargs(
+                recipient_user, recipient_org
+            ),
+        )
+        _dispatch(notification)
 
     # ──────────────────────────────────────────
     # RECRUITMENT APPLICATION

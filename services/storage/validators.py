@@ -12,6 +12,22 @@ def is_valid_cloudinary_url(url: str) -> bool:
     return settings.CLOUDINARY_CLOUD_NAME in url
 
 
+def build_video_thumbnail_url(public_id: str) -> str:
+    """
+    Cloudinary auto-generates a poster frame for any uploaded video: the same
+    delivery URL with resource_type=video and an ``so_0`` (still, second 0)
+    transformation, served as .jpg. Derived server-side from the public_id (the
+    same shape the posts upload flow builds client-side) so the client can't
+    supply an arbitrary thumbnail.
+    """
+    if not public_id:
+        return ""
+    return (
+        f"https://res.cloudinary.com/{settings.CLOUDINARY_CLOUD_NAME}"
+        f"/video/upload/so_0/{public_id}.jpg"
+    )
+
+
 def extract_public_id_from_url(url: str) -> str:
     """
     Example:

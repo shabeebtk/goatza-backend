@@ -73,15 +73,58 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """
         This is triggered by:
         channel_layer.group_send()
+
+        Emits the full serialized message under "message" — the same shape the
+        REST list endpoint returns, so the client has one message schema.
+
+        The legacy flat keys (message_id/content/sender/created_at) are echoed
+        alongside it because the current web client still reads those. Drop them
+        once useChatSocket.ts consumes "message".
         """
+        message = event["message"]
+
+        # The payload was rendered without a viewer, so any followers-only share
+        # came back "unavailable". This socket knows who it belongs to — if the
+        # share is one THIS actor may see, re-render it for them. Costs a query,
+        # but only for shares that were hidden, never for ordinary chat.
+        if self._has_hidden_share(message):
+            message = await self._serialize_for_me(message["id"]) or message
 
         await self.send(text_data=json.dumps({
             "type": "message",
+            "message": message,
+
+            # DEPRECATED — see docstring.
             "message_id": event["message_id"],
             "content": event["content"],
             "sender": event["sender"],
             "created_at": event["created_at"],
-        }))
+        }, default=str))
+
+    @staticmethod
+    def _has_hidden_share(message):
+        return any(
+            (message.get(key) or {}).get("unavailable")
+            for key in ("shared_post_preview", "shared_recruitment_preview")
+        )
+
+    @sync_to_async
+    def _serialize_for_me(self, message_id):
+        from messaging.selectors.message_selectors import MessageSelector
+        from messaging.serializers.message_serializers import MessageSerializer
+        from messaging.selectors.share_selectors import ShareViewer
+
+        message = MessageSelector.list_messages(
+            self.conversation_id
+        ).filter(id=message_id).first()
+
+        if not message:
+            return None
+
+        return MessageSerializer(
+            message,
+            context={"viewer": ShareViewer.from_actor(self.actor)},
+        ).data
 
     # VALIDATION
     @sync_to_async

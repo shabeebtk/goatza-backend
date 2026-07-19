@@ -52,7 +52,11 @@ class ConversationListSerializer(serializers.ModelSerializer):
             return None
 
         from messaging.serializers.message_serializers import MessageSerializer
-        return MessageSerializer(obj.last_message).data
+
+        # Pass the context through: without it every nested last_message would
+        # build its own ShareViewer and re-query the follow graph once per
+        # conversation, and shared previews would render as unavailable.
+        return MessageSerializer(obj.last_message, context=self.context).data
 
     # ----------------------------------------
     # UNREAD COUNT (FIXED)
@@ -141,7 +145,11 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
             return None
 
         from messaging.serializers.message_serializers import MessageSerializer
-        return MessageSerializer(obj.last_message).data
+
+        # Pass the context through: without it every nested last_message would
+        # build its own ShareViewer and re-query the follow graph once per
+        # conversation, and shared previews would render as unavailable.
+        return MessageSerializer(obj.last_message, context=self.context).data
 
     # REQUEST ACCEPTED?
     def get_is_accepted(self, obj):

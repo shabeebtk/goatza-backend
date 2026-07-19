@@ -22,6 +22,9 @@ class GetUploadConfigAPIView(BaseAPIView):
         "organization_logo",
         "organization_cover",
         "recruitments",
+        # Chat media — works for both user and org actors (no actor-type guard
+        # below), scoped server-side to chat/<actor path>.
+        "chat",
     }
 
     def get(self, request):

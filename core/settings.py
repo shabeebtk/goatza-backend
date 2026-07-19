@@ -165,6 +165,8 @@ REST_FRAMEWORK = {
         'login': '10/min',
         'otp': '5/min',
         'forgot_password': '3/hour',
+        'message_share': '30/min',   # per actor — see messaging.throttles
+        'chat_media': '30/min',      # per actor — chat photo uploads
     }
 }
 

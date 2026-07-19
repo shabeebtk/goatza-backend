@@ -3,6 +3,7 @@ from django.db.models import Q, Exists, OuterRef, Case, When, BooleanField
 from rest_framework import status
 from core.views.base_views import BaseAPIView
 from messaging.models import Conversation, ConversationParticipant, Message
+from messaging.selectors.share_selectors import ShareViewer
 from messaging.serializers.conversation_serializers import (
      ConversationListSerializer, ConversationDetailSerializer
 )
@@ -193,10 +194,19 @@ class ConversationListAPIView(BaseAPIView):
             # ----------------------------------------
             queryset = (
                 queryset
-                .select_related("last_message")
+                .select_related(
+                    "last_message",
+                    # the last message may be a share — join what its preview reads
+                    "last_message__shared_post__author_user__profile",
+                    "last_message__shared_post__author_org__profile",
+                    "last_message__shared_recruitment__organization__profile",
+                    "last_message__shared_recruitment__sport",
+                )
                 .prefetch_related(
                     "participants__user__profile",
-                    "participants__org__profile"
+                    "participants__org__profile",
+                    "last_message__shared_post__media",
+                    "last_message__shared_recruitment__media",
                 )
                 .order_by("-last_message_at", "-created_at")
                 .distinct()
@@ -205,7 +215,9 @@ class ConversationListAPIView(BaseAPIView):
             serializer = ConversationListSerializer(
                 queryset,
                 many=True,
-                context={"request": request}
+                # One viewer for the whole page — see ConversationListSerializer
+                # .get_last_message.
+                context={"request": request, "viewer": ShareViewer.from_actor(actor)}
             )
 
             return response_data(
@@ -294,9 +306,17 @@ class ConversationDetailAPIView(BaseAPIView):
             try:
                 conversation = (
                     Conversation.objects
-                    .select_related("last_message")
+                    .select_related(
+                        "last_message",
+                        "last_message__shared_post__author_user__profile",
+                        "last_message__shared_post__author_org__profile",
+                        "last_message__shared_recruitment__organization__profile",
+                        "last_message__shared_recruitment__sport",
+                    )
                     .prefetch_related(
-                        "participants__user__profile", "participants__org__profile"
+                        "participants__user__profile", "participants__org__profile",
+                        "last_message__shared_post__media",
+                        "last_message__shared_recruitment__media",
                     )
                     .get(id=conversation_id)
                 )
@@ -322,7 +342,10 @@ class ConversationDetailAPIView(BaseAPIView):
             # SERIALIZE
             serializer = ConversationDetailSerializer(
                 conversation,
-                context={"request": request}
+                context={
+                    "request": request,
+                    "viewer": ShareViewer.from_actor(actor),
+                }
             )
 
             return response_data(
