@@ -2,9 +2,10 @@ from core.views.base_views import BaseAPIView
 from rest_framework import status
 
 from messaging.models import Message, ConversationParticipant
+from messaging.selectors.message_selectors import MessageSelector
 from messaging.serializers.message_serializers import MessageSerializer
 from messaging.pagination import MessageCursorPagination
-from utils.response import response_data 
+from utils.response import response_data
 
 
 class MessageListAPIView(BaseAPIView):
@@ -43,12 +44,7 @@ class MessageListAPIView(BaseAPIView):
             # ----------------------------------------
             # QUERYSET
             # ----------------------------------------
-            queryset = (
-                Message.objects
-                .filter(conversation_id=conversation_id, is_deleted=False)
-                .select_related("sender_user__profile", "sender_org__profile")
-                .order_by("-created_at")
-            )
+            queryset = MessageSelector.list_messages(conversation_id)
 
             # ----------------------------------------
             # PAGINATION
@@ -56,7 +52,11 @@ class MessageListAPIView(BaseAPIView):
             paginator = MessageCursorPagination()
             page = paginator.paginate_queryset(queryset, request)
 
-            serializer = MessageSerializer(page, many=True)
+            # context carries the request so shared previews resolve against
+            # THIS actor's visibility.
+            serializer = MessageSerializer(
+                page, many=True, context={"request": request}
+            )
 
             return response_data(
                 True,

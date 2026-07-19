@@ -1,6 +1,7 @@
 from collections import defaultdict
 from posts.serializers.posts_serializers import PostMiniSerializer
 from notifications.services.notification_service import (
+    MESSAGE_SHARE_NOUN,
     RECRUITMENT_STATUS_COPY,
     RECRUITMENT_STATUS_COPY_DEFAULT,
 )
@@ -99,7 +100,8 @@ class NotificationGroupingService:
             top_actors,
             others_count,
             recruitment_title=recruitment_title,
-            to_status=primary.data.get("to_status")
+            to_status=primary.data.get("to_status"),
+            shared_kind=primary.data.get("shared_kind"),
         )
 
         # ----------------------------------------
@@ -138,7 +140,7 @@ class NotificationGroupingService:
     @staticmethod
     def _build_text(
         notification_type, actors, others_count,
-        recruitment_title=None, to_status=None
+        recruitment_title=None, to_status=None, shared_kind=None
     ):
         names = [a["name"] for a in actors if a]
 
@@ -163,6 +165,14 @@ class NotificationGroupingService:
             if others_count > 0:
                 return f"{', '.join(names)} and {others_count} others applied to {title}"
             return f"{', '.join(names)} applied to {title}"
+
+        if notification_type == "message":
+            who = names[0] if names else "Someone"
+            # Grouped per conversation: others_count is how many MORE things
+            # the same sender shared, not how many people shared.
+            if others_count > 0:
+                return f"{who} shared {others_count + 1} things with you"
+            return f"{who} shared {MESSAGE_SHARE_NOUN.get(shared_kind, 'something')} with you"
 
         if notification_type == "recruitment_application_status":
             org = names[0] if names else "The organization"

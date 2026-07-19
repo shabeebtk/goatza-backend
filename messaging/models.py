@@ -138,6 +138,11 @@ class Message(BaseUUIDModel):
         IMAGE = "image", "Image"
         VIDEO = "video", "Video"
         SYSTEM = "system", "System"
+        SHARED_POST = "shared_post", "Shared Post"
+        SHARED_RECRUITMENT = "shared_recruitment", "Shared Recruitment"
+
+    # Types whose meaning depends on a shared object being attached.
+    SHARED_TYPES = (Type.SHARED_POST, Type.SHARED_RECRUITMENT)
 
     conversation = models.ForeignKey(
         Conversation,
@@ -165,10 +170,41 @@ class Message(BaseUUIDModel):
         default=Type.TEXT
     )
 
+    # Caption for shared_* messages, body for text messages.
     content = models.TextField(blank=True)
 
-    # media support 
+    # SHARED CONTENT
+    # SET_NULL, not CASCADE: deleting a post must not delete the conversation
+    # history that referenced it. The message stays, and the serializer renders
+    # an "unavailable" preview once the FK is gone.
+    shared_post = models.ForeignKey(
+        "posts.Post",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+"
+    )
+
+    shared_recruitment = models.ForeignKey(
+        "recruitments.Recruitment",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+"
+    )
+
+    # media support
     media_url = models.URLField(blank=True)
+
+    # Media metadata, mirroring posts.PostMedia. Populated by the upload flow
+    # (not built yet) — every field is nullable so a metadata-extraction failure
+    # can never block a send.
+    media_public_id = models.CharField(max_length=255, blank=True)
+    media_thumbnail_url = models.URLField(max_length=500, blank=True)
+    media_width = models.PositiveIntegerField(null=True, blank=True)
+    media_height = models.PositiveIntegerField(null=True, blank=True)
+    media_duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    media_size_bytes = models.PositiveBigIntegerField(null=True, blank=True)
 
     # delivery state
     is_deleted = models.BooleanField(default=False)
@@ -178,7 +214,8 @@ class Message(BaseUUIDModel):
     class Meta:
         indexes = [
             models.Index(fields=["conversation", "-created_at"]),
-            models.Index(fields=["-created_at"])
+            models.Index(fields=["-created_at"]),
+            models.Index(fields=["conversation", "message_type"]),
         ]
 
         constraints = [
@@ -188,5 +225,34 @@ class Message(BaseUUIDModel):
                     Q(sender_user__isnull=True, sender_org__isnull=False)
                 ),
                 name="message_sender_user_or_org"
-            )
+            ),
+
+            # The obvious constraint here would be the forward one:
+            #   message_type=shared_post => shared_post IS NOT NULL
+            # We deliberately do NOT enforce that in the DB. It holds at INSERT
+            # but is violated later by design: shared_post is SET_NULL, so
+            # deleting the post NULLs the column and the constraint would abort
+            # the post delete with an IntegrityError. Insert-time integrity is
+            # enforced in MessageService instead (_validate_share_payload).
+            #
+            # What IS safe to enforce in the DB is the reverse direction — a
+            # shared FK may only be attached to its matching type, and never
+            # both at once. NULLing a column can never violate this, so it
+            # survives SET_NULL and still stops a mislabeled row being written.
+            models.CheckConstraint(
+                condition=(
+                    Q(shared_post__isnull=True, shared_recruitment__isnull=True)
+                    | Q(
+                        message_type="shared_post",
+                        shared_post__isnull=False,
+                        shared_recruitment__isnull=True,
+                    )
+                    | Q(
+                        message_type="shared_recruitment",
+                        shared_recruitment__isnull=False,
+                        shared_post__isnull=True,
+                    )
+                ),
+                name="message_shared_object_matches_type"
+            ),
         ]

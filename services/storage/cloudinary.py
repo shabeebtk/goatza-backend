@@ -106,6 +106,37 @@ class CloudinaryService:
             }
 
         # -----------------------------------------
+        # CHAT MEDIA  (user or org — direct messages)
+        # -----------------------------------------
+        # Everything a conversation uploads lives under chat/<actor path>. The
+        # per-actor subfolder lets the message service re-validate that a media
+        # URL was uploaded by the SENDER (not replayed from someone else's
+        # folder) before it trusts it — see MessageService._validate_chat_image.
+        elif upload_type == "chat":
+            if actor.is_user:
+                folder = f"chat/users/{actor.user.id}"
+            elif actor.is_org:
+                folder = f"chat/organizations/{actor.organization.id}"
+            else:
+                raise ValueError("Invalid actor for chat upload")
+
+            for _ in range(count):
+                uploads.append(
+                    self._build_signed_upload(
+                        upload_url=upload_url,
+                        timestamp=timestamp,
+                        folder=folder,
+                        public_id=str(uuid.uuid4()),
+                        overwrite="false"
+                    )
+                )
+
+            return {
+                "provider": "cloudinary",
+                "uploads": uploads
+            }
+
+        # -----------------------------------------
         # ORGANIZATION LOGO
         # -----------------------------------------
         elif upload_type == "organization_logo":
