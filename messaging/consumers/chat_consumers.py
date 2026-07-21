@@ -101,6 +101,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "created_at": event["created_at"],
         }, default=str))
 
+    async def message_deleted(self, event):
+        """
+        A message was unsent. Only the id travels — clients drop it from their
+        cache; there is nothing left to render.
+        """
+        await self.send(text_data=json.dumps({
+            "type": "message_deleted",
+            "message_id": event["message_id"],
+        }))
+
     @staticmethod
     def _has_hidden_share(message):
         return any(

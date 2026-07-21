@@ -27,6 +27,8 @@ from messaging.services.exceptions import (
     EmptyMessageError,
     InvalidMediaError,
     InvalidSenderError,
+    MessageNotFoundError,
+    NotMessageSenderError,
     NotParticipantError,
 )
 from notifications.services.fcm_service import FCMService
@@ -317,6 +319,102 @@ class MessageService:
         MessageService._trigger_push(conversation, message)
 
         return message
+
+    # ----------------------------------------
+    # DELETE (unsend)
+    # ----------------------------------------
+    @staticmethod
+    def delete_message(conversation, message_id, actor_user=None, actor_org=None):
+        """
+        Unsend a message for everyone.
+
+        Soft delete: the row is kept (``is_deleted=True``) — every read path
+        already filters it out (message_selectors, the conversation serializers'
+        last-message preview), so nothing else needs to change. Only the actor
+        who SENT it may unsend it; being a participant is not enough.
+
+        If the conversation's last_message pointed at it, the pointer is moved
+        back to the newest surviving message so the chat list doesn't keep
+        previewing something that no longer exists.
+        """
+        message = Message.objects.filter(
+            id=message_id,
+            conversation=conversation,
+            is_deleted=False,
+        ).first()
+
+        if not message:
+            raise MessageNotFoundError("Message not found")
+
+        # Ownership: compare against the ACTING identity, so acting as an org
+        # can't delete the same person's personal messages (and vice versa).
+        if actor_org is not None:
+            is_sender = message.sender_org_id == actor_org.id
+        elif actor_user is not None:
+            is_sender = (
+                message.sender_org_id is None
+                and message.sender_user_id == actor_user.id
+            )
+        else:
+            raise InvalidSenderError("Invalid sender")
+
+        if not is_sender:
+            raise NotMessageSenderError("You can only delete your own messages")
+
+        with transaction.atomic():
+            message.is_deleted = True
+            message.save(update_fields=["is_deleted"])
+
+            if conversation.last_message_id == message.id:
+                previous = (
+                    Message.objects
+                    .filter(conversation=conversation, is_deleted=False)
+                    .order_by("-created_at")
+                    .first()
+                )
+                conversation.last_message = previous
+                conversation.last_message_at = (
+                    previous.created_at if previous else None
+                )
+                conversation.save(
+                    update_fields=["last_message", "last_message_at"]
+                )
+
+        # Outside the transaction, like the send path: a dead Redis must never
+        # roll back a delete the user has already been shown as done.
+        MessageService._trigger_realtime_delete(conversation, message)
+
+        return message
+
+    @staticmethod
+    def _trigger_realtime_delete(conversation, message):
+        from channels.layers import get_channel_layer
+
+        channel_layer = get_channel_layer()
+
+        async_to_sync(channel_layer.group_send)(
+            f"chat_{conversation.id}",
+            {
+                "type": "message_deleted",
+                "message_id": str(message.id),
+            }
+        )
+
+        # Same conversation-list nudge the send path uses.
+        participants = ConversationParticipant.objects.filter(
+            conversation=conversation
+        )
+        for participant in participants:
+            recipient_id = participant.user_id or participant.org_id
+            if recipient_id:
+                async_to_sync(channel_layer.group_send)(
+                    f"user_notifications_{recipient_id}",
+                    {
+                        "type": "notification_message",
+                        "notification_type": "conversation_updated",
+                        "conversation_id": str(conversation.id),
+                    }
+                )
 
     # VALIDATION
     @staticmethod

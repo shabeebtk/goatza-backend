@@ -7,6 +7,7 @@ from messaging.views.conversation_views import (
 from messaging.views.messaging_views import MessageListAPIView
 from messaging.views.share_views import ShareToConversationsAPIView
 from messaging.views.media_views import SendMediaMessageAPIView
+from messaging.views.message_delete_views import DeleteMessageAPIView
 
 # base endpoint '/conversations/
 
@@ -19,6 +20,10 @@ urlpatterns = [
     path('messages/list', MessageListAPIView.as_view()),
     path('<uuid:conversation_id>/details', ConversationDetailAPIView.as_view()),
     path('<uuid:conversation_id>/messages/media', SendMediaMessageAPIView.as_view()),
+    path(
+        '<uuid:conversation_id>/messages/<uuid:message_id>',
+        DeleteMessageAPIView.as_view()
+    ),
     path('mark/read/all', MarkConversationReadAPIView.as_view()),
 
     # accept request

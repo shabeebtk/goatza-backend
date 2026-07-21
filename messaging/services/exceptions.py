@@ -39,6 +39,16 @@ class ConversationNotFoundError(MessageError):
     reason = "conversation_not_found"
 
 
+class MessageNotFoundError(MessageError):
+    """No such message in this conversation (or it is already deleted)."""
+    reason = "message_not_found"
+
+
+class NotMessageSenderError(MessageError):
+    """Only the actor who sent a message may unsend it."""
+    reason = "not_message_sender"
+
+
 class RecipientNotFoundError(MessageError):
     reason = "recipient_not_found"
 
