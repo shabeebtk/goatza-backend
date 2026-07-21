@@ -1775,3 +1775,162 @@ class VideoMessageTests(MessagingShareTestCase):
             )
 
         self.assertEqual(Message.objects.count(), 0)
+
+
+class DeleteMessageTests(MessagingShareTestCase):
+    """DELETE /conversations/<id>/messages/<message_id> — unsend."""
+
+    def _endpoint(self, conversation, message):
+        return f"/conversations/{conversation.id}/messages/{message.id}"
+
+    def _send(self, conversation, sender_user=None, sender_org=None, text="hi"):
+        return MessageService.send_message(
+            conversation=conversation,
+            sender_user=sender_user if sender_org is None else None,
+            sender_org=sender_org,
+            content=text,
+        )
+
+    # ── happy paths ──────────────────────────────────────────────
+
+    def test_sender_can_delete_own_message(self):
+        conversation = self._mutual_conversation()
+        message = self._send(conversation, sender_user=self.sender)
+
+        res = self.client.delete(self._endpoint(conversation, message))
+
+        self.assertEqual(res.status_code, 200)
+        message.refresh_from_db()
+        self.assertTrue(message.is_deleted)
+
+    def test_deleted_message_disappears_from_the_list(self):
+        conversation = self._mutual_conversation()
+        keep = self._send(conversation, sender_user=self.sender, text="keep me")
+        drop = self._send(conversation, sender_user=self.sender, text="drop me")
+
+        self.client.delete(self._endpoint(conversation, drop))
+
+        res = self.client.get(
+            f"/conversations/messages/list?conversation_id={conversation.id}"
+        )
+        ids = [m["id"] for m in res.data["data"]["results"]]
+        self.assertIn(str(keep.id), ids)
+        self.assertNotIn(str(drop.id), ids)
+
+    def test_last_message_falls_back_to_the_previous_one(self):
+        conversation = self._mutual_conversation()
+        first = self._send(conversation, sender_user=self.sender, text="first")
+        last = self._send(conversation, sender_user=self.sender, text="last")
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.last_message_id, last.id)
+
+        self.client.delete(self._endpoint(conversation, last))
+
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.last_message_id, first.id)
+
+    def test_deleting_the_only_message_clears_last_message(self):
+        conversation = self._mutual_conversation()
+        only = self._send(conversation, sender_user=self.sender)
+
+        self.client.delete(self._endpoint(conversation, only))
+
+        conversation.refresh_from_db()
+        self.assertIsNone(conversation.last_message_id)
+        self.assertIsNone(conversation.last_message_at)
+
+    def test_org_actor_can_delete_its_own_message(self):
+        conversation = self._conversation(
+            actor_org=self.org, target_user=self.receiver
+        )
+        message = self._send(conversation, sender_org=self.org)
+
+        res = self.client.delete(
+            self._endpoint(conversation, message), **self._org_headers()
+        )
+
+        self.assertEqual(res.status_code, 200)
+        message.refresh_from_db()
+        self.assertTrue(message.is_deleted)
+
+    # ── permissions ──────────────────────────────────────────────
+
+    def test_recipient_cannot_delete_someone_elses_message(self):
+        conversation = self._mutual_conversation()
+        message = self._send(conversation, sender_user=self.sender)
+
+        self.client.force_authenticate(user=self.receiver)
+        res = self.client.delete(self._endpoint(conversation, message))
+
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["data"]["reason"], "not_message_sender")
+        message.refresh_from_db()
+        self.assertFalse(message.is_deleted)
+
+    def test_acting_as_org_cannot_delete_your_personal_message(self):
+        """The same human, but a different acting identity — still not theirs."""
+        conversation = self._mutual_conversation()
+        message = self._send(conversation, sender_user=self.sender)
+
+        res = self.client.delete(
+            self._endpoint(conversation, message), **self._org_headers()
+        )
+
+        self.assertEqual(res.status_code, 403)
+        message.refresh_from_db()
+        self.assertFalse(message.is_deleted)
+
+    def test_outsider_cannot_delete(self):
+        conversation = self._mutual_conversation()
+        message = self._send(conversation, sender_user=self.sender)
+
+        self.client.force_authenticate(user=self.author)
+        res = self.client.delete(self._endpoint(conversation, message))
+
+        self.assertEqual(res.status_code, 403)
+        message.refresh_from_db()
+        self.assertFalse(message.is_deleted)
+
+    def test_requires_authentication(self):
+        conversation = self._mutual_conversation()
+        message = self._send(conversation, sender_user=self.sender)
+
+        self.client.force_authenticate(user=None)
+        res = self.client.delete(self._endpoint(conversation, message))
+
+        self.assertIn(res.status_code, (401, 403))
+
+    # ── not found ────────────────────────────────────────────────
+
+    def test_deleting_twice_is_a_404(self):
+        conversation = self._mutual_conversation()
+        message = self._send(conversation, sender_user=self.sender)
+
+        self.client.delete(self._endpoint(conversation, message))
+        res = self.client.delete(self._endpoint(conversation, message))
+
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.data["data"]["reason"], "message_not_found")
+
+    def test_message_from_another_conversation_is_not_found(self):
+        conversation = self._mutual_conversation()
+        other = self._conversation(
+            actor_user=self.sender, target_user=self.author
+        )
+        message = self._send(other, sender_user=self.sender)
+
+        res = self.client.delete(self._endpoint(conversation, message))
+
+        self.assertEqual(res.status_code, 404)
+        message.refresh_from_db()
+        self.assertFalse(message.is_deleted)
+
+    def test_unknown_conversation_is_a_404(self):
+        conversation = self._mutual_conversation()
+        message = self._send(conversation, sender_user=self.sender)
+
+        res = self.client.delete(
+            f"/conversations/{uuid.uuid4()}/messages/{message.id}"
+        )
+
+        self.assertEqual(res.status_code, 404)
