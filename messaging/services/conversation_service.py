@@ -1,3 +1,4 @@
+from asgiref.sync import async_to_sync
 from django.template.defaultfilters import default
 from django.db import transaction, IntegrityError
 from django.db.models import Q, Count
@@ -258,14 +259,58 @@ class ConversationService:
         else:
             raise Exception("Invalid actor")
 
+        # Stamped once and reused for the broadcast — re-reading
+        # timezone.now() would hand clients a timestamp slightly ahead of the
+        # row, and messages sent in that sliver would look read before they
+        # were.
+        read_at = timezone.now()
+
         updated = query.update(
-            last_read_at=timezone.now()
+            last_read_at=read_at
         )
 
         if not updated:
             raise Exception("Participant not found")
 
+        ConversationService._trigger_realtime_read(
+            conversation,
+            reader_id=str(user.id if user else org.id),
+            read_at=read_at
+        )
+
         return True
+
+    @staticmethod
+    def _trigger_realtime_read(conversation, reader_id, read_at):
+        """
+        Tell the other side's open chat window that everything up to
+        ``read_at`` has been seen, so their sent bubbles turn blue without a
+        refetch — the sender half of the read receipt.
+
+        Best-effort by design: a dead channel layer must never fail a read the
+        user has already been shown as done. The ticks then catch up from
+        ``is_read`` the next time the thread loads.
+        """
+        from channels.layers import get_channel_layer
+
+        try:
+            channel_layer = get_channel_layer()
+
+            if channel_layer is None:
+                return
+
+            async_to_sync(channel_layer.group_send)(
+                f"chat_{conversation.id}",
+                {
+                    "type": "conversation_read",
+                    "reader_id": reader_id,
+                    # isoformat, not the raw datetime: this dict is msgpack'd
+                    # onto the channel layer, which only carries primitives.
+                    "last_read_at": read_at.isoformat(),
+                }
+            )
+        except Exception:
+            pass
 
     # ----------------------------------------
     # MESSAGE TARGET SEARCH

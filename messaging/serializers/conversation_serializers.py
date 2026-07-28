@@ -96,6 +96,7 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
 
     unread_count = serializers.SerializerMethodField()
     last_read_at = serializers.SerializerMethodField()
+    other_last_read_at = serializers.SerializerMethodField()
     is_last_message_seen = serializers.SerializerMethodField()
 
     class Meta:
@@ -116,6 +117,7 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
 
             "unread_count",
             "last_read_at",
+            "other_last_read_at",
             "is_last_message_seen",
         ]
 
@@ -149,7 +151,15 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
         # Pass the context through: without it every nested last_message would
         # build its own ShareViewer and re-query the follow graph once per
         # conversation, and shared previews would render as unavailable.
-        return MessageSerializer(obj.last_message, context=self.context).data
+        # `other_last_read_at` rides along so the nested message carries a
+        # correct `is_read` instead of the no-context default of False.
+        return MessageSerializer(
+            obj.last_message,
+            context={
+                **self.context,
+                "other_last_read_at": self.get_other_last_read_at(obj),
+            },
+        ).data
 
     # REQUEST ACCEPTED?
     def get_is_accepted(self, obj):
@@ -184,6 +194,36 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
         ).first()
 
         return participant.last_read_at if participant else None
+
+
+    def get_other_last_read_at(self, obj):
+        """
+        When the OTHER participant last read this thread.
+
+        This is the read-receipt seed: everything the viewer sent at or before
+        this instant has been seen. The client keeps it live from the
+        ``conversation_read`` websocket event, so it only has to be right at
+        the moment the chat opens.
+        """
+        if not hasattr(self, "_other_last_read_cache"):
+            self._other_last_read_cache = {}
+
+        if obj.id in self._other_last_read_cache:
+            return self._other_last_read_cache[obj.id]
+
+        actor = self.context["request"].actor
+        value = (
+            obj.participants
+            .exclude(
+                user=actor.user if actor.is_user else None,
+                org=actor.organization if actor.is_org else None
+            )
+            .values_list("last_read_at", flat=True)
+            .first()
+        )
+
+        self._other_last_read_cache[obj.id] = value
+        return value
 
 
     def get_unread_count(self, obj):
