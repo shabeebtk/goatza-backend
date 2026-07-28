@@ -111,6 +111,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "message_id": event["message_id"],
         }))
 
+    async def conversation_read(self, event):
+        """
+        Someone read the thread up to ``last_read_at``.
+
+        A watermark, not a list of message ids: one timestamp flips every
+        bubble at or before it, so a reader catching up on fifty messages costs
+        the same single event as one.
+
+        Sent to the whole room, including the reader's own other devices —
+        clients tell the two apart by comparing ``reader_id`` to their actor.
+        """
+        await self.send(text_data=json.dumps({
+            "type": "conversation_read",
+            "reader_id": event["reader_id"],
+            "last_read_at": event["last_read_at"],
+        }))
+
     @staticmethod
     def _has_hidden_share(message):
         return any(

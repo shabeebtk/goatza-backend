@@ -20,6 +20,7 @@ class MessageSerializer(serializers.ModelSerializer):
     sender = serializers.SerializerMethodField()
     shared_post_preview = serializers.SerializerMethodField()
     shared_recruitment_preview = serializers.SerializerMethodField()
+    is_read = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -29,6 +30,7 @@ class MessageSerializer(serializers.ModelSerializer):
             "message_type",
             "created_at",
             "sender",
+            "is_read",
 
             # media
             "media_url",
@@ -83,6 +85,31 @@ class MessageSerializer(serializers.ModelSerializer):
             return ActorMiniSerializer(obj.sender_org).data
 
         return None
+
+    # ----------------------------------------
+    # READ RECEIPT
+    # ----------------------------------------
+    def get_is_read(self, obj):
+        """
+        Has the OTHER side seen this message?
+
+        Derived from the recipient participant's ``last_read_at`` rather than a
+        column on Message: marking a thread read stays one UPDATE on one
+        participant row instead of an UPDATE across every message in it, and
+        that timestamp is already the source of truth behind ``unread_count``.
+
+        Only meaningful for messages the viewer SENT — the client paints read
+        ticks on its own bubbles only. Callers that don't put
+        ``other_last_read_at`` in the context (the websocket fan-out, the
+        conversation list) get False, which is the right default: a message
+        being broadcast right now has not been read by anyone yet.
+        """
+        last_read = self.context.get("other_last_read_at")
+
+        if not last_read:
+            return False
+
+        return obj.created_at <= last_read
 
     # ----------------------------------------
     # SHARED POST PREVIEW

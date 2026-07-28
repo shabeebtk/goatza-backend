@@ -894,6 +894,141 @@ class ConversationStateTests(MessagingShareTestCase):
         self.assertEqual(summary.data["data"]["total"], 0)
 
 
+class ReadReceiptTests(MessagingShareTestCase):
+    """
+    Read state is derived from the recipient participant's ``last_read_at``
+    rather than stored per message. These pin down the direction of that
+    comparison — the easy thing to get backwards is answering "have I read
+    this?" when the sender is asking "have THEY read this?".
+    """
+
+    def _drain(self, conversation):
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+
+        layer = get_channel_layer()
+        channel = async_to_sync(layer.new_channel)()
+        async_to_sync(layer.group_add)(f"chat_{conversation.id}", channel)
+        return layer, channel
+
+    def _messages_for(self, user, conversation):
+        self.client.force_authenticate(user=user)
+        response = self.client.get(
+            MESSAGES_URL, {"conversation_id": str(conversation.id)}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["data"]["results"]
+
+    def _mark_read(self, user, conversation):
+        self.client.force_authenticate(user=user)
+        response = self.client.post(
+            "/conversations/mark/read/all",
+            {"conversation_id": str(conversation.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_message_is_unread_until_the_other_side_reads_it(self):
+        conversation = self._mutual_conversation()
+        MessageService.send_message(
+            conversation=conversation, sender_user=self.sender, content="hi",
+        )
+
+        self.assertFalse(
+            self._messages_for(self.sender, conversation)[0]["is_read"]
+        )
+
+        self._mark_read(self.receiver, conversation)
+
+        self.assertTrue(
+            self._messages_for(self.sender, conversation)[0]["is_read"]
+        )
+
+    def test_reading_a_thread_does_not_mark_your_own_messages_read(self):
+        conversation = self._mutual_conversation()
+        MessageService.send_message(
+            conversation=conversation, sender_user=self.sender, content="hi",
+        )
+
+        # The sender opening their own chat must not turn their own ticks blue.
+        self._mark_read(self.sender, conversation)
+
+        self.assertFalse(
+            self._messages_for(self.sender, conversation)[0]["is_read"]
+        )
+
+    def test_a_message_sent_after_the_read_is_unread_again(self):
+        conversation = self._mutual_conversation()
+        MessageService.send_message(
+            conversation=conversation, sender_user=self.sender, content="first",
+        )
+        self._mark_read(self.receiver, conversation)
+        MessageService.send_message(
+            conversation=conversation, sender_user=self.sender, content="second",
+        )
+
+        read_by_content = {
+            m["content"]: m["is_read"]
+            for m in self._messages_for(self.sender, conversation)
+        }
+
+        self.assertTrue(read_by_content["first"])
+        self.assertFalse(read_by_content["second"])
+
+    def test_detail_exposes_the_other_sides_read_watermark(self):
+        conversation = self._mutual_conversation()
+        MessageService.send_message(
+            conversation=conversation, sender_user=self.sender, content="hi",
+        )
+        detail_url = f"/conversations/{conversation.id}/details"
+
+        self.client.force_authenticate(user=self.sender)
+        response = self.client.get(detail_url)
+        self.assertIsNone(response.data["data"]["other_last_read_at"])
+
+        self._mark_read(self.receiver, conversation)
+
+        self.client.force_authenticate(user=self.sender)
+        response = self.client.get(detail_url)
+        self.assertIsNotNone(response.data["data"]["other_last_read_at"])
+
+    def test_websocket_echo_is_never_pre_marked_read(self):
+        """
+        The fan-out renders with no viewer, so is_read is False there — nobody
+        can have read a message that is still being broadcast. The receipt
+        arrives later, as its own event.
+        """
+        conversation = self._mutual_conversation()
+        self._mark_read(self.receiver, conversation)
+
+        layer, channel = self._drain(conversation)
+        MessageService.send_message(
+            conversation=conversation, sender_user=self.sender, content="hi",
+        )
+
+        from asgiref.sync import async_to_sync
+        event = async_to_sync(layer.receive)(channel)
+
+        self.assertFalse(event["message"]["is_read"])
+
+    def test_marking_read_broadcasts_a_receipt_to_the_chat_group(self):
+        conversation = self._mutual_conversation()
+        MessageService.send_message(
+            conversation=conversation, sender_user=self.sender, content="hi",
+        )
+
+        layer, channel = self._drain(conversation)
+        self._mark_read(self.receiver, conversation)
+
+        from asgiref.sync import async_to_sync
+        event = async_to_sync(layer.receive)(channel)
+
+        self.assertEqual(event["type"], "conversation_read")
+        self.assertEqual(event["reader_id"], str(self.receiver.id))
+        # A primitive — the channel layer cannot carry a datetime.
+        self.assertIsInstance(event["last_read_at"], str)
+
+
 class ShareValidationTests(MessagingShareTestCase):
 
     def test_requires_authentication(self):
@@ -1135,13 +1270,15 @@ class MessageListQueryCountTests(MessagingShareTestCase):
 
     # A page holding both share kinds costs:
     #   1. the participant/permission check
-    #   2. the message page itself (every preview field is select_related onto
+    #   2. the other participant's last_read_at (the read-receipt watermark
+    #      behind every message's is_read — fetched once for the whole page)
+    #   3. the message page itself (every preview field is select_related onto
     #      this one query)
-    #   3. the shared_post media prefetch
-    #   4. the shared_recruitment media prefetch
+    #   4. the shared_post media prefetch
+    #   5. the shared_recruitment media prefetch
     # …and nothing per message. The viewer's follow graph is NOT loaded here:
     # public content answers "can you see it?" without consulting it.
-    EXPECTED_QUERIES = 4
+    EXPECTED_QUERIES = 5
 
     def _seed(self, pairs, conversation):
         """`pairs` shared-recruitment + shared-post messages, own post each."""
@@ -1215,10 +1352,10 @@ class MessageListQueryCountTests(MessagingShareTestCase):
 
         self.client.force_authenticate(user=self.receiver)
 
-        # Same 4: permission check, page, shared_post media — and this time the
-        # follow graph (loaded once), but no recruitment-media prefetch, since
-        # no message on this page shares one.
-        with self.assertNumQueries(4):
+        # Same 5: permission check, read watermark, page, shared_post media —
+        # and this time the follow graph (loaded once), but no
+        # recruitment-media prefetch, since no message on this page shares one.
+        with self.assertNumQueries(5):
             response = self.client.get(
                 MESSAGES_URL, {"conversation_id": str(conversation.id)}
             )

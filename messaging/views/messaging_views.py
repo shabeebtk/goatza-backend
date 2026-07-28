@@ -47,6 +47,24 @@ class MessageListAPIView(BaseAPIView):
             queryset = MessageSelector.list_messages(conversation_id)
 
             # ----------------------------------------
+            # READ RECEIPTS
+            # ----------------------------------------
+            # When the other side last read the thread. Fetched once for the
+            # whole page and handed to the serializer, which turns it into a
+            # per-message ``is_read`` — the alternative (a boolean column on
+            # Message) would mean rewriting every row on each mark-read.
+            other_last_read_at = (
+                ConversationParticipant.objects
+                .filter(conversation_id=conversation_id)
+                .exclude(
+                    user=actor.user if actor.is_user else None,
+                    org=actor.organization if actor.is_org else None
+                )
+                .values_list("last_read_at", flat=True)
+                .first()
+            )
+
+            # ----------------------------------------
             # PAGINATION
             # ----------------------------------------
             paginator = MessageCursorPagination()
@@ -55,7 +73,12 @@ class MessageListAPIView(BaseAPIView):
             # context carries the request so shared previews resolve against
             # THIS actor's visibility.
             serializer = MessageSerializer(
-                page, many=True, context={"request": request}
+                page,
+                many=True,
+                context={
+                    "request": request,
+                    "other_last_read_at": other_last_read_at,
+                }
             )
 
             return response_data(
