@@ -50,7 +50,8 @@ INSTALLED_APPS = [
     'notifications',
     'messaging',
     'recruitments',
-    
+    'highlights',
+
     # buildin apps 
     'django.contrib.admin',
     'django.contrib.auth',

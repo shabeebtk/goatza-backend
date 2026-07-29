@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from accounts.models import User, UserProfile
+from highlights.selectors.highlight_selectors import visible_highlights_count
 from sports.serializers.user_sports_serializers import UserSportMiniSerializer
 
 class BaseUserSerializer(serializers.ModelSerializer):
@@ -51,9 +52,11 @@ class UserFullSerializer(BaseUserSerializer):
     birthdate = serializers.DateField(source='profile.birthdate', read_only=True, allow_null=True)
     primary_sport = serializers.SerializerMethodField()
     location = serializers.SerializerMethodField()
+    highlights_count = serializers.SerializerMethodField()
 
     class Meta(BaseUserSerializer.Meta):
         fields = BaseUserSerializer.Meta.fields + [
+            'highlights_count',
             'cover_photo',
             'headline',
             'about',
@@ -68,6 +71,23 @@ class UserFullSerializer(BaseUserSerializer):
             'primary_sport',
             'location'
         ]
+
+    def get_highlights_count(self, obj):
+        """
+        How many of this player's highlights the VIEWER may see — the number
+        behind the "▶ Highlights (n)" chip, so the profile page does not need a
+        second request.
+
+        Costs one COUNT, and only when the caller puts an ``actor`` in the
+        serializer context. Bulk/list callers leave it out (the field comes back
+        null) so a page of profiles never fans out into one count per row.
+        """
+        actor = self.context.get("actor")
+
+        if actor is None:
+            return None
+
+        return visible_highlights_count(obj, actor)
 
     def get_primary_sport(self, obj):
         primary = obj.sports.filter(is_primary=True).first()

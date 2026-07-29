@@ -18,6 +18,7 @@ from accounts.serializers.user_update_serilizer import UpdateUserProfileSerializ
 from services.location.location_service import LocationService
 from utils.validations import validate_username_format
 from core.constant import TYPE_USER
+from core.actor import Actor
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,8 @@ class GetUserDetails(BaseAPIView):
                     .get(username=username)
                 )
 
-                serializer = UserFullSerializer(user)
+                # actor in context → highlights_count for the chip (one COUNT)
+                serializer = UserFullSerializer(user, context={"actor": actor})
             else:
 
                 user = User.objects.select_related("profile").get(username=username)
@@ -90,7 +92,11 @@ class GetUserDetailsByID(APIView):
             user = User.objects.select_related("profile").get(id=user_id)
 
             if list_type == self.LIST_TYPE_FULL:
-                serializer = UserFullSerializer(user)
+                # own profile — the owner sees every one of their highlights
+                serializer = UserFullSerializer(
+                    user,
+                    context={"actor": Actor(actor_type=TYPE_USER, user=user)}
+                )
             else:
                 serializer = UserSerializer(user)
 
@@ -387,7 +393,10 @@ class UpdateUserProfileAPIView(APIView):
                 )
                 .get(id=user.id)
             )
-            response_serializer = UserFullSerializer(user_fresh)
+            response_serializer = UserFullSerializer(
+                user_fresh,
+                context={"actor": Actor(actor_type=TYPE_USER, user=user_fresh)}
+            )
 
             return response_data(
                 success=True,
