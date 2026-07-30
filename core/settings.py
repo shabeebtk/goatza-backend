@@ -258,6 +258,12 @@ CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
 
+# Generate the HLS adaptive-streaming ladder alongside the mp4 derivative.
+# Off by default: streaming profiles cost meaningfully more transformation
+# credits than the single mp4, which burns through the free tier during
+# development. The frontend has a matching flag, NEXT_PUBLIC_ENABLE_HLS.
+CLOUDINARY_ENABLE_HLS = os.getenv("CLOUDINARY_ENABLE_HLS", "False") == "True"
+
 CLOUDINARY_STORAGE = {
     'CLOUD_NAME': CLOUDINARY_CLOUD_NAME,
     'API_KEY': CLOUDINARY_API_KEY,

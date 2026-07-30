@@ -21,8 +21,16 @@ VIDEO_EAGER_FORMAT = "mp4"
 
 # HLS adaptive streaming. sp_hd generates a multi-rendition ladder + .m3u8 manifest.
 # Adaptive streaming MUST be eager — Cloudinary cannot build it on request.
-# NOTE: streaming-profile generation costs meaningfully more transformation credits
-# than the single mp4 derivative — monitor usage after rollout.
+#
+# Gated behind settings.CLOUDINARY_ENABLE_HLS, DEFAULT OFF: streaming-profile
+# generation costs meaningfully more transformation credits than the single mp4
+# derivative, and leaving it on burns the free tier during development. Turn it
+# on with CLOUDINARY_ENABLE_HLS=True once the credit budget is real, and monitor
+# usage after. The frontend has a matching flag, NEXT_PUBLIC_ENABLE_HLS.
+#
+# The two flags are independent and any combination is safe: frontend on with
+# backend off just means the manifest 404s and useAdaptiveVideo falls back to
+# mp4 silently.
 VIDEO_HLS_TRANSFORMATION = "sp_hd"
 VIDEO_HLS_FORMAT = "m3u8"
 
@@ -308,8 +316,9 @@ class CloudinaryService:
     # -----------------------------------------
     def ensure_video_derivatives(self, public_id: str) -> None:
         """
-        Ask Cloudinary to pre-generate both derivatives the app plays: the
-        universal mp4 and the HLS adaptive ladder.
+        Ask Cloudinary to pre-generate the derivatives the app plays: always the
+        universal mp4, plus the HLS adaptive ladder when
+        settings.CLOUDINARY_ENABLE_HLS is on (default off — see the constants).
 
         Without this, a derivative is built ON THE FIRST REQUEST: the first
         person to open a clip sits through a live transcode — multi-second black
@@ -339,6 +348,20 @@ class CloudinaryService:
         if not public_id:
             return
 
+        # mp4 is unconditional — it is the universal fallback. HLS is opt-in.
+        eager = [
+            {
+                "raw_transformation": VIDEO_EAGER_TRANSFORMATION,
+                "format": VIDEO_EAGER_FORMAT,
+            },
+        ]
+
+        if settings.CLOUDINARY_ENABLE_HLS:
+            eager.append({
+                "raw_transformation": VIDEO_HLS_TRANSFORMATION,
+                "format": VIDEO_HLS_FORMAT,
+            })
+
         try:
             self._ensure_config()
             cloudinary.uploader.explicit(
@@ -348,16 +371,7 @@ class CloudinaryService:
                 # Cloudinary builds the derivatives in the background and returns
                 # immediately — the create request never waits on a transcode.
                 eager_async=True,
-                eager=[
-                    {
-                        "raw_transformation": VIDEO_EAGER_TRANSFORMATION,
-                        "format": VIDEO_EAGER_FORMAT,
-                    },
-                    {
-                        "raw_transformation": VIDEO_HLS_TRANSFORMATION,
-                        "format": VIDEO_HLS_FORMAT,
-                    },
-                ],
+                eager=eager,
             )
         except Exception as e:  # cloudinary.exceptions.*, network, auth, ...
             logger.error(

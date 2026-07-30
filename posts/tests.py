@@ -501,10 +501,9 @@ class VideoEagerDerivativeTests(APITestCase):
 
     def test_explicit_is_called_with_the_canonical_transformation(self):
         """
-        Both eager entries reach Cloudinary as raw strings, in this exact order —
-        the mp4 transformation has to match VIDEO_DELIVERY_TRANSFORM in the
-        frontend byte-for-byte or the pre-generated asset is not the one being
-        requested, and HLS has no on-demand path at all.
+        The default is HLS OFF: exactly ONE eager entry, the mp4. Its
+        transformation has to match VIDEO_DELIVERY_TRANSFORM in the frontend
+        byte-for-byte or the pre-generated asset is not the one being requested.
         """
         from services.storage.cloudinary import (
             VIDEO_EAGER_FORMAT,
@@ -518,8 +517,57 @@ class VideoEagerDerivativeTests(APITestCase):
             VIDEO_EAGER_TRANSFORMATION,
             "c_limit,h_1280,w_1280,q_auto:good,vc_h264",
         )
+        # Constants stay defined even while the flag is off.
         self.assertEqual(VIDEO_HLS_TRANSFORMATION, "sp_hd")
         self.assertEqual(VIDEO_HLS_FORMAT, "m3u8")
+
+        with patch("cloudinary.uploader.explicit") as mock_explicit:
+            CloudinaryService().ensure_video_derivatives("users/x/posts/clip")
+
+        mock_explicit.assert_called_once_with(
+            "users/x/posts/clip",
+            type="upload",
+            resource_type="video",
+            eager_async=True,
+            eager=[
+                {
+                    "raw_transformation": VIDEO_EAGER_TRANSFORMATION,
+                    "format": VIDEO_EAGER_FORMAT,
+                },
+            ],
+        )
+
+    def test_hls_is_not_requested_while_the_flag_is_off(self):
+        """
+        The credit-saving default. Nothing in the payload may mention the
+        streaming profile — an accidental sp_hd here is billed transformation
+        credits nobody asked for.
+        """
+        from services.storage.cloudinary import CloudinaryService
+
+        with patch("cloudinary.uploader.explicit") as mock_explicit:
+            CloudinaryService().ensure_video_derivatives("users/x/posts/clip")
+
+        eager = mock_explicit.call_args.kwargs["eager"]
+        self.assertEqual(len(eager), 1)
+        self.assertEqual(eager[0]["format"], "mp4")
+        self.assertNotIn("sp_hd", str(eager))
+        self.assertNotIn("m3u8", str(eager))
+
+    @override_settings(CLOUDINARY_ENABLE_HLS=True)
+    def test_hls_entry_is_appended_when_the_flag_is_on(self):
+        """
+        Flag on → both entries, mp4 FIRST. mp4 is the universal fallback (old
+        clips, HLS failures, no-MSE clients), so a future edit that reorders or
+        drops it should fail here with an obvious reason.
+        """
+        from services.storage.cloudinary import (
+            VIDEO_EAGER_FORMAT,
+            VIDEO_EAGER_TRANSFORMATION,
+            VIDEO_HLS_FORMAT,
+            VIDEO_HLS_TRANSFORMATION,
+            CloudinaryService,
+        )
 
         with patch("cloudinary.uploader.explicit") as mock_explicit:
             CloudinaryService().ensure_video_derivatives("users/x/posts/clip")
@@ -540,22 +588,6 @@ class VideoEagerDerivativeTests(APITestCase):
                 },
             ],
         )
-
-    def test_mp4_stays_the_first_eager_entry(self):
-        """
-        mp4 is the universal fallback — old clips, HLS failures, no-MSE clients.
-        Pinned separately from the arg-for-arg assertion above so a future edit
-        that reorders or drops it fails with an obvious reason.
-        """
-        from services.storage.cloudinary import CloudinaryService
-
-        with patch("cloudinary.uploader.explicit") as mock_explicit:
-            CloudinaryService().ensure_video_derivatives("users/x/posts/clip")
-
-        eager = mock_explicit.call_args.kwargs["eager"]
-        self.assertEqual(len(eager), 2)
-        self.assertEqual(eager[0]["format"], "mp4")
-        self.assertEqual(eager[1]["format"], "m3u8")
 
     def test_empty_public_id_never_reaches_the_provider(self):
         from services.storage.cloudinary import CloudinaryService
