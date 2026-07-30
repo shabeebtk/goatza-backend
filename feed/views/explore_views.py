@@ -8,6 +8,9 @@ from sports.models import Sport, SportPosition
 from posts.serializers.posts_serializers import PostListSerializer
 from utils.response import response_data
 from utils.validations import is_valid_uuid
+from highlights.selectors.highlight_selectors import (
+    visible_highlight_counts_for,
+)
 from feed.services.explore_services import ExploreService
 from feed.services.feed_services import FeedService
 from feed.pagination import FeedCursorPagination
@@ -149,6 +152,12 @@ class ExplorePlayersAPIView(BaseAPIView):
                 context={
                     "followed_user_ids": result["followed_user_ids"],
                     "followed_org_ids": result["followed_org_ids"],
+                    # One grouped query for the page's chips — see
+                    # highlights.selectors.visible_highlight_counts_for.
+                    "highlight_counts": visible_highlight_counts_for(
+                        [player.id for player in result["results"]],
+                        actor,
+                    ),
                 },
             )
 

@@ -18,6 +18,8 @@ class ExploreUserSerializer(serializers.ModelSerializer):
     distance_km = serializers.SerializerMethodField()
     # Followed accounts can appear once a filter/search is active — flag them.
     is_following = serializers.SerializerMethodField()
+    # Powers the "▶ Highlights (n)" chip on the card.
+    highlights_count = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -32,11 +34,18 @@ class ExploreUserSerializer(serializers.ModelSerializer):
             "followers_count",
             "distance_km",
             "is_following",
+            "highlights_count",
         )
 
     def get_distance_km(self, obj):
         value = getattr(obj, "distance_km", None)
         return round(value, 2) if value is not None else None
+
+    def get_highlights_count(self, obj):
+        # Same deal as is_following: a per-page map built in one grouped query
+        # (highlights.selectors.visible_highlight_counts_for), so the card costs
+        # nothing extra. 0 when the context is absent — the chip just hides.
+        return self.context.get("highlight_counts", {}).get(obj.id, 0)
 
     def get_is_following(self, obj):
         # Membership test against a set passed in via context — zero extra

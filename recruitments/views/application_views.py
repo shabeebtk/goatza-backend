@@ -14,6 +14,9 @@ from recruitments.serializers.application_serializers import (
     SingleApplicationStatusSerializer,
     MyApplicationListSerializer
 )
+from highlights.selectors.highlight_selectors import (
+    visible_highlight_counts_for,
+)
 from recruitments.services.application_service import ApplicationService
 from utils.response import response_data
 from utils.errors import flatten_validation_error
@@ -159,9 +162,17 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
                 recruitment
             )
 
+            # Highlight counts for the whole page in ONE grouped query — the
+            # "▶ Highlights (n)" chip must not cost a query per applicant.
+            highlight_counts = visible_highlight_counts_for(
+                [app.applicant_id for app in applications],
+                request.actor
+            )
+
             serializer = ApplicantListItemSerializer(
                 applications,
-                many=True
+                many=True,
+                context={"highlight_counts": highlight_counts}
             )
 
             logger.info(
