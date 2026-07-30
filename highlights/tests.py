@@ -18,20 +18,20 @@ from organization.models import (
 from posts.models import Post, PostMedia
 
 BASE_URL = "/highlights"
-CREATE_URL = f"{BASE_URL}/"
-REORDER_URL = f"{BASE_URL}/reorder/"
+CREATE_URL = f"{BASE_URL}/create"
+REORDER_URL = f"{BASE_URL}/reorder"
 
 
 def list_url(username):
-    return f"{BASE_URL}/user/{username}/"
+    return f"{BASE_URL}/user/{username}"
 
 
 def detail_url(highlight_id):
-    return f"{BASE_URL}/{highlight_id}/"
+    return f"{BASE_URL}/{highlight_id}"
 
 
 def view_url(highlight_id):
-    return f"{BASE_URL}/{highlight_id}/view/"
+    return f"{BASE_URL}/{highlight_id}/view"
 
 
 @override_settings(
@@ -719,7 +719,7 @@ class HighlightListQueryCountTests(HighlightAPITestCase):
             self.client.get(list_url(self.owner.username))
 
 
-STATS_URL = f"{BASE_URL}/stats/"
+STATS_URL = f"{BASE_URL}/stats"
 
 
 class HighlightViewAnalyticsTests(HighlightAPITestCase):
@@ -883,4 +883,42 @@ class HighlightViewAnalyticsTests(HighlightAPITestCase):
         self.assertEqual(
             self.client.get(STATS_URL).status_code,
             status.HTTP_401_UNAUTHORIZED,
+        )
+
+
+class HighlightUrlShapeTests(APITestCase):
+    """
+    Guards the URL shape itself, because this is the one class of bug the rest of
+    this file CANNOT catch.
+
+    In production the client calls /api/<path> and Vercel rewrites it to the
+    backend, stripping /api. A route declared WITH a trailing slash makes Vercel
+    308 to the slash-less form first; Django then APPEND_SLASHes back with a
+    path-only Location, the /api prefix is lost, and the call lands on the
+    frontend's 404 page. Locally none of that happens — the test client and the
+    dev server accept the slashed form happily — so a trailing slash sails
+    through CI and only breaks in production.
+    """
+
+    def test_no_highlight_route_ends_with_a_slash(self):
+        from django.urls import get_resolver
+
+        resolver = get_resolver()
+        offenders = []
+
+        def walk(patterns, prefix=""):
+            for entry in patterns:
+                pattern = prefix + str(entry.pattern)
+                if hasattr(entry, "url_patterns"):
+                    walk(entry.url_patterns, pattern)
+                elif pattern.startswith("highlights/") and pattern.endswith("/"):
+                    offenders.append(pattern)
+
+        walk(resolver.url_patterns)
+
+        self.assertEqual(
+            offenders,
+            [],
+            "These highlights routes end with a trailing slash and will 404 in "
+            f"production behind the /api rewrite: {offenders}",
         )
