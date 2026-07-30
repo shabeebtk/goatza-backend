@@ -5,7 +5,11 @@ from typing import Iterable, Optional
 
 # 🔹 Default sets (reusable anywhere)
 DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
-DEFAULT_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "webm"}
+# No "avi": no browser can play it in a <video> element, so accepting one only
+# bought the user a full upload followed by an unplayable post. Matches
+# CHAT_VIDEO_EXTENSIONS (messaging), the recruitments allowlist, and the
+# frontend's VIDEO_EXTENSIONS.
+DEFAULT_VIDEO_EXTENSIONS = {"mp4", "mov", "webm"}
 
 
 def is_valid_cloudinary_url(url: str) -> bool:

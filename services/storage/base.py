@@ -13,3 +13,15 @@ class BaseStorageService:
         failure so callers can persist NULL dimensions without blocking uploads.
         """
         raise NotImplementedError
+
+    def ensure_video_derivatives(self, public_id: str) -> None:
+        """
+        Pre-generate the transcoded video the client actually plays, so the
+        first viewer doesn't wait through an on-demand transcode.
+
+        Implementations must be best-effort and idempotent: this is called on
+        content-creation paths, so it must never raise, and it must be safe to
+        call repeatedly for the same public_id (the backfill command relies on
+        both).
+        """
+        raise NotImplementedError

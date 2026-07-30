@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import patch
 
 from django.core.cache import cache
 from django.test import override_settings
@@ -1912,6 +1913,57 @@ class VideoMessageTests(MessagingShareTestCase):
             )
 
         self.assertEqual(Message.objects.count(), 0)
+
+    # ── eager derivative ─────────────────────────────────────────
+
+    def test_sending_a_video_schedules_the_derivative(self):
+        """
+        The recipient must not open the bubble into a live transcode. Uses the
+        VALIDATED public_id and fires on_commit, like realtime/push.
+        """
+        conversation = self._mutual_conversation()
+        payload = self._payload(sender_user=self.sender)
+
+        with patch(
+            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
+        ) as mock_eager:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    self._media_endpoint(conversation), payload, format="json",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        mock_eager.assert_called_once_with(payload["media_public_id"])
+
+    def test_rejected_video_never_schedules_a_derivative(self):
+        conversation = self._mutual_conversation()
+
+        with patch(
+            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
+        ) as mock_eager:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    self._media_endpoint(conversation),
+                    self._payload(sender_user=self.sender, ext="avi"),
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_eager.assert_not_called()
+
+    def test_provider_failure_never_blocks_the_message(self):
+        conversation = self._mutual_conversation()
+
+        with patch("cloudinary.uploader.explicit", side_effect=Exception("boom")):
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    self._media_endpoint(conversation),
+                    self._payload(sender_user=self.sender),
+                    format="json",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Message.objects.count(), 1)
 
 
 class DeleteMessageTests(MessagingShareTestCase):

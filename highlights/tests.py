@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.core.cache import cache
 from django.db.models import F
@@ -717,6 +718,79 @@ class HighlightListQueryCountTests(HighlightAPITestCase):
         self._auth(self.follower)
         with self.assertNumQueries(3):
             self.client.get(list_url(self.owner.username))
+
+
+class HighlightEagerDerivativeTests(HighlightAPITestCase):
+    """
+    Creating a clip pre-generates the transcoded video the viewer plays, so the
+    first watch doesn't cold-start a transcode (the black screen this feature
+    was reported against). Fired on_commit — never inside the create's
+    transaction, which holds a lock on the owner row.
+    """
+
+    def test_direct_upload_schedules_the_derivative(self):
+        with patch(
+            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
+        ) as mock_eager:
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self._create(
+                    self.owner,
+                    {
+                        "file_url": (
+                            "https://res.cloudinary.com/demo/video/upload/v1/new.mp4"
+                        ),
+                        "public_id": "goatza/highlights/new",
+                    },
+                )
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        mock_eager.assert_called_once_with("goatza/highlights/new")
+
+    def test_promote_schedules_the_derivative_with_the_source_public_id(self):
+        _post, media = self._video_post(author=self.owner)
+
+        with patch(
+            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
+        ) as mock_eager:
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self._create(
+                    self.owner, {"source_media_id": str(media.id)}
+                )
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        # A promoted clip copies the post's public_id — same asset, same
+        # derivative. Asking again is harmless.
+        mock_eager.assert_called_once_with(media.public_id)
+
+    def test_nothing_is_scheduled_when_the_create_is_rejected(self):
+        # Cap reached → ValidationError before any row exists, so the callback
+        # must never have been registered.
+        for i in range(10):
+            self._highlight(order=i)
+
+        with patch(
+            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
+        ) as mock_eager:
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self._create(self.owner)
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_eager.assert_not_called()
+
+    @override_settings(
+        CLOUDINARY_CLOUD_NAME="democloud",
+        CLOUDINARY_API_KEY="key",
+        CLOUDINARY_API_SECRET="secret",
+    )
+    def test_provider_failure_never_blocks_the_highlight(self):
+        with patch("cloudinary.uploader.explicit", side_effect=Exception("boom")):
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self._create(self.owner)
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(
+            Highlight.objects.filter(user=self.owner, is_deleted=False).count(), 1
+        )
 
 
 STATS_URL = f"{BASE_URL}/stats"
