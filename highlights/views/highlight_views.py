@@ -1,6 +1,6 @@
 """
 HTTP entry points for highlights (HIGHLIGHTS_SPEC.md §2), mounted at
-/api/highlights/.
+/highlights/.
 
 Thin by design: resolve what the URL names, hand the actor and the validated
 body to HighlightService / the selectors, and shape the answer. The
@@ -21,6 +21,7 @@ from accounts.models import User
 from core.views.base_views import BaseAPIView
 from highlights.models import Highlight
 from highlights.selectors.highlight_selectors import (
+    highlight_stats_for,
     is_owner,
     visible_highlights_for,
 )
@@ -75,7 +76,7 @@ def _service_error(tag, exc):
 
 
 class CreateHighlightAPIView(BaseAPIView):
-    """POST /api/highlights/ — direct upload or promote from a post."""
+    """POST /highlights/ — direct upload or promote from a post."""
 
     def post(self, request):
         TAG = "CreateHighlightAPIView"
@@ -118,7 +119,7 @@ class CreateHighlightAPIView(BaseAPIView):
 
 
 class UserHighlightListAPIView(BaseAPIView):
-    """GET /api/highlights/user/<username>/ — the rail this actor may see."""
+    """GET /highlights/user/<username>/ — the rail this actor may see."""
 
     def get(self, request, username):
         TAG = "UserHighlightListAPIView"
@@ -165,7 +166,7 @@ class UserHighlightListAPIView(BaseAPIView):
 
 
 class HighlightDetailAPIView(BaseAPIView):
-    """PATCH / DELETE /api/highlights/<highlight_id>/ — owner only."""
+    """PATCH / DELETE /highlights/<highlight_id>/ — owner only."""
 
     def patch(self, request, highlight_id):
         TAG = "UpdateHighlightAPIView"
@@ -232,7 +233,7 @@ class HighlightDetailAPIView(BaseAPIView):
 
 
 class ReorderHighlightsAPIView(BaseAPIView):
-    """PUT /api/highlights/reorder/ — {"ordered_ids": [...]}, the whole rail."""
+    """PUT /highlights/reorder/ — {"ordered_ids": [...]}, the whole rail."""
 
     def put(self, request):
         TAG = "ReorderHighlightsAPIView"
@@ -273,9 +274,41 @@ class ReorderHighlightsAPIView(BaseAPIView):
             )
 
 
+class HighlightStatsAPIView(BaseAPIView):
+    """
+    GET /highlights/stats/ — the owner's own numbers, nobody else's.
+
+    Same player-only gate as every other write-side action: view counts are the
+    owner's business, so this is not readable by recruiters or by the same person
+    acting through one of their organizations.
+    """
+
+    def get(self, request):
+        TAG = "HighlightStatsAPIView"
+        try:
+            owner = HighlightService.require_player(request.actor)
+
+            return response_data(
+                success=True,
+                data=highlight_stats_for(owner)
+            )
+
+        except (ValidationError, PermissionDenied, NotFound) as e:
+            return _service_error(TAG, e)
+
+        except Exception as e:
+            logger.error(f"{TAG} | Error | {str(e)}")
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=500,
+                error=str(e)
+            )
+
+
 class RecordHighlightViewAPIView(BaseAPIView):
     """
-    POST /api/highlights/<highlight_id>/view/ — fire-and-forget view counter.
+    POST /highlights/<highlight_id>/view/ — fire-and-forget view counter.
 
     Open to any authenticated actor, but only for a clip they are actually
     allowed to see: the selector decides, and a clip they cannot see reads as

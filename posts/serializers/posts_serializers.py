@@ -9,6 +9,9 @@ class PostMediaSerializer(serializers.ModelSerializer):
     class Meta:
         model = PostMedia
         fields = [
+            # The client needs the media id to promote a post video into
+            # highlights (`source_media_id`) — see highlights/services.
+            "id",
             "file_url",
             "media_type",
             "thumbnail_url",

@@ -253,6 +253,7 @@ class ApplicantMiniSerializer(serializers.ModelSerializer):
 # LIST ITEM — one row in the org's applicants list.
 class ApplicantListItemSerializer(serializers.ModelSerializer):
     applicant = ApplicantMiniSerializer(read_only=True)
+    highlights_count = serializers.SerializerMethodField()
 
     class Meta:
         model = RecruitmentApplication
@@ -264,7 +265,24 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
             "shared_email",
             "shared_phone",
             "applicant",
+            "highlights_count",
         ]
+
+    def get_highlights_count(self, obj):
+        """
+        Clips this viewer may watch, for the "▶ Highlights (n)" chip. Read from
+        a per-page map the view builds in one query (see
+        highlights.selectors.visible_highlight_counts_for) — never queried here,
+        or the list would fan out one COUNT per row.
+
+        None when the caller didn't supply the map (e.g. the detail endpoint):
+        the client treats that as "unknown" and fetches on demand instead of
+        rendering a wrong 0.
+        """
+        counts = self.context.get("highlight_counts")
+        if counts is None:
+            return None
+        return counts.get(obj.applicant_id, 0)
 
 
 # DETAIL — list-item fields + the answered custom questions. The stored answers

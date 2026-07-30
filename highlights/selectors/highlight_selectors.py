@@ -17,11 +17,11 @@ only while acting as themselves; the same person acting as one of their
 organizations is just another recruiter viewing someone else's rail.
 """
 
-from django.db.models import QuerySet
+from django.db.models import Count, Q, QuerySet
 
 from accounts.models import User
 from connections.models import Follow
-from highlights.models import Highlight
+from highlights.models import Highlight, HighlightView
 
 
 # A viewer with one of these user roles counts as a recruiter (§1).
@@ -139,3 +139,153 @@ def visible_highlights_count(owner_user, viewer_actor) -> int:
     number behind the "▶ Highlights (n)" chip on profiles and player cards.
     """
     return visible_highlights_for(owner_user, viewer_actor).count()
+
+
+def followed_user_ids_among(owner_ids, viewer_actor) -> set:
+    """
+    Which of ``owner_ids`` the viewer's acting actor follows — one query,
+    restricted to the ids asked about. Empty for an anonymous/odd actor.
+    """
+    if not owner_ids or viewer_actor is None:
+        return set()
+
+    queryset = Follow.objects.filter(following_user_id__in=owner_ids)
+
+    if viewer_actor.is_user and viewer_actor.user:
+        queryset = queryset.filter(follower_user=viewer_actor.user)
+    elif viewer_actor.is_org and viewer_actor.organization:
+        queryset = queryset.filter(follower_org=viewer_actor.organization)
+    else:
+        return set()
+
+    return set(queryset.values_list("following_user_id", flat=True))
+
+
+def visible_highlight_counts_for(owner_ids, viewer_actor) -> dict:
+    """
+    ``{user_id: visible_count}`` for a whole PAGE of players — what the
+    "▶ Highlights (n)" chip needs on applicant rows and explore player cards.
+
+    Deliberately batched: one grouped COUNT for the page (plus at most one
+    follow query), never one per row. A list endpoint must not slow down or fan
+    out because a chip was added to its card (§3 performance).
+
+    Same matrix as :func:`visible_highlights_for`. A recruiter sees every level,
+    so their count needs no follow lookup at all; for anyone else the
+    ``followers_and_recruiters`` level is counted only for the owners they
+    actually follow. Owners are NOT special-cased — a player browsing explore
+    sees their own card counted the way others see it, which is what a
+    discovery surface should show.
+    """
+    ids = [oid for oid in set(owner_ids or []) if oid]
+    if not ids:
+        return {}
+
+    visible = Q(visibility=Highlight.Visibility.EVERYONE)
+
+    if is_recruiter(viewer_actor):
+        visible |= Q(
+            visibility__in=(
+                Highlight.Visibility.FOLLOWERS_AND_RECRUITERS,
+                Highlight.Visibility.RECRUITERS_ONLY,
+            )
+        )
+    else:
+        followed = followed_user_ids_among(ids, viewer_actor)
+        if followed:
+            visible |= Q(
+                visibility=Highlight.Visibility.FOLLOWERS_AND_RECRUITERS,
+                user_id__in=followed,
+            )
+
+    rows = (
+        Highlight.objects
+        .filter(visible, user_id__in=ids, is_deleted=False)
+        .values("user_id")
+        .annotate(total=Count("id"))
+    )
+
+    return {row["user_id"]: row["total"] for row in rows}
+
+
+def highlight_stats_for(owner_user) -> dict:
+    """
+    The owner's analytics for their whole reel — per clip and in total.
+
+    Two numbers, deliberately different:
+
+      * ``views_count`` — every play, the denormalized counter on the clip.
+      * ``recruiter_viewers`` — DISTINCT recruiters, from the deduplicated
+        ``HighlightView`` rows. A scout who rewatches all week counts once.
+
+    Distinct viewers are counted as ``distinct users + distinct orgs``: the two
+    columns are mutually exclusive by constraint, so the sum is the true number
+    of distinct actors without a UNION.
+
+    Three queries regardless of reel size: the clips, the per-clip grouping, and
+    the reel-wide distinct count (which is NOT the sum of the per-clip numbers —
+    one recruiter watching three clips is one recruiter).
+    """
+    if owner_user is None:
+        return {
+            "totals": {
+                "highlights": 0,
+                "views": 0,
+                "recruiter_viewers": 0,
+            },
+            "results": [],
+        }
+
+    clips = list(
+        Highlight.objects
+        .filter(user=owner_user, is_deleted=False)
+        .order_by("order", "created_at")
+    )
+
+    clip_ids = [clip.id for clip in clips]
+
+    per_clip = {}
+    if clip_ids:
+        rows = (
+            HighlightView.objects
+            .filter(highlight_id__in=clip_ids, is_recruiter=True)
+            .values("highlight_id")
+            .annotate(
+                users=Count("viewer_user", distinct=True),
+                orgs=Count("viewer_org", distinct=True),
+            )
+        )
+        per_clip = {
+            row["highlight_id"]: row["users"] + row["orgs"]
+            for row in rows
+        }
+
+    reel_recruiters = 0
+    if clip_ids:
+        totals = (
+            HighlightView.objects
+            .filter(highlight_id__in=clip_ids, is_recruiter=True)
+            .aggregate(
+                users=Count("viewer_user", distinct=True),
+                orgs=Count("viewer_org", distinct=True),
+            )
+        )
+        reel_recruiters = (totals["users"] or 0) + (totals["orgs"] or 0)
+
+    return {
+        "totals": {
+            "highlights": len(clips),
+            "views": sum(clip.views_count for clip in clips),
+            "recruiter_viewers": reel_recruiters,
+        },
+        "results": [
+            {
+                "id": clip.id,
+                "title": clip.title,
+                "thumbnail_url": clip.thumbnail_url,
+                "views_count": clip.views_count,
+                "recruiter_viewers": per_clip.get(clip.id, 0),
+            }
+            for clip in clips
+        ],
+    }

@@ -1,12 +1,15 @@
+from datetime import timedelta
+
 from django.core.cache import cache
 from django.db.models import F
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import User, UserProfile
 from connections.models import Follow
-from highlights.models import Highlight
+from highlights.models import Highlight, HighlightView
 from organization.models import (
     Organization,
     OrganizationMember,
@@ -14,7 +17,7 @@ from organization.models import (
 )
 from posts.models import Post, PostMedia
 
-BASE_URL = "/api/highlights"
+BASE_URL = "/highlights"
 CREATE_URL = f"{BASE_URL}/"
 REORDER_URL = f"{BASE_URL}/reorder/"
 
@@ -714,3 +717,170 @@ class HighlightListQueryCountTests(HighlightAPITestCase):
         self._auth(self.follower)
         with self.assertNumQueries(3):
             self.client.get(list_url(self.owner.username))
+
+
+STATS_URL = f"{BASE_URL}/stats/"
+
+
+class HighlightViewAnalyticsTests(HighlightAPITestCase):
+    """
+    HighlightView rows + GET /stats/ — the numbers behind "Seen by N recruiters"
+    (HIGHLIGHTS_SPEC.md §2, phase 4).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.clip = self._highlight(
+            visibility=Highlight.Visibility.EVERYONE, order=0, title="open"
+        )
+        self.other_clip = self._highlight(
+            visibility=Highlight.Visibility.EVERYONE, order=1, title="second"
+        )
+
+    def _stats(self, actor_user, org=None):
+        headers = self._auth(actor_user, org)
+        return self.client.get(STATS_URL, **headers)
+
+    # ── row writing + dedup ────────────────────────────────────
+
+    def test_a_view_writes_one_row_stamped_with_the_viewer_kind(self):
+        self._view(self.scout, self.clip.id)
+
+        row = HighlightView.objects.get()
+        self.assertEqual(row.highlight_id, self.clip.id)
+        self.assertEqual(row.viewer_user_id, self.scout.id)
+        self.assertIsNone(row.viewer_org_id)
+        self.assertTrue(row.is_recruiter)
+        self.assertEqual(row.viewed_on, timezone.localdate())
+
+    def test_same_viewer_same_day_is_one_row_but_still_counts_plays(self):
+        for _ in range(4):
+            self._view(self.scout, self.clip.id)
+
+        self.assertEqual(HighlightView.objects.count(), 1)
+        # views_count is every play, not the deduplicated row count.
+        self.clip.refresh_from_db()
+        self.assertEqual(self.clip.views_count, 4)
+
+    def test_same_viewer_next_day_is_a_new_row(self):
+        self._view(self.scout, self.clip.id)
+        HighlightView.objects.update(
+            viewed_on=timezone.localdate() - timedelta(days=1)
+        )
+
+        self._view(self.scout, self.clip.id)
+
+        self.assertEqual(HighlightView.objects.count(), 2)
+
+    def test_org_actor_is_recorded_as_the_org_and_as_a_recruiter(self):
+        self._view(self.orguser, self.clip.id, org=self.org)
+
+        row = HighlightView.objects.get()
+        self.assertIsNone(row.viewer_user_id)
+        self.assertEqual(row.viewer_org_id, self.org.id)
+        self.assertTrue(row.is_recruiter)
+
+    def test_non_recruiter_viewer_is_recorded_but_not_as_a_recruiter(self):
+        self._view(self.follower, self.clip.id)
+
+        row = HighlightView.objects.get()
+        self.assertEqual(row.viewer_user_id, self.follower.id)
+        self.assertFalse(row.is_recruiter)
+
+    def test_owner_watching_writes_nothing(self):
+        self._view(self.owner, self.clip.id)
+
+        self.assertEqual(HighlightView.objects.count(), 0)
+        self.clip.refresh_from_db()
+        self.assertEqual(self.clip.views_count, 0)
+
+    # ── stats endpoint ─────────────────────────────────────────
+
+    def test_stats_report_plays_and_distinct_recruiters(self):
+        # scout watches clip 1 twice (one recruiter), coach watches it once,
+        # the org watches clip 2, a plain follower watches clip 1.
+        self._view(self.scout, self.clip.id)
+        self._view(self.scout, self.clip.id)
+        self._view(self.coach, self.clip.id)
+        self._view(self.follower, self.clip.id)
+        self._view(self.orguser, self.other_clip.id, org=self.org)
+
+        resp = self._stats(self.owner)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data["data"]
+
+        by_title = {row["title"]: row for row in data["results"]}
+        # 4 plays on clip 1; 2 distinct recruiters (scout + coach, not the follower).
+        self.assertEqual(by_title["open"]["views_count"], 4)
+        self.assertEqual(by_title["open"]["recruiter_viewers"], 2)
+        self.assertEqual(by_title["second"]["views_count"], 1)
+        self.assertEqual(by_title["second"]["recruiter_viewers"], 1)
+
+        self.assertEqual(data["totals"]["highlights"], 2)
+        self.assertEqual(data["totals"]["views"], 5)
+        # scout + coach + org = 3 distinct recruiters across the reel.
+        self.assertEqual(data["totals"]["recruiter_viewers"], 3)
+
+    def test_reel_total_does_not_double_count_one_recruiter(self):
+        self._view(self.scout, self.clip.id)
+        self._view(self.scout, self.other_clip.id)
+
+        data = self._stats(self.owner).data["data"]
+
+        self.assertEqual(data["results"][0]["recruiter_viewers"], 1)
+        self.assertEqual(data["results"][1]["recruiter_viewers"], 1)
+        # One recruiter watching two clips is still ONE recruiter.
+        self.assertEqual(data["totals"]["recruiter_viewers"], 1)
+
+    def test_stats_start_at_zero(self):
+        data = self._stats(self.owner).data["data"]
+
+        self.assertEqual(data["totals"]["views"], 0)
+        self.assertEqual(data["totals"]["recruiter_viewers"], 0)
+        self.assertTrue(all(r["views_count"] == 0 for r in data["results"]))
+
+    def test_deleted_clips_drop_out_of_stats(self):
+        self._view(self.scout, self.clip.id)
+        self._delete(self.owner, self.clip.id)
+
+        data = self._stats(self.owner).data["data"]
+
+        self.assertEqual(data["totals"]["highlights"], 1)
+        self.assertEqual([r["title"] for r in data["results"]], ["second"])
+
+    # ── access ─────────────────────────────────────────────────
+
+    def test_non_players_are_refused(self):
+        for viewer in (self.scout, self.coach, self.orguser):
+            with self.subTest(viewer=viewer.username):
+                self.assertEqual(
+                    self._stats(viewer).status_code,
+                    status.HTTP_403_FORBIDDEN,
+                )
+
+    def test_another_player_gets_their_own_empty_stats_not_the_owners(self):
+        """
+        The endpoint is self-scoped: there is no parameter to ask for someone
+        else's numbers, so a stranger sees their own (empty) reel, never these.
+        """
+        self._view(self.scout, self.clip.id)
+
+        data = self._stats(self.stranger).data["data"]
+
+        self.assertEqual(data["results"], [])
+        self.assertEqual(data["totals"]["views"], 0)
+        self.assertEqual(data["totals"]["recruiter_viewers"], 0)
+
+    def test_org_actor_cannot_read_stats(self):
+        resp = self._stats(self.orguser, org=self.org)
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_stats_require_authentication(self):
+        self.client.force_authenticate(user=None)
+
+        self.assertEqual(
+            self.client.get(STATS_URL).status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )

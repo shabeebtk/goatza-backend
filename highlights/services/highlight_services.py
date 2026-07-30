@@ -21,7 +21,7 @@ Failures raise DRF exceptions, so the message reaches the client unchanged:
 
 import uuid
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 from rest_framework.exceptions import (
@@ -31,7 +31,8 @@ from rest_framework.exceptions import (
 )
 
 from accounts.models import User
-from highlights.models import Highlight
+from highlights.models import Highlight, HighlightView
+from highlights.selectors.highlight_selectors import is_recruiter
 from posts.models import Post, PostMedia
 from utils.validations import is_valid_uuid
 
@@ -479,4 +480,42 @@ class HighlightService:
             views_count=F("views_count") + 1
         )
 
+        if updated:
+            HighlightService._record_view_row(actor, highlight)
+
         return bool(updated)
+
+    @staticmethod
+    def _record_view_row(actor, highlight) -> None:
+        """
+        Write the deduplicated audit row behind "Seen by N recruiters".
+
+        Strictly best-effort: analytics must never break playback. A repeat watch
+        the same day loses the race to the unique constraint and that is the
+        correct outcome, so IntegrityError is swallowed along with anything else
+        — the counter bump above has already been committed either way.
+        """
+        if actor is None:
+            return
+
+        viewer = {}
+        if actor.is_user and actor.user:
+            viewer["viewer_user"] = actor.user
+        elif actor.is_org and actor.organization:
+            viewer["viewer_org"] = actor.organization
+        else:
+            return
+
+        try:
+            # A nested atomic block: without it an IntegrityError would poison
+            # an enclosing transaction even though we handle it here.
+            with transaction.atomic():
+                HighlightView.objects.get_or_create(
+                    highlight=highlight,
+                    viewed_on=timezone.localdate(),
+                    defaults={"is_recruiter": is_recruiter(actor)},
+                    **viewer
+                )
+        except IntegrityError:
+            # Two tabs, same second, same day — one row is exactly right.
+            pass

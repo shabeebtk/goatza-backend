@@ -663,6 +663,9 @@ class ExploreTrendingPostsTests(APITestCase):
 PLAYER_KEYS = {
     "id", "name", "username", "role", "headline", "profile_photo",
     "city", "followers_count", "distance_km", "is_following",
+    # Batched with the page (highlights.selectors.visible_highlight_counts_for)
+    # to drive the "▶ Highlights (n)" chip on the card.
+    "highlights_count",
 }
 ORG_KEYS = {
     "id", "name", "username", "type", "is_verified", "logo", "headline",
