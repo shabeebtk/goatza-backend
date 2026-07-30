@@ -76,7 +76,7 @@ def _service_error(tag, exc):
 
 
 class CreateHighlightAPIView(BaseAPIView):
-    """POST /highlights/ — direct upload or promote from a post."""
+    """POST /highlights/create — direct upload or promote from a post."""
 
     def post(self, request):
         TAG = "CreateHighlightAPIView"
@@ -119,7 +119,7 @@ class CreateHighlightAPIView(BaseAPIView):
 
 
 class UserHighlightListAPIView(BaseAPIView):
-    """GET /highlights/user/<username>/ — the rail this actor may see."""
+    """GET /highlights/user/<username> — the rail this actor may see."""
 
     def get(self, request, username):
         TAG = "UserHighlightListAPIView"
@@ -166,7 +166,7 @@ class UserHighlightListAPIView(BaseAPIView):
 
 
 class HighlightDetailAPIView(BaseAPIView):
-    """PATCH / DELETE /highlights/<highlight_id>/ — owner only."""
+    """PATCH / DELETE /highlights/<highlight_id> — owner only."""
 
     def patch(self, request, highlight_id):
         TAG = "UpdateHighlightAPIView"
@@ -233,7 +233,7 @@ class HighlightDetailAPIView(BaseAPIView):
 
 
 class ReorderHighlightsAPIView(BaseAPIView):
-    """PUT /highlights/reorder/ — {"ordered_ids": [...]}, the whole rail."""
+    """PUT /highlights/reorder — {"ordered_ids": [...]}, the whole rail."""
 
     def put(self, request):
         TAG = "ReorderHighlightsAPIView"
@@ -276,7 +276,7 @@ class ReorderHighlightsAPIView(BaseAPIView):
 
 class HighlightStatsAPIView(BaseAPIView):
     """
-    GET /highlights/stats/ — the owner's own numbers, nobody else's.
+    GET /highlights/stats — the owner's own numbers, nobody else's.
 
     Same player-only gate as every other write-side action: view counts are the
     owner's business, so this is not readable by recruiters or by the same person
@@ -308,7 +308,7 @@ class HighlightStatsAPIView(BaseAPIView):
 
 class RecordHighlightViewAPIView(BaseAPIView):
     """
-    POST /highlights/<highlight_id>/view/ — fire-and-forget view counter.
+    POST /highlights/<highlight_id>/view — fire-and-forget view counter.
 
     Open to any authenticated actor, but only for a clip they are actually
     allowed to see: the selector decides, and a clip they cannot see reads as
