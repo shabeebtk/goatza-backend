@@ -33,6 +33,7 @@ from messaging.services.exceptions import (
 )
 from notifications.services.fcm_service import FCMService
 from notifications.services.notification_service import NotificationService
+from services.storage.factory import get_storage_service
 from services.storage.validators import (
     build_video_thumbnail_url,
     extract_public_id_from_url,
@@ -201,7 +202,7 @@ class MessageService:
             size_bytes, duration_ms,
         )
 
-        return MessageService._create_and_dispatch(
+        message = MessageService._create_and_dispatch(
             conversation,
             sender_user,
             sender_org,
@@ -214,6 +215,30 @@ class MessageService:
             media_height=height,
             media_duration_ms=duration_ms,
             media_size_bytes=size_bytes,
+        )
+
+        # Pre-generate the transcoded video the chat player asks for, so the
+        # recipient doesn't open the bubble into a cold-start transcode. Uses the
+        # VALIDATED public_id (never the raw client value) and runs on_commit —
+        # same rule as realtime/push: a provider hiccup must not roll back or
+        # fail a message that is already persisted.
+        MessageService._schedule_video_derivatives(media_public_id)
+
+        return message
+
+    @staticmethod
+    def _schedule_video_derivatives(media_public_id: str) -> None:
+        """Best-effort eager transcode, queued for after the commit."""
+        if not media_public_id:
+            return
+
+        try:
+            storage = get_storage_service()
+        except Exception:
+            return
+
+        transaction.on_commit(
+            lambda: storage.ensure_video_derivatives(media_public_id)
         )
 
     @staticmethod

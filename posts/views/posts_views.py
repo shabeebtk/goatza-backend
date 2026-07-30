@@ -191,6 +191,17 @@ class CreatePostAPIView(BaseAPIView):
                 if meta.get("duration") is not None:
                     media["duration"] = meta["duration"]
 
+                # -------------------------
+                # EAGER VIDEO DERIVATIVE
+                # -------------------------
+                # Kick off the transcode the player will ask for, before the row
+                # even exists — by the time anyone opens the post, the derivative
+                # is ready instead of cold-starting under them. Best-effort, and
+                # deliberately here rather than after the write: no transaction is
+                # open at this point, so a slow Cloudinary call can't hold one.
+                if media_type == PostMedia.MediaType.VIDEO:
+                    storage.ensure_video_derivatives(public_id)
+
             # -------------------------
             # MEDIA RULES
             # -------------------------

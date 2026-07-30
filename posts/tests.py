@@ -321,8 +321,11 @@ class PostMediaDimensionsTests(APITestCase):
         # Extraction was driven by the stored public_id, not client dimensions.
         mock_meta.assert_called_once_with(media.public_id, "image")
 
+    # Creating a video also fires the eager-derivative request inline; stubbed
+    # so the test never leaves the process.
+    @patch("services.storage.cloudinary.CloudinaryService.ensure_video_derivatives")
     @patch("services.storage.cloudinary.CloudinaryService.get_media_metadata")
-    def test_server_duration_overrides_client_for_video(self, mock_meta):
+    def test_server_duration_overrides_client_for_video(self, mock_meta, _mock_eager):
         # Client claims 10s; Cloudinary reports 45s → server value wins.
         mock_meta.return_value = {"width": 1280, "height": 720, "duration": 45}
 
@@ -395,6 +398,179 @@ class PostMediaDimensionsTests(APITestCase):
             meta = CloudinaryService().get_media_metadata("users/x/pic", "image")
 
         self.assertEqual(meta, {})
+
+
+# =====================================================================
+# Eager video derivatives — the first viewer must not wait on a transcode
+# =====================================================================
+
+@override_settings(
+    CLOUDINARY_CLOUD_NAME=CLOUD,
+    CLOUDINARY_API_KEY="key",
+    CLOUDINARY_API_SECRET="secret",
+)
+class VideoEagerDerivativeTests(APITestCase):
+    """
+    Cloudinary builds a video derivative on FIRST REQUEST, so without eager
+    generation the first person to open a clip sits through a live transcode.
+    Creating a video asks for it up front; creating images never does; and a
+    provider failure stays invisible to the user.
+    """
+
+    def setUp(self):
+        self.me = User.objects.create_user(
+            email="me@example.com", password="pass1234", username="me",
+        )
+        UserProfile.objects.create(user=self.me, name="Me")
+        self.client.force_authenticate(user=self.me)
+
+    # ── factories (same shape validate_media accepts) ────────────
+
+    def _image_payload(self, order=0):
+        public_id = f"users/{self.me.id}/posts/temp/pic{order}"
+        return {
+            "file_url": (
+                f"https://res.cloudinary.com/{CLOUD}/image/upload/v1/{public_id}.jpg"
+            ),
+            "public_id": public_id,
+            "media_type": "image",
+            "order": order,
+        }
+
+    def _video_payload(self, order=0, duration=10):
+        public_id = f"users/{self.me.id}/posts/temp/clip{order}"
+        return {
+            "file_url": (
+                f"https://res.cloudinary.com/{CLOUD}/video/upload/v1/{public_id}.mp4"
+            ),
+            "public_id": public_id,
+            "media_type": "video",
+            "duration": duration,
+            "order": order,
+        }
+
+    # ── create paths ─────────────────────────────────────────────
+
+    @patch("services.storage.cloudinary.CloudinaryService.get_media_metadata",
+           return_value={})
+    @patch("services.storage.cloudinary.CloudinaryService.ensure_video_derivatives")
+    def test_video_post_requests_the_derivative(self, mock_eager, _mock_meta):
+        payload = self._video_payload()
+
+        resp = self.client.post(
+            CREATE_URL,
+            {"content": "clip", "media": [payload]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        media = PostMedia.objects.get()
+        mock_eager.assert_called_once_with(media.public_id)
+
+    @patch("services.storage.cloudinary.CloudinaryService.get_media_metadata",
+           return_value={})
+    @patch("services.storage.cloudinary.CloudinaryService.ensure_video_derivatives")
+    def test_image_post_never_requests_a_derivative(self, mock_eager, _mock_meta):
+        resp = self.client.post(
+            CREATE_URL,
+            {"content": "photos", "media": [
+                self._image_payload(0), self._image_payload(1),
+            ]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        mock_eager.assert_not_called()
+
+    @patch("services.storage.cloudinary.CloudinaryService.get_media_metadata",
+           return_value={})
+    def test_provider_failure_never_blocks_the_post(self, _mock_meta):
+        # The real method runs; only Cloudinary's own call blows up.
+        with patch("cloudinary.uploader.explicit", side_effect=Exception("boom")):
+            resp = self.client.post(
+                CREATE_URL,
+                {"content": "still works", "media": [self._video_payload()]},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(Post.objects.count(), 1)
+        self.assertEqual(PostMedia.objects.count(), 1)
+
+    # ── the provider call itself ─────────────────────────────────
+
+    def test_explicit_is_called_with_the_canonical_transformation(self):
+        """
+        Both eager entries reach Cloudinary as raw strings, in this exact order —
+        the mp4 transformation has to match VIDEO_DELIVERY_TRANSFORM in the
+        frontend byte-for-byte or the pre-generated asset is not the one being
+        requested, and HLS has no on-demand path at all.
+        """
+        from services.storage.cloudinary import (
+            VIDEO_EAGER_FORMAT,
+            VIDEO_EAGER_TRANSFORMATION,
+            VIDEO_HLS_FORMAT,
+            VIDEO_HLS_TRANSFORMATION,
+            CloudinaryService,
+        )
+
+        self.assertEqual(
+            VIDEO_EAGER_TRANSFORMATION,
+            "c_limit,h_1280,w_1280,q_auto:good,vc_h264",
+        )
+        self.assertEqual(VIDEO_HLS_TRANSFORMATION, "sp_hd")
+        self.assertEqual(VIDEO_HLS_FORMAT, "m3u8")
+
+        with patch("cloudinary.uploader.explicit") as mock_explicit:
+            CloudinaryService().ensure_video_derivatives("users/x/posts/clip")
+
+        mock_explicit.assert_called_once_with(
+            "users/x/posts/clip",
+            type="upload",
+            resource_type="video",
+            eager_async=True,
+            eager=[
+                {
+                    "raw_transformation": VIDEO_EAGER_TRANSFORMATION,
+                    "format": VIDEO_EAGER_FORMAT,
+                },
+                {
+                    "raw_transformation": VIDEO_HLS_TRANSFORMATION,
+                    "format": VIDEO_HLS_FORMAT,
+                },
+            ],
+        )
+
+    def test_mp4_stays_the_first_eager_entry(self):
+        """
+        mp4 is the universal fallback — old clips, HLS failures, no-MSE clients.
+        Pinned separately from the arg-for-arg assertion above so a future edit
+        that reorders or drops it fails with an obvious reason.
+        """
+        from services.storage.cloudinary import CloudinaryService
+
+        with patch("cloudinary.uploader.explicit") as mock_explicit:
+            CloudinaryService().ensure_video_derivatives("users/x/posts/clip")
+
+        eager = mock_explicit.call_args.kwargs["eager"]
+        self.assertEqual(len(eager), 2)
+        self.assertEqual(eager[0]["format"], "mp4")
+        self.assertEqual(eager[1]["format"], "m3u8")
+
+    def test_empty_public_id_never_reaches_the_provider(self):
+        from services.storage.cloudinary import CloudinaryService
+
+        with patch("cloudinary.uploader.explicit") as mock_explicit:
+            CloudinaryService().ensure_video_derivatives("")
+
+        mock_explicit.assert_not_called()
+
+    def test_provider_error_is_swallowed(self):
+        from services.storage.cloudinary import CloudinaryService
+
+        with patch("cloudinary.uploader.explicit", side_effect=Exception("boom")):
+            # Must not raise — this runs on create paths.
+            CloudinaryService().ensure_video_derivatives("users/x/posts/clip")
 
 
 # =====================================================================

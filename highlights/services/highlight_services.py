@@ -34,6 +34,7 @@ from accounts.models import User
 from highlights.models import Highlight, HighlightView
 from highlights.selectors.highlight_selectors import is_recruiter
 from posts.models import Post, PostMedia
+from services.storage.factory import get_storage_service
 from utils.validations import is_valid_uuid
 
 
@@ -320,7 +321,37 @@ class HighlightService:
                 **media_fields,
             )
 
+        # Pre-generate the transcoded clip the viewer plays. The highlights
+        # viewer is where the cold-start black screen was actually reported, so
+        # this is the path that matters most.
+        #
+        # on_commit, never inline: this is a network call, and the block above
+        # holds a row lock on the owner. Deferring it also means a clip that
+        # loses the "10 highlights" race never triggers a pointless transcode.
+        # Both modes go through here — a promoted clip usually already has the
+        # derivative from its post, and asking twice is harmless.
+        HighlightService._schedule_video_derivatives(media_fields.get("public_id"))
+
         return highlight
+
+    @staticmethod
+    def _schedule_video_derivatives(public_id) -> None:
+        """
+        Queue eager-derivative generation for after the current transaction
+        commits. Best-effort throughout: resolving the storage service must not
+        be able to break a create either.
+        """
+        if not public_id:
+            return
+
+        try:
+            storage = get_storage_service()
+        except Exception:
+            return
+
+        transaction.on_commit(
+            lambda: storage.ensure_video_derivatives(public_id)
+        )
 
     # =================================================================
     # UPDATE / REORDER / DELETE
