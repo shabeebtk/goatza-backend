@@ -31,6 +31,22 @@ MESSAGE_SHARE_NOUN = {
     "recruitment": "a recruitment",
 }
 
+# Copy for an org's decision on a career entry, keyed by notification type.
+# `verb` attaches to the org name ("{Org} verified your career entry"), `body`
+# is the fallback line when the org gave no reason. Rejected copy stays gentle —
+# the entry is not deleted, it just goes back to being the player's own claim.
+# Shared with grouping_service so in-app + push text can't drift.
+CAREER_DECISION_COPY = {
+    "career_verified": {
+        "verb": "verified your career entry ✅",
+        "body": "is now verified on your profile",
+    },
+    "career_rejected": {
+        "verb": "could not verify your career entry",
+        "body": "is still shown as self-reported",
+    },
+}
+
 def _resolve_actor_display(notification: "Notification"):
     """
     Return (name, username, avatar) for whichever actor
@@ -153,6 +169,46 @@ def build_notification_payload(notification: "Notification") -> dict:
         title = f"{actor_name} {copy['verb']}"
         body = f"Your application for {recruitment_title} {copy['body']}"
         url = f"/recruitments/{recruitment_id}"
+
+    elif notification.type == Notification.Type.CAREER_VERIFICATION_REQUEST:
+        entry_title = notification.data.get("entry_title", "a career entry")
+        title = f"{actor_name} listed you on their career"
+        body = f"{entry_title} — tap to verify or reject"
+        url = (
+            f"/organization/admin/{notification.recipient_org_id}"
+            f"/career-verifications"
+        )
+
+    elif notification.type == Notification.Type.CAREER_ADD_PROMPT:
+        recruitment_title = getattr(
+            notification.recruitment, "title", "a recruitment"
+        )
+        application_id = notification.data.get("application_id", "")
+        recruitment_id = (
+            notification.recruitment_id
+            or notification.data.get("recruitment_id", "")
+        )
+        # Deliberately different from the "selected you 🎉" status push that
+        # goes out with it: that one announces the result, this one is the
+        # call to action.
+        title = f"Add {actor_name} to your career"
+        body = f"You were selected for {recruitment_title} — add it to your profile"
+        url = f"/recruitments/{recruitment_id}?addToCareer={application_id}"
+
+    elif notification.type in (
+        Notification.Type.CAREER_VERIFIED,
+        Notification.Type.CAREER_REJECTED,
+    ):
+        entry_title = notification.data.get("entry_title", "Your career entry")
+        copy = CAREER_DECISION_COPY[notification.type]
+        # The org's own words when they gave a reason, the stock line otherwise.
+        reason = notification.data.get("reason", "")
+        title = f"{actor_name} {copy['verb']}"
+        body = reason or f"{entry_title} {copy['body']}"
+        url = (
+            f"/profile/{notification.data.get('owner_username', '')}"
+            f"?tab=career"
+        )
 
     return {
         "type": notification.type,
@@ -482,5 +538,139 @@ class NotificationService:
             },
             **NotificationService._actor_kwargs(actor_org=actor_org),
             **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # CAREER ADD PROMPT (org selection → player)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def career_add_prompt(actor_org, recipient_user, recruitment, application_id):
+        """
+        Nudge a selected applicant to turn the result into a career entry.
+
+        Sent ALONGSIDE the ordinary "selected" status notification, not instead
+        of it: one announces the outcome, this one is the call to action, and
+        they deep-link to different things.
+
+        Deduplicated per application, so an org that flips an application out of
+        and back into ``selected`` prompts once and not once per flip — by then
+        the player has either added the entry or chosen not to.
+
+        Ungrouped (no group_key): being selected is a singular event and should
+        never collapse into a count.
+        """
+        dedup_key = f"career_add_prompt:{application_id}"
+
+        if Notification.objects.filter(dedup_key=dedup_key).exists():
+            return
+
+        notification = Notification.objects.create(
+            type=Notification.Type.CAREER_ADD_PROMPT,
+            dedup_key=dedup_key,
+            recruitment=recruitment,
+            data={
+                "application_id": str(application_id),
+                "recruitment_id": str(recruitment.id),
+                "recruitment_title": recruitment.title,
+                "organization_name": recruitment.organization.name,
+            },
+            **NotificationService._actor_kwargs(actor_org=actor_org),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # CAREER VERIFICATION (player → org)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def career_verification_request(actor_user, career_entry):
+        """
+        Tell an organization that someone has listed them on their career and
+        is waiting for a decision.
+
+        Fired every time an entry *enters* pending for this org — first claim,
+        a material edit that invalidated an existing verification, or a re-tag
+        onto a different club. An entry that was already pending and stays
+        pending does not re-notify: nothing changed for the reviewer.
+
+        Grouped per org, so a club that gets listed by half a squad sees one
+        "A, B and 12 others listed you on their career" entry rather than
+        fifteen. Not deduplicated — a re-request after an edit is a genuinely
+        new decision to make.
+
+        Recipients are the org's OWNER/ADMIN members (``_get_recipient_users``)
+        — exactly the roles allowed to act on the request.
+        """
+        recipient_org = career_entry.organization
+
+        if recipient_org is None:
+            return
+
+        notification = Notification.objects.create(
+            type=Notification.Type.CAREER_VERIFICATION_REQUEST,
+            group_key=f"career_verification:org:{recipient_org.id}",
+            career_entry=career_entry,
+            data={
+                "career_entry_id": str(career_entry.id),
+                "entry_title": career_entry.title,
+                "organization_name": career_entry.organization_name,
+            },
+            **NotificationService._actor_kwargs(actor_user=actor_user),
+            **NotificationService._recipient_kwargs(recipient_org=recipient_org),
+        )
+        _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # CAREER DECISION (org → player)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def career_verified(actor_org, career_entry):
+        """Tell the player their claim was confirmed by the club."""
+        NotificationService._career_decision(
+            Notification.Type.CAREER_VERIFIED,
+            actor_org,
+            career_entry,
+        )
+
+    @staticmethod
+    def career_rejected(actor_org, career_entry, reason=""):
+        """
+        Tell the player the club would not confirm their claim.
+
+        ``reason`` is the org's own short note. It is carried on the
+        notification only — the entry itself keeps no rejection text — so this
+        payload is the single place that copy exists.
+        """
+        NotificationService._career_decision(
+            Notification.Type.CAREER_REJECTED,
+            actor_org,
+            career_entry,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _career_decision(notification_type, actor_org, career_entry, reason=""):
+        """
+        Shared write for both decisions. One notification per decision (no
+        dedup) and no group_key, so a club that verifies then later rejects
+        leaves both rows in the player's list rather than collapsing them.
+        """
+        owner = career_entry.user
+
+        notification = Notification.objects.create(
+            type=notification_type,
+            career_entry=career_entry,
+            data={
+                "career_entry_id": str(career_entry.id),
+                "entry_title": career_entry.title,
+                "organization_name": career_entry.organization_name,
+                # The deep link is to the *recipient's* profile, not the
+                # actor's — the org decided, but the entry lives on the player.
+                "owner_username": owner.username or "",
+                "reason": (reason or "").strip(),
+            },
+            **NotificationService._actor_kwargs(actor_org=actor_org),
+            **NotificationService._recipient_kwargs(recipient_user=owner),
         )
         _dispatch(notification)

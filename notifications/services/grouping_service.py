@@ -1,6 +1,7 @@
 from collections import defaultdict
 from posts.serializers.posts_serializers import PostMiniSerializer
 from notifications.services.notification_service import (
+    CAREER_DECISION_COPY,
     MESSAGE_SHARE_NOUN,
     RECRUITMENT_STATUS_COPY,
     RECRUITMENT_STATUS_COPY_DEFAULT,
@@ -73,8 +74,27 @@ class NotificationGroupingService:
     def _build_group_response(primary, actors, items):
         total_count = len(items)
 
-        top_actors = [a for a in actors if a][:2]
-        others_count = max(0, total_count - len(top_actors))
+        # Distinct PEOPLE, newest first. Types that dedup per actor (like,
+        # follow, recruitment_application) can never repeat one, but types that
+        # legitimately can — a player sending two career verification requests
+        # to the same club, someone commenting twice — would otherwise render
+        # as "Alice, Alice listed you on their career".
+        seen_actor_ids = set()
+        distinct_actors = []
+        for actor in actors:
+            if not actor:
+                continue
+            actor_id = actor.get("id")
+            if actor_id in seen_actor_ids:
+                continue
+            seen_actor_ids.add(actor_id)
+            distinct_actors.append(actor)
+
+        top_actors = distinct_actors[:2]
+        # "and N others" counts PEOPLE, not rows — two comments from one person
+        # is still one person. `message` is the exception and uses total_count
+        # directly (see _build_text), because there it means "N more things".
+        others_count = max(0, len(distinct_actors) - len(top_actors))
 
         # ----------------------------------------
         # RECRUITMENT DATA (applicants notifications)
@@ -102,6 +122,8 @@ class NotificationGroupingService:
             recruitment_title=recruitment_title,
             to_status=primary.data.get("to_status"),
             shared_kind=primary.data.get("shared_kind"),
+            entry_title=primary.data.get("entry_title"),
+            total_count=total_count,
         )
 
         # ----------------------------------------
@@ -121,6 +143,20 @@ class NotificationGroupingService:
                 "text": primary.comment.comment
             }
 
+        # ----------------------------------------
+        # CAREER ENTRY DATA
+        # Small inline dict like recruitment_data — career_entry is
+        # select_related on the list queryset, so this costs no extra query.
+        # ----------------------------------------
+        career_entry_data = None
+        if primary.career_entry:
+            career_entry_data = {
+                "id": str(primary.career_entry.id),
+                "title": primary.career_entry.title,
+                "organization_name": primary.career_entry.organization_name,
+                "verification_status": primary.career_entry.verification_status,
+            }
+
         return {
             "id": str(primary.id),
             "type": primary.type,
@@ -132,7 +168,16 @@ class NotificationGroupingService:
 
             "post": post_data,
             "comment": comment_data,
-            "recruitment": recruitment_data
+            "recruitment": recruitment_data,
+            "career_entry": career_entry_data,
+
+            # The primary row's payload, passed through the way
+            # NotificationSerializer already does for the ungrouped shape.
+            # Some types carry the only copy of an id the client needs to act
+            # on here — career_add_prompt's `application_id` is the reason this
+            # exists: without it the in-app prompt has no way to call
+            # /careers/from-application/<id>.
+            "data": primary.data or {}
         }
 
     # ----------------------------------------
@@ -140,7 +185,8 @@ class NotificationGroupingService:
     @staticmethod
     def _build_text(
         notification_type, actors, others_count,
-        recruitment_title=None, to_status=None, shared_kind=None
+        recruitment_title=None, to_status=None, shared_kind=None,
+        entry_title=None, total_count=1
     ):
         names = [a["name"] for a in actors if a]
 
@@ -168,10 +214,10 @@ class NotificationGroupingService:
 
         if notification_type == "message":
             who = names[0] if names else "Someone"
-            # Grouped per conversation: others_count is how many MORE things
-            # the same sender shared, not how many people shared.
-            if others_count > 0:
-                return f"{who} shared {others_count + 1} things with you"
+            # Grouped per conversation, and one sender can share many things —
+            # so this counts ROWS, not people, unlike every other type here.
+            if total_count > 1:
+                return f"{who} shared {total_count} things with you"
             return f"{who} shared {MESSAGE_SHARE_NOUN.get(shared_kind, 'something')} with you"
 
         if notification_type == "recruitment_application_status":
@@ -179,6 +225,21 @@ class NotificationGroupingService:
             copy = RECRUITMENT_STATUS_COPY.get(
                 to_status, RECRUITMENT_STATUS_COPY_DEFAULT
             )
+            return f"{org} {copy['verb']}"
+
+        if notification_type == "career_verification_request":
+            # Grouped per org: others_count is how many MORE players are
+            # waiting on this club, so the count is the point of the line.
+            if others_count > 0:
+                return (
+                    f"{', '.join(names)} and {others_count} others "
+                    f"listed you on their career"
+                )
+            return f"{', '.join(names)} listed you on their career"
+
+        if notification_type in CAREER_DECISION_COPY:
+            org = names[0] if names else "The organization"
+            copy = CAREER_DECISION_COPY[notification_type]
             return f"{org} {copy['verb']}"
 
         return "You have a new notification"
