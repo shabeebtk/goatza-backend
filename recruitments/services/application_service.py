@@ -358,6 +358,15 @@ class ApplicationService:
                 for app in notify_apps
             ]
 
+            # Selection additionally invites the applicant to turn the result
+            # into a career entry. It rides on this same status change rather
+            # than a parallel flow, so there is exactly one place a selection
+            # happens. The prompt is deduplicated per application inside the
+            # notification service.
+            prompt_career_add = (
+                to_status == RecruitmentApplication.Status.SELECTED
+            )
+
             def _notify_applicants():
                 for application_id, applicant in notify_data:
                     if applicant is None:
@@ -373,6 +382,25 @@ class ApplicationService:
                     except Exception as exc:
                         logger.warning(
                             "ApplicationService.change_status | notification "
+                            f"failed | application_id={application_id} | {exc}"
+                        )
+
+                    if not prompt_career_add:
+                        continue
+
+                    # Guarded separately: the status notification is the one the
+                    # applicant must get, and a failure here must not cost them
+                    # that. Both are already outside the transaction.
+                    try:
+                        NotificationService.career_add_prompt(
+                            actor_org=org,
+                            recipient_user=applicant,
+                            recruitment=recruitment,
+                            application_id=application_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "ApplicationService.change_status | career prompt "
                             f"failed | application_id={application_id} | {exc}"
                         )
 

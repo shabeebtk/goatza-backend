@@ -16,6 +16,10 @@ class Notification(BaseUUIDModel):
         RECRUITMENT_APPLICATION = "recruitment_application", "Recruitment Application"
         RECRUITMENT_APPLICATION_STATUS = "recruitment_application_status", "Recruitment Application Status"
         MESSAGE = "message", "Message"
+        CAREER_VERIFICATION_REQUEST = "career_verification_request", "Career Verification Request"
+        CAREER_VERIFIED = "career_verified", "Career Verified"
+        CAREER_REJECTED = "career_rejected", "Career Rejected"
+        CAREER_ADD_PROMPT = "career_add_prompt", "Career Add Prompt"
         # future:
         # TRIAL = "trial"
         
@@ -78,6 +82,16 @@ class Notification(BaseUUIDModel):
         blank=True,
         on_delete=models.CASCADE
     )
+    # Career entries are HARD deleted (structured profile data, not content), so
+    # the FK is what keeps a removed entry from leaving orphan notifications
+    # deep-linking to a dead id.
+    career_entry = models.ForeignKey(
+        "careers.CareerEntry",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE
+    )
+
     data = models.JSONField(default=dict, blank=True)
 
     # STATE
