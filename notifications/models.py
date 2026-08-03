@@ -20,6 +20,9 @@ class Notification(BaseUUIDModel):
         CAREER_VERIFIED = "career_verified", "Career Verified"
         CAREER_REJECTED = "career_rejected", "Career Rejected"
         CAREER_ADD_PROMPT = "career_add_prompt", "Career Add Prompt"
+        ACHIEVEMENT_VERIFICATION_REQUEST = "achievement_verification_request", "Achievement Verification Request"
+        ACHIEVEMENT_VERIFIED = "achievement_verified", "Achievement Verified"
+        ACHIEVEMENT_REJECTED = "achievement_rejected", "Achievement Rejected"
         # future:
         # TRIAL = "trial"
         
@@ -59,7 +62,10 @@ class Notification(BaseUUIDModel):
     )
 
     # TYPE
-    type = models.CharField(max_length=30, choices=Type.choices)
+    #
+    # 40, not 30: "achievement_verification_request" is 32 and no longer fits
+    # the width "recruitment_application_status" (30) used to set.
+    type = models.CharField(max_length=40, choices=Type.choices)
 
     # TARGET OBJECTS
     post = models.ForeignKey(
@@ -87,6 +93,15 @@ class Notification(BaseUUIDModel):
     # deep-linking to a dead id.
     career_entry = models.ForeignKey(
         "careers.CareerEntry",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE
+    )
+    # Same story for achievements: hard deleted structured profile data, so the
+    # CASCADE is what stops a removed award leaving orphan notifications deep-
+    # linking to a dead id.
+    achievement = models.ForeignKey(
+        "achievements.Achievement",
         null=True,
         blank=True,
         on_delete=models.CASCADE

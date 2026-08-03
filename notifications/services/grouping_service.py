@@ -1,6 +1,7 @@
 from collections import defaultdict
 from posts.serializers.posts_serializers import PostMiniSerializer
 from notifications.services.notification_service import (
+    ACHIEVEMENT_DECISION_COPY,
     CAREER_DECISION_COPY,
     MESSAGE_SHARE_NOUN,
     RECRUITMENT_STATUS_COPY,
@@ -237,9 +238,24 @@ class NotificationGroupingService:
                 )
             return f"{', '.join(names)} listed you on their career"
 
+        if notification_type == "achievement_verification_request":
+            # Same shape as the career request — grouped per org, so
+            # others_count is how many MORE people are waiting on this issuer.
+            if others_count > 0:
+                return (
+                    f"{', '.join(names)} and {others_count} others "
+                    f"credited you with an achievement"
+                )
+            return f"{', '.join(names)} credited you with an achievement"
+
         if notification_type in CAREER_DECISION_COPY:
             org = names[0] if names else "The organization"
             copy = CAREER_DECISION_COPY[notification_type]
+            return f"{org} {copy['verb']}"
+
+        if notification_type in ACHIEVEMENT_DECISION_COPY:
+            org = names[0] if names else "The organization"
+            copy = ACHIEVEMENT_DECISION_COPY[notification_type]
             return f"{org} {copy['verb']}"
 
         return "You have a new notification"
