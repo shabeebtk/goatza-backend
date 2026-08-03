@@ -25,6 +25,10 @@ class GetUploadConfigAPIView(BaseAPIView):
         # Chat media — works for both user and org actors (no actor-type guard
         # below), scoped server-side to chat/<actor path>.
         "chat",
+        # Achievement proof/showcase image. User-only (guarded below) and scoped
+        # to users/<id>/achievements — an achievement belongs to a person, so an
+        # org actor has nothing to upload here.
+        "achievements",
     }
 
     def get(self, request):
@@ -88,7 +92,7 @@ class GetUploadConfigAPIView(BaseAPIView):
             # -----------------------------------
             # Prevent wrong actor usage
             # -----------------------------------
-            if upload_type in {"profile", "cover"} and not actor.is_user:
+            if upload_type in {"profile", "cover", "achievements"} and not actor.is_user:
                 msg = "Switch to your personal account for this upload"
                 return response_data(
                     success=False,

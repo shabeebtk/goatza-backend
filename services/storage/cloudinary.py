@@ -165,6 +165,32 @@ class CloudinaryService:
             }
 
         # -----------------------------------------
+        # ACHIEVEMENT PROOF / SHOWCASE IMAGE
+        # -----------------------------------------
+        # One image per award, so a random public_id and overwrite="false" —
+        # unlike profile/cover, which each own a single fixed slot per user and
+        # are meant to replace themselves. A user can hold 20 achievements and
+        # replacing one image must never clobber another's.
+        elif upload_type == "achievements":
+            user = actor.user
+
+            for _ in range(count):
+                uploads.append(
+                    self._build_signed_upload(
+                        upload_url=upload_url,
+                        timestamp=timestamp,
+                        folder=f"users/{user.id}/achievements",
+                        public_id=str(uuid.uuid4()),
+                        overwrite="false"
+                    )
+                )
+
+            return {
+                "provider": "cloudinary",
+                "uploads": uploads
+            }
+
+        # -----------------------------------------
         # ORGANIZATION LOGO
         # -----------------------------------------
         elif upload_type == "organization_logo":

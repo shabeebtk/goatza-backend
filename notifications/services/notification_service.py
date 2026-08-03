@@ -47,6 +47,23 @@ CAREER_DECISION_COPY = {
     },
 }
 
+# Copy for an org's decision on an achievement, keyed by notification type.
+# Same shape and tone as CAREER_DECISION_COPY — a separate map rather than more
+# keys in that one, so neither domain's copy can be changed by accident while
+# editing the other. Rejected copy stays gentle for the same reason: the award is
+# not deleted, it just goes back to being the owner's own claim.
+# Shared with grouping_service so in-app + push text can't drift.
+ACHIEVEMENT_DECISION_COPY = {
+    "achievement_verified": {
+        "verb": "verified your achievement ✅",
+        "body": "is now verified on your profile",
+    },
+    "achievement_rejected": {
+        "verb": "could not verify your achievement",
+        "body": "is still shown as self-reported",
+    },
+}
+
 def _resolve_actor_display(notification: "Notification"):
     """
     Return (name, username, avatar) for whichever actor
@@ -179,6 +196,20 @@ def build_notification_payload(notification: "Notification") -> dict:
             f"/career-verifications"
         )
 
+    elif notification.type == Notification.Type.ACHIEVEMENT_VERIFICATION_REQUEST:
+        achievement_title = notification.data.get(
+            "achievement_title", "an achievement"
+        )
+        title = f"{actor_name} credited you with an achievement"
+        body = f"{achievement_title} — tap to verify or reject"
+        # The review screen is one page with a domain tab, not two routes —
+        # /achievement-verifications does not exist and a push landing there
+        # would 404. The service worker navigates to this URL verbatim.
+        url = (
+            f"/organization/admin/{notification.recipient_org_id}"
+            f"/verifications?tab=achievements"
+        )
+
     elif notification.type == Notification.Type.CAREER_ADD_PROMPT:
         recruitment_title = getattr(
             notification.recruitment, "title", "a recruitment"
@@ -208,6 +239,26 @@ def build_notification_payload(notification: "Notification") -> dict:
         url = (
             f"/profile/{notification.data.get('owner_username', '')}"
             f"?tab=career"
+        )
+
+    elif notification.type in (
+        Notification.Type.ACHIEVEMENT_VERIFIED,
+        Notification.Type.ACHIEVEMENT_REJECTED,
+    ):
+        achievement_title = notification.data.get(
+            "achievement_title", "Your achievement"
+        )
+        copy = ACHIEVEMENT_DECISION_COPY[notification.type]
+        # The org's own words when they gave a reason, the stock line otherwise.
+        reason = notification.data.get("reason", "")
+        title = f"{actor_name} {copy['verb']}"
+        body = reason or f"{achievement_title} {copy['body']}"
+        # A fragment, not `?tab=`: the profile page has no tab router, it has an
+        # `id="achievements"` section, and the fragment is what actually scrolls
+        # the owner to the award that changed.
+        url = (
+            f"/profile/{notification.data.get('owner_username', '')}"
+            f"#achievements"
         )
 
     return {
@@ -618,6 +669,102 @@ class NotificationService:
             },
             **NotificationService._actor_kwargs(actor_user=actor_user),
             **NotificationService._recipient_kwargs(recipient_org=recipient_org),
+        )
+        _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # ACHIEVEMENT VERIFICATION (player → org)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def achievement_verification_request(actor_user, achievement):
+        """
+        Tell an organization that someone has credited them with issuing an
+        award and is waiting for a decision.
+
+        Fired every time an achievement *enters* pending for this org — first
+        claim, a material edit that invalidated an existing verification, or a
+        re-link onto a different org. One that was already pending and stays
+        pending does not re-notify: nothing changed for the reviewer.
+
+        Grouped per org, exactly like the career request, so a federation that
+        hands out fifty medals at one tournament sees one "A, B and 48 others
+        credited you with an achievement" entry rather than fifty. Not
+        deduplicated — a re-request after an edit is a genuinely new decision to
+        make.
+
+        Recipients are the org's OWNER/ADMIN members (``_get_recipient_users``)
+        — exactly the roles allowed to act on the request.
+        """
+        recipient_org = achievement.awarded_by
+
+        if recipient_org is None:
+            return
+
+        notification = Notification.objects.create(
+            type=Notification.Type.ACHIEVEMENT_VERIFICATION_REQUEST,
+            group_key=f"achievement_verification:org:{recipient_org.id}",
+            achievement=achievement,
+            data={
+                "achievement_id": str(achievement.id),
+                "achievement_title": achievement.title,
+                "organization_name": achievement.awarded_by_name,
+            },
+            **NotificationService._actor_kwargs(actor_user=actor_user),
+            **NotificationService._recipient_kwargs(recipient_org=recipient_org),
+        )
+        _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # ACHIEVEMENT DECISION (org → owner)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def achievement_verified(actor_org, achievement):
+        """Tell the owner their award was confirmed by the issuing org."""
+        NotificationService._achievement_decision(
+            Notification.Type.ACHIEVEMENT_VERIFIED,
+            actor_org,
+            achievement,
+        )
+
+    @staticmethod
+    def achievement_rejected(actor_org, achievement, reason=""):
+        """
+        Tell the owner the org would not confirm their award.
+
+        ``reason`` is the org's own short note. It is carried on the
+        notification only — the achievement itself keeps no rejection text — so
+        this payload is the single place that copy exists.
+        """
+        NotificationService._achievement_decision(
+            Notification.Type.ACHIEVEMENT_REJECTED,
+            actor_org,
+            achievement,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _achievement_decision(notification_type, actor_org, achievement, reason=""):
+        """
+        Shared write for both decisions. One notification per decision (no
+        dedup) and no group_key, so an org that verifies then later rejects
+        leaves both rows in the owner's list rather than collapsing them.
+        """
+        owner = achievement.user
+
+        notification = Notification.objects.create(
+            type=notification_type,
+            achievement=achievement,
+            data={
+                "achievement_id": str(achievement.id),
+                "achievement_title": achievement.title,
+                "organization_name": achievement.awarded_by_name,
+                # The deep link is to the *recipient's* profile, not the
+                # actor's — the org decided, but the award lives on the owner.
+                "owner_username": owner.username or "",
+                "reason": (reason or "").strip(),
+            },
+            **NotificationService._actor_kwargs(actor_org=actor_org),
+            **NotificationService._recipient_kwargs(recipient_user=owner),
         )
         _dispatch(notification)
 
