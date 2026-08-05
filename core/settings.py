@@ -175,8 +175,8 @@ REST_FRAMEWORK = {
 
 SIMPLE_JWT = {
     # Token lifetime
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
 
     # Rotation
     'ROTATE_REFRESH_TOKENS': True,
@@ -212,7 +212,6 @@ SIMPLE_JWT = {
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "https://goatza-backend.onrender.com",
-    "http://goatza-backend.onrender.com",
     "https://goatza.com",
 ]
 
@@ -223,7 +222,6 @@ CSRF_TRUSTED_ORIGINS = [
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://goatza-backend.onrender.com",
-    "http://goatza-backend.onrender.com",
     "https://goatza.com",
 ]
 
@@ -306,7 +304,7 @@ FIREBASE_CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL")
 FIREBASE_CLIENT_ID = os.getenv("FIREBASE_CLIENT_ID")
 
 
-# --------- REDIS CHANNEL -------- 
+# --------- REDIS CHANNEL --------
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
@@ -315,3 +313,23 @@ CHANNEL_LAYERS = {
         },
     },
 }
+
+
+# ------ CACHE (auth refresh grace window + general) ------/
+_REDIS_URL = os.getenv("REDIS_URL")
+if _REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": _REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
+# ------ CACHE END ------/
+
+AUTH_COOKIE_DOMAIN = os.getenv("AUTH_COOKIE_DOMAIN")  # None = host-only
