@@ -1,14 +1,16 @@
 import random
 import string
 import logging
-from django.contrib.auth import authenticate
+import jwt as pyjwt
+from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.hashers import make_password
+from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from rest_framework.views import APIView
 from accounts.models import (
     User, UserProfile
 )
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from accounts.serializers.user_serializers import UserSerializer
 from accounts.services.user_services import generate_unique_username
@@ -19,9 +21,12 @@ from utils.emails import send_email, send_email_async
 from accounts.throttles import (
     SignupThrottle, LoginThrottle, OTPThrottle, ForgotPasswordThrottle
 )
-from utils.cookies import set_refresh_key_cookie
+from utils.cookies import set_refresh_key_cookie, delete_refresh_key_cookie
 
 logger = logging.getLogger(__name__)
+
+GRACE_TTL_SECONDS = 60
+GRACE_CACHE_KEY = "auth:refresh-grace:{jti}"
 
 
 # Views here 
@@ -300,68 +305,119 @@ class ResetPasswordAPIView(APIView):
 
 class TokenRefreshAPIView(APIView):
     """
-    API view to refresh JWT access token using a valid refresh token.
+    Rotating refresh:
+      - verifies the refresh cookie (signature, expiry, blacklist)
+      - blacklists the old token, issues a NEW 30-day refresh token
+        (sliding session) + a new 15-min access token
+      - stores {old_jti -> new pair} in cache for 60s so an immediate replay
+        of the just-rotated token (multi-tab race, lost Set-Cookie on mobile)
+        gets the SAME new pair back instead of a logout.
+    Error contract (frontend depends on it):
+      401 {"code": "refresh_missing"} - no cookie
+      401 {"code": "refresh_invalid"} - definitively dead session
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        refresh_token = request.COOKIES.get("refresh_token")
-
-        if not refresh_token:
+        raw = request.COOKIES.get("refresh_token")
+        if not raw:
             return response_data(
                 success=False,
                 message="Refresh token not found",
-                status_code=400
+                data={"code": "refresh_missing"},
+                status_code=401,
             )
 
         try:
-            # Attempt to create a new access token from the refresh token
-            refresh = RefreshToken(refresh_token)
-            access_token = str(refresh.access_token)
-
-            return response_data(
-                success=True,
-                message="Access token refreshed successfully",
-                data={"access_token": access_token},
-                status_code=200
-            )
-
-        except TokenError as e:
+            refresh = RefreshToken(raw)  # verifies signature, expiry, blacklist
+        except TokenError:
+            replay = self._grace_replay(raw)
+            if replay is not None:
+                return replay
             return response_data(
                 success=False,
                 message="Invalid or expired refresh token",
-                error=str(e),
-                status_code=401
-            )
-            
-            
-
-class UserLogoutAPIView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        try:
-            refresh_token = request.COOKIES.get("refresh_token")
-            token = RefreshToken(refresh_token)
-            token.blacklist()
-            response =  response_data(
-                success=True,
-                message="Logout successful",
-                status_code=200
+                data={"code": "refresh_invalid"},
+                status_code=401,
             )
 
-            # DELETE COOKIE
-            response.delete_cookie(
-                key="refresh_token",
-                path="/",
-                samesite="Lax",
-            )
-            return response
-        
-        except Exception as e:
+        User = get_user_model()
+        user = User.objects.filter(id=refresh["user_id"], is_active=True).first()
+        if user is None:
             return response_data(
                 success=False,
-                message=f"no token found {str(e)}",
-                status_code=400
+                message="Invalid or expired refresh token",
+                data={"code": "refresh_invalid"},
+                status_code=401,
             )
-        
+
+        old_jti = refresh["jti"]
+
+        # Rotate: retire the presented token, mint a fresh 30-day one.
+        refresh.blacklist()
+        new_refresh = RefreshToken.for_user(user)
+        access_token = str(new_refresh.access_token)
+
+        # Grace window: allow an immediate replay of the old token to succeed
+        # idempotently. Slightly relaxes strict reuse-detection for 60s —
+        # an accepted trade-off for reliability on flaky mobile networks.
+        cache.set(
+            GRACE_CACHE_KEY.format(jti=old_jti),
+            {"access": access_token, "refresh": str(new_refresh)},
+            timeout=GRACE_TTL_SECONDS,
+        )
+
+        response = response_data(
+            success=True,
+            message="Access token refreshed successfully",
+            data={"access_token": access_token},
+            status_code=200,
+        )
+        set_refresh_key_cookie(response, new_refresh)  # restart 30-day clock
+        return response
+
+    def _grace_replay(self, raw):
+        jti = self._unverified_jti(raw)
+        if not jti:
+            return None
+        cached = cache.get(GRACE_CACHE_KEY.format(jti=jti))
+        if not cached:
+            return None
+        response = response_data(
+            success=True,
+            message="Access token refreshed successfully",
+            data={"access_token": cached["access"]},
+            status_code=200,
+        )
+        set_refresh_key_cookie(response, cached["refresh"])  # re-send same new cookie
+        return response
+
+    @staticmethod
+    def _unverified_jti(raw):
+        # Signature already failed/blacklisted upstream; we only need jti to
+        # look up the grace entry. Never trust any other claim from this.
+        try:
+            return pyjwt.decode(raw, options={"verify_signature": False}).get("jti")
+        except Exception:
+            return None
+
+
+class UserLogoutAPIView(APIView):
+    permission_classes = [AllowAny]  # was IsAuthenticated — logout must work
+                                     # even when the access token is expired
+
+    def post(self, request):
+        raw = request.COOKIES.get("refresh_token")
+        if raw:
+            try:
+                RefreshToken(raw).blacklist()
+            except TokenError:
+                pass  # already expired/blacklisted — nothing to do
+
+        response = response_data(
+            success=True,
+            message="Logout successful",
+            status_code=200,
+        )
+        delete_refresh_key_cookie(response)
+        return response
