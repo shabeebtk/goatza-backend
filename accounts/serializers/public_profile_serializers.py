@@ -75,6 +75,67 @@ class PublicPositionSerializer(serializers.Serializer):
     is_primary = serializers.BooleanField()
 
 
+# The attribute types that may appear on the public payload. Narrower than
+# SportAttribute.DataType on purpose, and the reason is presentation rather
+# than privacy: these values are rendered into a fixed-width slot on the
+# generated share card. `text` is arbitrarily long free text and `multi_select`
+# is comma soup — both destroy a layout sized for two words. A card is also the
+# most-copied artifact we produce, so the narrow set is the safe default.
+PUBLIC_ATTRIBUTE_DATA_TYPES = {"select", "boolean", "number"}
+
+
+def public_sport_attributes(user, sport_id):
+    """
+    The player's own values for one sport's attributes, as
+    ``[{"name", "data_type", "value"}]`` ordered by the attribute's
+    ``display_order``.
+
+    Sport-agnostic by construction: "Preferred foot" appears for a footballer
+    and "Batting style" for a cricketer with no code here knowing either exists.
+
+    Reads off the prefetched ``user.attributes`` list rather than filtering in
+    SQL, so a profile bundle stays at a constant query count however many sports
+    the player has logged.
+    """
+    rows = []
+
+    for value in user.attributes.all():
+        if value.sport_id != sport_id:
+            continue
+
+        attribute = value.attribute
+        if attribute.data_type not in PUBLIC_ATTRIBUTE_DATA_TYPES:
+            continue
+
+        # `option` for a select, `value_text` for a number or boolean. A row
+        # with neither cannot exist (there is a check constraint), but an empty
+        # string can, and an empty slot is worse than a missing one.
+        raw = value.option.value if value.option else value.value_text
+        if not raw or not str(raw).strip():
+            continue
+
+        rows.append((
+            attribute.display_order,
+            attribute.name,
+            {
+                "name": attribute.name,
+                "data_type": attribute.data_type,
+                "value": str(raw).strip(),
+            },
+        ))
+
+    # display_order is not unique within a sport, so name breaks the tie and the
+    # order is stable — the card's default slot picks the first of these, and it
+    # must not change between two renders of an unchanged profile.
+    rows.sort(key=lambda row: (row[0], row[1]))
+    return [row[2] for row in rows]
+
+
+# The exact key set one attribute row may carry — same allow-list discipline as
+# the profile itself, one level down.
+PUBLIC_SPORT_ATTRIBUTE_KEYS = {"name", "data_type", "value"}
+
+
 class PublicUserProfileSerializer(serializers.Serializer):
     """
     The header block of a public profile.
@@ -85,13 +146,15 @@ class PublicUserProfileSerializer(serializers.Serializer):
     can never widen the public payload by accident.
 
     Expects ``user.profile`` to be joined and ``sports__sport`` /
-    ``positions__position`` / ``positions__sport`` prefetched.
+    ``positions__position`` / ``positions__sport`` /
+    ``attributes__attribute`` / ``attributes__option`` prefetched.
     """
 
     id = serializers.UUIDField()
     username = serializers.CharField()
     role = serializers.CharField()
     created_at = serializers.DateTimeField()
+    updated_at = serializers.SerializerMethodField()
 
     name = serializers.SerializerMethodField()
     headline = serializers.SerializerMethodField()
@@ -116,6 +179,33 @@ class PublicUserProfileSerializer(serializers.Serializer):
 
     def _profile(self, obj):
         return getattr(obj, "profile", None)
+
+    def get_updated_at(self, obj):
+        """
+        Cache-buster for the generated share card, which is cached for an hour
+        at the CDN and must not survive a profile edit.
+
+        The later of the two timestamps, because the card draws from both
+        models: name, photos, height, weight and city live on ``UserProfile``,
+        the username lives on ``User``, and a rename has to produce a fresh
+        card just as a new photo does.
+
+        Not sensitive on its own — any visible content change already implies
+        it, and the payload carries the changed content anyway.
+
+        Rendered through DateTimeField rather than returned raw, so it is the
+        same ISO string ``created_at`` above produces: a method field hands back
+        whatever Python object it is given, and a bare datetime would both read
+        differently to the client and land in the bundle cache as a non-JSON
+        value.
+        """
+        profile = self._profile(obj)
+        stamp = obj.updated_at
+
+        if profile is not None and profile.updated_at is not None:
+            stamp = max(stamp, profile.updated_at)
+
+        return serializers.DateTimeField().to_representation(stamp)
 
     def get_name(self, obj):
         profile = self._profile(obj)
@@ -188,9 +278,15 @@ class PublicUserProfileSerializer(serializers.Serializer):
 
     def get_primary_sport(self, obj):
         """
-        The one sport + position the header badges print. Read off the
-        prefetched lists rather than re-filtering in SQL, so the bundle stays at
-        a constant query count.
+        The one sport + position the header badges print, plus the player's
+        values for that sport's own attributes. Read off the prefetched lists
+        rather than re-filtering in SQL, so the bundle stays at a constant query
+        count.
+
+        ``attributes`` hangs off primary_sport rather than off the profile
+        because that is what it is — attributes OF this sport. A player with two
+        sports gets only their primary one's here, which is also all the share
+        card can show.
         """
         primary = next(
             (s for s in obj.sports.all() if s.is_primary),
@@ -213,6 +309,7 @@ class PublicUserProfileSerializer(serializers.Serializer):
             "icon_url": primary.sport.icon_url,
             "experience_level": primary.experience_level,
             "primary_position": position.position.name if position else None,
+            "attributes": public_sport_attributes(obj, primary.sport_id),
         }
 
 
@@ -224,6 +321,7 @@ PUBLIC_USER_PROFILE_KEYS = {
     "username",
     "role",
     "created_at",
+    "updated_at",
     "name",
     "headline",
     "about",

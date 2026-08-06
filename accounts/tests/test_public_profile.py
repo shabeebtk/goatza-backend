@@ -16,6 +16,7 @@ from rest_framework.test import APITestCase
 
 from accounts.models import User, UserProfile
 from accounts.serializers.public_profile_serializers import (
+    PUBLIC_SPORT_ATTRIBUTE_KEYS,
     PUBLIC_USER_PROFILE_KEYS,
     age_group_badge,
 )
@@ -34,7 +35,13 @@ from organization.serializers.public_profile_serializers import (
 )
 from posts.models import Post
 from recruitments.models import Recruitment
-from sports.models import Sport
+from sports.models import (
+    Sport,
+    SportAttribute,
+    SportAttributeOption,
+    UserAttributeValue,
+    UserSport,
+)
 
 PROFILE_URL = "/public/profile/{}"
 PROFILE_POSTS_URL = "/public/profile/{}/posts"
@@ -141,6 +148,25 @@ class PublicPayloadAllowListTests(PublicProfileTestCase):
         self.assertEqual(profile["age_group"], "U17")
         self.assertNotIn("birthdate", profile)
 
+    def test_updated_at_tracks_the_later_of_user_and_profile(self):
+        """
+        The share card's cache-buster. It is cached for an hour at the CDN, so
+        it has to move when EITHER model changes — a rename lives on User, a new
+        photo lives on UserProfile, and both change the card.
+        """
+        response = self.client.get(PROFILE_URL.format("riya"))
+        profile = response.data["data"]["profile"]
+
+        self.assertIn("updated_at", profile)
+        first = profile["updated_at"]
+
+        cache.clear()
+        self.player.profile.headline = "Now with a different headline"
+        self.player.profile.save(update_fields=["headline", "updated_at"])
+
+        response = self.client.get(PROFILE_URL.format("riya"))
+        self.assertGreater(response.data["data"]["profile"]["updated_at"], first)
+
     def test_weight_is_a_float_not_a_decimal(self):
         """
         The same preview dicts are msgpack'd onto the channel layer, which can
@@ -158,6 +184,138 @@ class PublicPayloadAllowListTests(PublicProfileTestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         profile = response.data["data"]["profile"]
         self.assertEqual(set(profile.keys()), PUBLIC_ORG_PROFILE_KEYS)
+
+
+class PublicSportAttributeTests(PublicProfileTestCase):
+    """
+    The sport-agnostic half of the payload: a player's values for their PRIMARY
+    sport's attributes, which is what lets the share card print "Preferred foot"
+    for a footballer and "Batting style" for a cricketer with no code change.
+
+    The filtering rules are the point of these tests — a `text` attribute is
+    arbitrarily long and a `multi_select` is comma soup, and both would wreck a
+    card slot sized for two words.
+    """
+
+    def setUp(self):
+        super().setUp()
+
+        UserSport.objects.create(
+            user=self.player, sport=self.sport, is_primary=True,
+            experience_level=UserSport.ExperienceLevel.ADVANCED,
+        )
+
+        self.foot = SportAttribute.objects.create(
+            sport=self.sport, name="Preferred foot",
+            data_type=SportAttribute.DataType.SELECT, display_order=1,
+        )
+        right = SportAttributeOption.objects.create(
+            attribute=self.foot, value="Right",
+        )
+        UserAttributeValue.objects.create(
+            user=self.player, sport=self.sport,
+            attribute=self.foot, option=right,
+        )
+        cache.clear()
+
+    def _attributes(self, username="riya"):
+        response = self.client.get(PROFILE_URL.format(username))
+        return response.data["data"]["profile"]["primary_sport"]["attributes"]
+
+    def test_a_select_attribute_appears_with_its_option_value(self):
+        attributes = self._attributes()
+
+        self.assertEqual(len(attributes), 1)
+        self.assertEqual(attributes[0]["name"], "Preferred foot")
+        self.assertEqual(attributes[0]["value"], "Right")
+        self.assertEqual(attributes[0]["data_type"], "select")
+
+    def test_attribute_rows_carry_only_the_allow_listed_keys(self):
+        for row in self._attributes():
+            self.assertEqual(set(row.keys()), PUBLIC_SPORT_ATTRIBUTE_KEYS)
+
+    def test_text_and_multi_select_never_appear(self):
+        for name, data_type in (
+            ("Playing notes", SportAttribute.DataType.TEXT),
+            ("Other positions", SportAttribute.DataType.MULTI_SELECT),
+        ):
+            attribute = SportAttribute.objects.create(
+                sport=self.sport, name=name, data_type=data_type,
+                display_order=5,
+            )
+            UserAttributeValue.objects.create(
+                user=self.player, sport=self.sport,
+                attribute=attribute, value_text="something long",
+            )
+
+        cache.clear()
+        names = [row["name"] for row in self._attributes()]
+
+        self.assertEqual(names, ["Preferred foot"])
+
+    def test_an_empty_value_is_dropped_rather_than_rendered_blank(self):
+        blank = SportAttribute.objects.create(
+            sport=self.sport, name="Jersey number",
+            data_type=SportAttribute.DataType.NUMBER, display_order=2,
+        )
+        UserAttributeValue.objects.create(
+            user=self.player, sport=self.sport,
+            attribute=blank, value_text="   ",
+        )
+
+        cache.clear()
+        names = [row["name"] for row in self._attributes()]
+
+        self.assertEqual(names, ["Preferred foot"])
+
+    def test_another_sports_attributes_are_excluded(self):
+        """
+        Only the primary sport's. A player who also logs cricket must not get a
+        batting style printed on a football card.
+        """
+        cricket = Sport.objects.create(name="Cricket", icon_name="mdi:cricket")
+        UserSport.objects.create(user=self.player, sport=cricket)
+
+        style = SportAttribute.objects.create(
+            sport=cricket, name="Batting style",
+            data_type=SportAttribute.DataType.SELECT, display_order=1,
+        )
+        left = SportAttributeOption.objects.create(
+            attribute=style, value="Left-hand",
+        )
+        UserAttributeValue.objects.create(
+            user=self.player, sport=cricket, attribute=style, option=left,
+        )
+
+        cache.clear()
+        names = [row["name"] for row in self._attributes()]
+
+        self.assertEqual(names, ["Preferred foot"])
+
+    def test_rows_follow_display_order(self):
+        second = SportAttribute.objects.create(
+            sport=self.sport, name="Jersey number",
+            data_type=SportAttribute.DataType.NUMBER, display_order=0,
+        )
+        UserAttributeValue.objects.create(
+            user=self.player, sport=self.sport,
+            attribute=second, value_text="10",
+        )
+
+        cache.clear()
+        names = [row["name"] for row in self._attributes()]
+
+        self.assertEqual(names, ["Jersey number", "Preferred foot"])
+
+    def test_a_player_with_no_primary_sport_has_no_primary_sport_block(self):
+        """A brand-new signup. The card falls back to its fixed slots."""
+        self._user("nosport", "No Sport")
+        cache.clear()
+
+        response = self.client.get(PROFILE_URL.format("nosport"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["data"]["profile"]["primary_sport"])
 
 
 class AgeGroupBadgeTests(APITestCase):
