@@ -5,22 +5,91 @@ from rest_framework import status
 from rest_framework.exceptions import ValidationError
 
 from core.views.base_views import BaseAPIView
+from core.actor import Actor
 from accounts.models import User
 from posts.models import Post, PostMedia, Like, Comment
 from sports.models import Sport
 from utils.response import response_data
 from connections.models import Follow
-from core.constant import TYPE_USER
-from posts.serializers.posts_serializers import PostListSerializer
+from core.constant import TYPE_USER, TYPE_ORGANIZATION
+from notifications.services.notification_service import NotificationService
+from posts.serializers.posts_serializers import (
+    PostListSerializer, POST_MENTIONS_PREFETCH,
+)
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS
 from services.storage.factory import get_storage_service
 from services.location.location_service import LocationService
 from posts.services.post_service import PostService
+from posts.services.post_content_service import sync_post_content
+from posts.services.saved_post_service import annotate_is_saved
 from organization.services.user_organization_services import UserOrganizationService
 from connections.services.follow_services import FollowService
 
 
 logger = logging.getLogger(__name__)
+
+
+def notify_new_mentions(post, actor, added_mentions):
+    """
+    Fire MENTION notifications for the targets a content sync just added.
+
+    Mention ROWS are created regardless of who can see the post — only the
+    NOTIFICATION is gated. A FOLLOWERS-only post notifies a mentioned actor
+    only when that actor follows the author, otherwise the push would advertise
+    a post they cannot open.
+
+    Runs after commit, so a notification or FCM failure can never fail or roll
+    back the post itself (same pattern as ApplicationService.apply).
+    """
+    if not added_mentions:
+        return
+
+    actor_user = actor.user if actor.is_user else None
+    actor_org = actor.organization if actor.is_org else None
+
+    author_id = post.author_user_id or post.author_org_id
+    author_type = TYPE_USER if post.author_user_id else TYPE_ORGANIZATION
+
+    def _can_notify(kind, target) -> bool:
+        if post.visibility == Post.Visibility.PUBLIC:
+            return True
+
+        # MENTION_VISIBILITY: anything that is neither PUBLIC nor FOLLOWERS is
+        # treated as not-notifiable. A future, more private mode has to opt in
+        # here deliberately rather than inherit "notify" by falling through.
+        if post.visibility != Post.Visibility.FOLLOWERS:
+            return False
+
+        # FollowService.get_relationship covers all four user/org edges, so no
+        # actor-pair combination has to be excluded. `is_following` is read
+        # from the MENTIONED actor's side: do they follow the author?
+        viewer = Actor(
+            actor_type="user" if kind == "user" else "organization",
+            user=target if kind == "user" else None,
+            organization=target if kind == "org" else None,
+        )
+        relationship = FollowService.get_relationship(viewer, author_id, author_type)
+        return relationship["is_following"]
+
+    def _notify():
+        for kind, target in added_mentions:
+            try:
+                if not _can_notify(kind, target):
+                    continue
+                NotificationService.mention(
+                    actor_user=actor_user,
+                    actor_org=actor_org,
+                    post=post,
+                    mentioned_user=target if kind == "user" else None,
+                    mentioned_org=target if kind == "org" else None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "notify_new_mentions | notification failed | "
+                    f"post_id={post.id} | target={kind}:{target.id} | {exc}"
+                )
+
+    transaction.on_commit(_notify)
 
 
 class CreatePostAPIView(BaseAPIView):
@@ -262,6 +331,11 @@ class CreatePostAPIView(BaseAPIView):
                 if media_objs:
                     PostMedia.objects.bulk_create(media_objs)
 
+                # Hashtag + mention rows are derived from the body — inside the
+                # same transaction, so a post is never visible without them.
+                added_mentions = sync_post_content(post)
+                notify_new_mentions(post, actor, added_mentions)
+
             # Safe actor logging
             actor_id = actor.user.id if actor.is_user else actor.organization.id
 
@@ -333,7 +407,8 @@ class UpdatePostAPIView(BaseAPIView):
                 # -------------------------
                 # CONTENT
                 # -------------------------
-                if "content" in data:
+                content_changed = "content" in data
+                if content_changed:
                     content = (data.get("content") or "").strip()
                     if not content and not post.media.exists():
                         return response_data(False, message="Post cannot be empty", status_code=400)
@@ -395,13 +470,21 @@ class UpdatePostAPIView(BaseAPIView):
 
                 post.save()
 
+                # Only the body carries hashtags and mentions, so an edit that
+                # changes just the sport/visibility/location leaves the rows
+                # alone. Only NEWLY added mentions are notified — re-saving the
+                # same text tells nobody twice.
+                if content_changed:
+                    added_mentions = sync_post_content(post)
+                    notify_new_mentions(post, actor, added_mentions)
+
             # -------------------------
             # SERIALIZE (with this actor's reaction)
             # -------------------------
             post = (
-                Post.objects
+                annotate_is_saved(Post.objects.all(), actor)
                 .select_related("author_user__profile", "author_org", "sport")
-                .prefetch_related("media")
+                .prefetch_related("media", POST_MENTIONS_PREFETCH)
                 .get(id=post.id)
             )
 
@@ -524,11 +607,11 @@ class ListPostsAPIView(BaseAPIView):
             # -------------------------
             # OPTIMIZATION
             # -------------------------
-            queryset = queryset.select_related(
+            queryset = annotate_is_saved(queryset, actor).select_related(
                 "author_user__profile",
                 "author_org",
                 "sport"
-            ).prefetch_related("media")
+            ).prefetch_related("media", POST_MENTIONS_PREFETCH)
 
             queryset = queryset.order_by("-created_at")[offset: offset + limit]
 

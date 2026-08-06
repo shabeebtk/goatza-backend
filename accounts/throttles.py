@@ -11,3 +11,6 @@ class OTPThrottle(UserRateThrottle):
 
 class ForgotPasswordThrottle(UserRateThrottle):
     scope = 'forgot_password'
+
+class ChangePasswordThrottle(UserRateThrottle):
+    scope = 'change_password'

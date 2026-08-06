@@ -12,6 +12,7 @@ from django.db.models.functions import (
 from django.utils.timezone import now
 
 from accounts.models import User
+from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
 from organization.models import Organization, OrganizationLocation
 from posts.models import Post
 from connections.services.follow_services import FollowService
@@ -480,4 +481,4 @@ class ExploreService:
             "author_user__profile",
             "author_org__profile",
             "sport",
-        ).prefetch_related("media")
+        ).prefetch_related("media", POST_MENTIONS_PREFETCH)

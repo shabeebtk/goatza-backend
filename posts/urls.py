@@ -3,6 +3,8 @@ from posts.views.posts_views import CreatePostAPIView, ListPostsAPIView, DeleteP
 from posts.views.like_views import ToggleLikeAPIView, ListPostLikesAPIView
 from posts.views.comments_views import ListCommentsAPIView, CreateCommentAPIView, ListRepliesAPIView, DeleteCommentAPIView
 from posts.views.search_views import PostSearchAPIView
+from posts.views.mention_views import MyMentionsAPIView, MentionSuggestAPIView
+from posts.views.save_views import ToggleSavePostAPIView, SavedPostsListAPIView
 
 # base endpoint '/posts/
 
@@ -12,6 +14,12 @@ urlpatterns = [
     path('list', ListPostsAPIView.as_view(), name='list-posts'),
     path('search', PostSearchAPIView.as_view(), name='search-posts'),
     path('delete', DeletePost.as_view(), name='delete-posts'),
+
+    path('mentions/my', MyMentionsAPIView.as_view(), name='my-mentions'),
+    path('mention/suggest', MentionSuggestAPIView.as_view(), name='mention-suggest'),
+
+    path('save', ToggleSavePostAPIView.as_view(), name='toggle-save'),
+    path('saved/list', SavedPostsListAPIView.as_view(), name='list-saved-posts'),
 
     path('like', ToggleLikeAPIView.as_view(), name='toggle-like'),
     path('likes/list', ListPostLikesAPIView.as_view(), name='list-likes'),

@@ -13,6 +13,7 @@ class Notification(BaseUUIDModel):
         FOLLOW_BACK = "follow_back", "Follow Back"
         LIKE = "like", "Like"
         COMMENT = "comment", "Comment"
+        MENTION = "mention", "Mention"
         RECRUITMENT_APPLICATION = "recruitment_application", "Recruitment Application"
         RECRUITMENT_APPLICATION_STATUS = "recruitment_application_status", "Recruitment Application Status"
         MESSAGE = "message", "Message"

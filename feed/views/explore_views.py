@@ -6,6 +6,7 @@ from core.views.base_views import BaseAPIView
 from organization.models import Organization
 from sports.models import Sport, SportPosition
 from posts.serializers.posts_serializers import PostListSerializer
+from posts.services.saved_post_service import annotate_is_saved
 from utils.response import response_data
 from utils.validations import is_valid_uuid
 from highlights.selectors.highlight_selectors import (
@@ -316,8 +317,9 @@ class ExploreTrendingPostsAPIView(BaseAPIView):
                     seen_ids = []
 
             # 1. QUERYSET
-            queryset = ExploreService.get_trending_posts_queryset(
-                actor, seen_ids=seen_ids
+            queryset = annotate_is_saved(
+                ExploreService.get_trending_posts_queryset(actor, seen_ids=seen_ids),
+                actor,
             )
 
             # 2. PAGINATION (keyset on final_score|id, page size 15)

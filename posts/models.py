@@ -282,6 +282,10 @@ class PostMention(BaseUUIDModel):
         on_delete=models.CASCADE
     )
 
+    # Orders the "mentioned me" list. Rows are re-derived from the body on every
+    # edit, so this is when the mention APPEARED, not when the post was written.
+    created_at = models.DateTimeField(auto_now_add=True)
+
     class Meta:
         db_table = "post_mentions"
         constraints = [
@@ -291,7 +295,20 @@ class PostMention(BaseUUIDModel):
                     Q(mentioned_user__isnull=True, mentioned_org__isnull=False)
                 ),
                 name="mention_user_or_org"
-            )
+            ),
+            # One row per (post, target). Partial, because NULL never equals
+            # NULL — an unconditional unique on a nullable column would let
+            # duplicates through. This is what makes the content re-sync safe.
+            models.UniqueConstraint(
+                fields=["post", "mentioned_user"],
+                condition=Q(mentioned_user__isnull=False),
+                name="unique_post_mention_user",
+            ),
+            models.UniqueConstraint(
+                fields=["post", "mentioned_org"],
+                condition=Q(mentioned_org__isnull=False),
+                name="unique_post_mention_org",
+            ),
         ]
 
 
@@ -325,8 +342,19 @@ class PostMention(BaseUUIDModel):
 
 
 class SavedPost(BaseUUIDModel):
+    # Dual-actor, same shape as PostMention: a save belongs to the actor who
+    # made it, so a person and an org they run keep separate lists.
     user = models.ForeignKey(
         User,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="saved_posts"
+    )
+    org = models.ForeignKey(
+        Organization,
+        null=True,
+        blank=True,
         on_delete=models.CASCADE,
         related_name="saved_posts"
     )
@@ -340,10 +368,25 @@ class SavedPost(BaseUUIDModel):
     class Meta:
         db_table = "saved_posts"
         constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(user__isnull=False, org__isnull=True) |
+                    Q(user__isnull=True, org__isnull=False)
+                ),
+                name="saved_post_user_or_org",
+            ),
+            # Partial uniques — NULL never equals NULL, so an unconditional
+            # unique on a nullable column would let duplicates through.
             models.UniqueConstraint(
                 fields=["user", "post"],
-                name="unique_saved_post"
-            )
+                condition=Q(user__isnull=False),
+                name="unique_saved_post_user",
+            ),
+            models.UniqueConstraint(
+                fields=["org", "post"],
+                condition=Q(org__isnull=False),
+                name="unique_saved_post_org",
+            ),
         ]
 
 

@@ -136,6 +136,15 @@ def build_notification_payload(notification: "Notification") -> dict:
         body = short_comment or "Tap to view"
         url = f"/post/{notification.post_id}"
 
+    elif notification.type == Notification.Type.MENTION:
+        post_text = getattr(notification.post, "content", "") or ""
+        short_text = post_text[:60] + "..." if len(post_text) > 60 else post_text
+        title = f"{actor_name} mentioned you in a post"
+        body = short_text or "Tap to view"
+        # Same shape the like/comment pushes use, so the service worker's
+        # existing post deep-link handling covers this type with no change.
+        url = f"/post/{notification.post_id}"
+
     elif notification.type == Notification.Type.FOLLOW:
         title = f"{actor_name} started following you"
         body = "Tap to view profile"
@@ -454,6 +463,62 @@ class NotificationService:
                     ),
                 )
                 _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # MENTION
+    # ──────────────────────────────────────────
+    @staticmethod
+    def mention(
+        actor_user=None, actor_org=None, post=None,
+        mentioned_user=None, mentioned_org=None,
+    ):
+        """
+        Notify a user or org that the post's author named them in the body.
+
+        Works for all four actor/target combinations. Callers pass only the
+        NEWLY added mentions (see post_content_service.sync_post_content), so
+        editing a post never re-notifies someone who was already tagged.
+
+        Deduplicated per (post, target): a mention can't repeat within a post —
+        the unique constraints on PostMention guarantee it — so this only ever
+        guards against a retried write, never a legitimate second mention.
+        """
+        if post is None:
+            return
+
+        def _is_self() -> bool:
+            """True when the mention target IS the author actor."""
+            if actor_user and mentioned_user and actor_user.id == mentioned_user.id:
+                return True
+            if actor_org and mentioned_org and actor_org.id == mentioned_org.id:
+                return True
+            return False
+
+        if _is_self():
+            return
+
+        target_key = (
+            f"user:{mentioned_user.id}" if mentioned_user
+            else f"org:{mentioned_org.id}"
+        )
+        dedup_key = f"mention:{post.id}:{target_key}"
+
+        if Notification.objects.filter(dedup_key=dedup_key).exists():
+            return
+
+        notification = Notification.objects.create(
+            type=Notification.Type.MENTION,
+            # One post mentions one target at most once, so this group can
+            # never hold more than a single row for a given recipient — it
+            # exists to keep the grouped list's keying uniform, not to count.
+            group_key=f"mention:post:{post.id}",
+            dedup_key=dedup_key,
+            post=post,
+            data={"post_id": str(post.id)},
+            **NotificationService._actor_kwargs(actor_user, actor_org),
+            **NotificationService._recipient_kwargs(mentioned_user, mentioned_org),
+        )
+        _dispatch(notification)
 
     # ──────────────────────────────────────────
     # MESSAGE SHARE

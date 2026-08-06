@@ -1,6 +1,7 @@
 from django.db.models import Q, Exists, OuterRef
 
 from posts.models import Post, PostHashtag
+from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
 
 
 class PostSearchService:
@@ -19,10 +20,11 @@ class PostSearchService:
 
     @staticmethod
     def search_posts_queryset(q):
-        # Hashtags are stored without the leading "#", but users type "#football".
-        # Strip a single leading "#" for the hashtag branch only; the content
-        # branch matches the raw query as given.
-        hashtag_term = q[1:] if q.startswith("#") else q
+        # Hashtags are stored without the leading "#" and LOWERCASED by
+        # post_content_service.extract_hashtags, but users type "#FootBall".
+        # Strip a single leading "#" and fold the case to match the stored
+        # form; the content branch matches the raw query as given.
+        hashtag_term = (q[1:] if q.startswith("#") else q).lower()
 
         # EXISTS subquery for the hashtag branch: a post with several matching
         # hashtags still yields ONE truthy Exists row, so the post appears once.
@@ -56,4 +58,4 @@ class PostSearchService:
             "author_user__profile",
             "author_org__profile",
             "sport",
-        ).prefetch_related("media")
+        ).prefetch_related("media", POST_MENTIONS_PREFETCH)

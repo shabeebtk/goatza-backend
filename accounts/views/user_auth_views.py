@@ -10,8 +10,11 @@ from rest_framework.views import APIView
 from accounts.models import (
     User, UserProfile
 )
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+from rest_framework_simplejwt.token_blacklist.models import (
+    OutstandingToken, BlacklistedToken,
+)
 from accounts.serializers.user_serializers import UserSerializer
 from accounts.services.user_services import generate_unique_username
 from utils.response import response_data
@@ -19,7 +22,8 @@ from utils.validations import is_valid_email, is_valid_password
 from utils.otp_validation import generate_otp, verify_otp
 from utils.emails import send_email, send_email_async
 from accounts.throttles import (
-    SignupThrottle, LoginThrottle, OTPThrottle, ForgotPasswordThrottle
+    SignupThrottle, LoginThrottle, OTPThrottle, ForgotPasswordThrottle,
+    ChangePasswordThrottle
 )
 from utils.cookies import set_refresh_key_cookie, delete_refresh_key_cookie
 
@@ -301,6 +305,79 @@ class ResetPasswordAPIView(APIView):
         )
 
 
+class ChangePasswordAPIView(APIView):
+    """
+    Change the password of the logged-in user.
+
+    Every other session is killed (all outstanding refresh tokens blacklisted),
+    then THIS device is handed a brand-new session so it stays logged in.
+    Error contract (frontend maps these codes to messages):
+      400 {"code": "missing_fields"}
+      400 {"code": "invalid_current_password"}
+      400 {"code": "invalid_new_password"}
+      400 {"code": "same_password"}
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ChangePasswordThrottle]
+
+    def post(self, request):
+        user = request.user
+        current_password = request.data.get("current_password")
+        new_password = request.data.get("new_password")
+
+        if not current_password or not new_password:
+            return response_data(
+                success=False,
+                message="Current and new password are required",
+                data={"code": "missing_fields"},
+                status_code=400,
+            )
+
+        if not user.check_password(current_password):
+            return response_data(
+                success=False,
+                message="Current password is incorrect",
+                data={"code": "invalid_current_password"},
+                status_code=400,
+            )
+
+        if not is_valid_password(new_password):
+            return response_data(
+                success=False,
+                message="Password must be at least 6 characters",
+                data={"code": "invalid_new_password"},
+                status_code=400,
+            )
+
+        if new_password == current_password:
+            return response_data(
+                success=False,
+                message="New password must be different from the current one",
+                data={"code": "same_password"},
+                status_code=400,
+            )
+
+        user.set_password(new_password)
+        user.save()
+
+        # Kill every existing session (other devices die on their next refresh).
+        # Must happen BEFORE minting the new token, or we'd blacklist it too.
+        for token in OutstandingToken.objects.filter(user=user):
+            BlacklistedToken.objects.get_or_create(token=token)
+
+        # ...then keep THIS device signed in on a fresh session.
+        new_refresh = RefreshToken.for_user(user)
+
+        logger.info(f"Password changed: {user.email}")
+
+        response = response_data(
+            success=True,
+            message="Password changed successfully",
+            data={"access_token": str(new_refresh.access_token)},
+            status_code=200,
+        )
+        set_refresh_key_cookie(response, new_refresh)
+        return response
 
 
 class TokenRefreshAPIView(APIView):

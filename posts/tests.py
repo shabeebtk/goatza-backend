@@ -5,12 +5,16 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import User, UserProfile
+from connections.models import Follow
+from notifications.models import Notification
 from organization.models import (
     Organization,
     OrganizationProfile,
     OrganizationMember,
 )
-from posts.models import Post, PostMedia, Like, Comment, Hashtag, PostHashtag
+from posts.models import (
+    Post, PostMedia, Like, Comment, Hashtag, PostHashtag, PostMention, SavedPost,
+)
 from sports.models import Sport
 
 SEARCH_URL = "/posts/search"
@@ -18,6 +22,10 @@ LIST_URL = "/posts/list"
 CREATE_URL = "/posts/create"
 UPDATE_URL = "/posts/update"
 COMMENT_DELETE_URL = "/posts/comments/delete"
+MY_MENTIONS_URL = "/posts/mentions/my"
+MENTION_SUGGEST_URL = "/posts/mention/suggest"
+SAVE_URL = "/posts/save"
+SAVED_LIST_URL = "/posts/saved/list"
 
 
 class PostSearchTests(APITestCase):
@@ -825,3 +833,675 @@ class CommentDeleteTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         c.refresh_from_db()
         self.assertTrue(c.is_deleted)
+
+
+# =====================================================================
+# Hashtags — parsed out of the body on write, diff-synced on edit
+# =====================================================================
+
+class PostHashtagTests(APITestCase):
+    """
+    Hashtag rows are DERIVED from post.content, never sent by the client.
+    Create and update run the same diff-sync, and the search endpoint reads
+    the lowercased stored form.
+    """
+
+    def setUp(self):
+        self.me = User.objects.create_user(
+            email="me@example.com", password="pass1234", username="me",
+        )
+        UserProfile.objects.create(user=self.me, name="Me")
+        self.client.force_authenticate(user=self.me)
+
+    def _tags(self, post):
+        """Stored tag names for a post, sorted for stable comparison."""
+        return sorted(
+            PostHashtag.objects
+            .filter(post=post)
+            .values_list("hashtag__name", flat=True)
+        )
+
+    def _create(self, content):
+        resp = self.client.post(CREATE_URL, {"content": content}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return Post.objects.get(id=resp.data["data"]["post_id"])
+
+    # ── create ───────────────────────────────────────────────────
+
+    def test_create_extracts_unique_lowercased_tags(self):
+        post = self._create("Big win #Football #football #GOATZA_2026")
+
+        # "#Football" and "#football" are the SAME tag once folded — 2 rows, not 3.
+        self.assertEqual(self._tags(post), ["football", "goatza_2026"])
+        self.assertEqual(PostHashtag.objects.filter(post=post).count(), 2)
+
+    def test_create_without_hashtags_creates_no_rows(self):
+        post = self._create("just a plain caption")
+        self.assertEqual(self._tags(post), [])
+
+    # ── update ───────────────────────────────────────────────────
+
+    def test_edit_content_diffs_the_rows(self):
+        post = self._create("first #football #goatza")
+        self.assertEqual(self._tags(post), ["football", "goatza"])
+
+        resp = self.client.patch(
+            UPDATE_URL,
+            {"post_id": str(post.id), "content": "second #goatza #trials"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        # football dropped, trials added, goatza kept (not deleted+recreated).
+        self.assertEqual(self._tags(post), ["goatza", "trials"])
+
+    def test_edit_that_skips_content_leaves_rows_alone(self):
+        post = self._create("keep me #football")
+        row_ids = set(
+            PostHashtag.objects.filter(post=post).values_list("id", flat=True)
+        )
+
+        resp = self.client.patch(
+            UPDATE_URL,
+            {"post_id": str(post.id), "visibility": "followers"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        self.assertEqual(self._tags(post), ["football"])
+        # Same rows, untouched — the sync never ran.
+        self.assertEqual(
+            set(PostHashtag.objects.filter(post=post).values_list("id", flat=True)),
+            row_ids,
+        )
+
+    # ── search ───────────────────────────────────────────────────
+
+    def test_search_finds_stored_tag_case_insensitively(self):
+        post = self._create("no keyword in the body at all #FootBall")
+
+        resp = self.client.get(SEARCH_URL, {"q": "#FOOTBALL"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        ids = [str(r["id"]) for r in resp.data["data"]["results"]]
+        self.assertIn(str(post.id), ids)
+
+    # ── the parser itself ────────────────────────────────────────
+
+    def test_extract_hashtags_caps_and_truncates(self):
+        from posts.services.post_content_service import (
+            MAX_HASHTAGS_PER_POST,
+            extract_hashtags,
+        )
+
+        # 40 distinct tags → only the first 30 survive, in order.
+        many = " ".join(f"#tag{i}" for i in range(40))
+        tags = extract_hashtags(many)
+        self.assertEqual(len(tags), MAX_HASHTAGS_PER_POST)
+        self.assertEqual(tags[0], "tag0")
+        self.assertEqual(tags[-1], "tag29")
+
+        # A 60-char run yields a 50-char tag — the pattern stops at the cap
+        # rather than rejecting the tag outright.
+        long_tag = extract_hashtags("#" + ("a" * 60))
+        self.assertEqual(long_tag, ["a" * 50])
+
+        # Punctuation ends a tag; a bare "#" is not one.
+        self.assertEqual(extract_hashtags("end of #season."), ["season"])
+        self.assertEqual(extract_hashtags("# ## nothing here"), [])
+
+    # ── backfill command ─────────────────────────────────────────
+
+    def test_backfill_creates_rows_and_is_idempotent(self):
+        from io import StringIO
+        from django.core.management import call_command
+
+        # A post from before the write path existed: content, but no rows.
+        legacy = Post.objects.create(
+            author_user=self.me, content="old glory #football #kerala"
+        )
+        untagged = Post.objects.create(author_user=self.me, content="no tags here")
+        self.assertEqual(self._tags(legacy), [])
+
+        call_command("backfill_post_hashtags", stdout=StringIO())
+        self.assertEqual(self._tags(legacy), ["football", "kerala"])
+        self.assertEqual(self._tags(untagged), [])
+
+        after_first = PostHashtag.objects.count()
+
+        # Re-running must be a no-op, not a duplicate-key crash.
+        call_command("backfill_post_hashtags", stdout=StringIO())
+        self.assertEqual(PostHashtag.objects.count(), after_first)
+        self.assertEqual(self._tags(legacy), ["football", "kerala"])
+
+
+# =====================================================================
+# Mentions — @handles resolved to users OR orgs, notified once, listed
+# =====================================================================
+
+class PostMentionTests(APITestCase):
+    """
+    Mentions are parsed out of the body and resolved against two SEPARATE
+    username tables (users win collisions). Rows are always created; the
+    NOTIFICATION is what visibility gates.
+    """
+
+    def setUp(self):
+        self.me = self._user("me", "Me")
+        self.client.force_authenticate(user=self.me)
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234", username=username,
+        )
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _org(self, username, name, member=None):
+        org = Organization.objects.create(
+            name=name, username=username, type=Organization.Type.CLUB
+        )
+        OrganizationProfile.objects.create(
+            organization=org, logo=f"https://cdn.example.com/{username}.png"
+        )
+        if member is not None:
+            OrganizationMember.objects.create(
+                organization=org, user=member, role=OrganizationMember.Role.OWNER
+            )
+        return org
+
+    def _org_headers(self, org):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(org.id),
+        }
+
+    def _create(self, content, visibility="public", org=None):
+        """Create a post through the API, running on_commit callbacks."""
+        headers = self._org_headers(org) if org is not None else {}
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                CREATE_URL,
+                {"content": content, "visibility": visibility},
+                format="json",
+                **headers,
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return Post.objects.get(id=resp.data["data"]["post_id"])
+
+    def _edit(self, post, content, org=None):
+        headers = self._org_headers(org) if org is not None else {}
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                UPDATE_URL,
+                {"post_id": str(post.id), "content": content},
+                format="json",
+                **headers,
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp
+
+    def _mention_targets(self, post):
+        rows = PostMention.objects.filter(post=post).select_related(
+            "mentioned_user", "mentioned_org"
+        )
+        return sorted(
+            (row.mentioned_user.username if row.mentioned_user_id
+             else row.mentioned_org.username)
+            for row in rows
+        )
+
+    def _mention_notifications(self, **recipient):
+        return Notification.objects.filter(
+            type=Notification.Type.MENTION, **recipient
+        )
+
+    # ── extraction + resolution ──────────────────────────────────
+
+    def test_create_resolves_users_and_orgs_and_ignores_unknown(self):
+        rahul = self._user("rahul10", "Rahul")
+        kochi = self._org("kochifc", "Kochi FC")
+
+        post = self._create("gg @rahul10 @KochiFC @nosuchname")
+
+        self.assertEqual(self._mention_targets(post), ["kochifc", "rahul10"])
+        self.assertEqual(PostMention.objects.filter(post=post).count(), 2)
+
+        row_user = PostMention.objects.get(post=post, mentioned_user__isnull=False)
+        row_org = PostMention.objects.get(post=post, mentioned_org__isnull=False)
+        self.assertEqual(row_user.mentioned_user_id, rahul.id)
+        self.assertEqual(row_org.mentioned_org_id, kochi.id)
+
+    def test_username_collision_resolves_to_the_user(self):
+        # The same handle exists on BOTH tables — documented policy: user wins.
+        twin_user = self._user("dreamfc", "Dream Person")
+        self._org("dreamfc", "Dream FC")
+
+        post = self._create("shoutout @dreamfc")
+
+        rows = PostMention.objects.filter(post=post)
+        self.assertEqual(rows.count(), 1)
+        self.assertEqual(rows.first().mentioned_user_id, twin_user.id)
+        self.assertIsNone(rows.first().mentioned_org_id)
+
+    def test_trailing_punctuation_is_not_part_of_the_handle(self):
+        self._org("kochifc", "Kochi FC")
+
+        post = self._create("great game @kochifc.")
+
+        self.assertEqual(self._mention_targets(post), ["kochifc"])
+
+    # ── notifications ────────────────────────────────────────────
+
+    def test_edit_notifies_only_the_newly_added_mention(self):
+        rahul = self._user("rahul10", "Rahul")
+        newguy = self._user("newguy", "New Guy")
+
+        post = self._create("first @rahul10")
+        self.assertEqual(self._mention_notifications(recipient_user=rahul).count(), 1)
+
+        self._edit(post, "first @rahul10 and @newguy")
+
+        # Rows diffed correctly...
+        self.assertEqual(self._mention_targets(post), ["newguy", "rahul10"])
+        # ...and only the new person heard about it.
+        self.assertEqual(self._mention_notifications(recipient_user=newguy).count(), 1)
+        self.assertEqual(self._mention_notifications(recipient_user=rahul).count(), 1)
+
+    def test_edit_removing_a_mention_drops_the_row(self):
+        self._user("rahul10", "Rahul")
+        self._user("newguy", "New Guy")
+
+        post = self._create("first @rahul10")
+        self._edit(post, "second @newguy")
+
+        self.assertEqual(self._mention_targets(post), ["newguy"])
+
+    def test_self_mention_creates_a_row_but_no_notification(self):
+        post = self._create("talking about @me here")
+
+        self.assertEqual(self._mention_targets(post), ["me"])
+        self.assertEqual(self._mention_notifications(recipient_user=self.me).count(), 0)
+
+    def test_followers_only_post_notifies_followers_only(self):
+        follower = self._user("follower", "Follower")
+        stranger = self._user("stranger", "Stranger")
+        Follow.objects.create(follower_user=follower, following_user=self.me)
+
+        post = self._create(
+            "private drills @follower @stranger", visibility="followers"
+        )
+
+        # Rows exist for BOTH — visibility gates the notification, not the row.
+        self.assertEqual(self._mention_targets(post), ["follower", "stranger"])
+        self.assertEqual(
+            self._mention_notifications(recipient_user=follower).count(), 1
+        )
+        self.assertEqual(
+            self._mention_notifications(recipient_user=stranger).count(), 0
+        )
+
+    def test_org_authored_post_notifies_a_mentioned_user(self):
+        org = self._org("dreamfc", "Dream FC", member=self.me)
+        rahul = self._user("rahul10", "Rahul")
+
+        post = self._create("welcome @rahul10", org=org)
+
+        self.assertEqual(post.author_org_id, org.id)
+        notification = self._mention_notifications(recipient_user=rahul).first()
+        self.assertIsNotNone(notification)
+        self.assertEqual(notification.actor_org_id, org.id)
+
+    def test_user_authored_post_notifies_a_mentioned_org(self):
+        kochi = self._org("kochifc", "Kochi FC")
+
+        post = self._create("trials at @kochifc")
+
+        notification = self._mention_notifications(recipient_org=kochi).first()
+        self.assertIsNotNone(notification)
+        self.assertEqual(notification.actor_user_id, self.me.id)
+        self.assertEqual(notification.post_id, post.id)
+
+    # ── payload ──────────────────────────────────────────────────
+
+    def test_mention_payload_builds_for_user_and_org_recipients(self):
+        from notifications.services.notification_service import (
+            build_notification_payload,
+        )
+
+        rahul = self._user("rahul10", "Rahul")
+        kochi = self._org("kochifc", "Kochi FC")
+        post = self._create("hello @rahul10 @kochifc")
+
+        for recipient in ({"recipient_user": rahul}, {"recipient_org": kochi}):
+            notification = self._mention_notifications(**recipient).first()
+            self.assertIsNotNone(notification, recipient)
+
+            payload = build_notification_payload(notification)
+            self.assertEqual(payload["type"], "mention")
+            self.assertEqual(payload["title"], "Me mentioned you in a post")
+            self.assertEqual(payload["url"], f"/post/{post.id}")
+            self.assertEqual(payload["target_id"], str(post.id))
+
+    def test_grouped_text_renders_for_mention(self):
+        from notifications.services.grouping_service import (
+            NotificationGroupingService,
+        )
+
+        rahul = self._user("rahul10", "Rahul")
+        self._create("hello @rahul10")
+
+        notifications = list(
+            self._mention_notifications(recipient_user=rahul)
+            .select_related("actor_user__profile", "post")
+        )
+        grouped = NotificationGroupingService.group_notifications(notifications)
+
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped[0]["text"], "Me mentioned you in a post")
+
+    # ── mentions/my ──────────────────────────────────────────────
+
+    def test_my_mentions_is_actor_scoped(self):
+        org = self._org("dreamfc", "Dream FC", member=self.me)
+        author = self._user("author", "Author")
+
+        # Someone mentions the USER in one post and the ORG in another.
+        self.client.force_authenticate(user=author)
+        user_post = self._create("hey @me")
+        org_post = self._create("hey @dreamfc")
+
+        self.client.force_authenticate(user=self.me)
+
+        as_user = self.client.get(MY_MENTIONS_URL)
+        self.assertEqual(as_user.status_code, status.HTTP_200_OK, as_user.data)
+        user_ids = [r["id"] for r in as_user.data["data"]["results"]]
+        self.assertEqual(user_ids, [str(user_post.id)])
+
+        as_org = self.client.get(MY_MENTIONS_URL, **self._org_headers(org))
+        self.assertEqual(as_org.status_code, status.HTTP_200_OK, as_org.data)
+        org_ids = [r["id"] for r in as_org.data["data"]["results"]]
+        self.assertEqual(org_ids, [str(org_post.id)])
+
+    def test_my_mentions_excludes_deleted_posts_and_exposes_mentions(self):
+        author = self._user("author", "Author")
+        self.client.force_authenticate(user=author)
+        live = self._create("hey @me")
+        gone = self._create("also @me")
+        gone.is_deleted = True
+        gone.save(update_fields=["is_deleted"])
+
+        self.client.force_authenticate(user=self.me)
+        resp = self.client.get(MY_MENTIONS_URL)
+
+        results = resp.data["data"]["results"]
+        self.assertEqual([r["id"] for r in results], [str(live.id)])
+        # The serializer field the client linkifies with.
+        self.assertEqual(
+            results[0]["mentions"], [{"username": "me", "type": "user"}]
+        )
+
+    # ── suggest ──────────────────────────────────────────────────
+
+    def test_suggest_returns_prefix_matches_for_both_types(self):
+        self._user("rahul10", "Rahul")
+        self._user("rahulraj", "Rahul Raj")
+        self._user("notrahul", "Not Rahul")     # contains, does not start with
+        self._org("rahulfc", "Rahul FC")
+        self._org("otherfc", "Other FC")
+
+        resp = self.client.get(MENTION_SUGGEST_URL, {"q": "rahul"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        data = resp.data["data"]
+        self.assertEqual(
+            sorted(u["username"] for u in data["users"]), ["rahul10", "rahulraj"]
+        )
+        self.assertEqual(
+            [o["username"] for o in data["organizations"]], ["rahulfc"]
+        )
+        # Org avatars come back under `logo`, the actual model field.
+        self.assertTrue(data["organizations"][0]["logo"])
+        self.assertIn("profile_photo", data["users"][0])
+
+    def test_suggest_tolerates_a_leading_at_and_empty_query(self):
+        self._user("rahul10", "Rahul")
+
+        typed = self.client.get(MENTION_SUGGEST_URL, {"q": "@rahul"})
+        self.assertEqual(
+            [u["username"] for u in typed.data["data"]["users"]], ["rahul10"]
+        )
+
+        empty = self.client.get(MENTION_SUGGEST_URL, {"q": "  "})
+        self.assertEqual(empty.status_code, status.HTTP_200_OK)
+        self.assertEqual(empty.data["data"], {"users": [], "organizations": []})
+
+    def test_suggest_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        resp = self.client.get(MENTION_SUGGEST_URL, {"q": "rahul"})
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    # ── the parser itself ────────────────────────────────────────
+
+    def test_extract_mention_usernames_folds_case_and_caps(self):
+        from posts.services.post_content_service import (
+            MAX_MENTIONS_PER_POST,
+            extract_mention_usernames,
+        )
+
+        # Case-insensitive uniqueness, original case preserved for lookup.
+        self.assertEqual(
+            extract_mention_usernames("@Rahul10 hi @rahul10"), ["Rahul10"]
+        )
+
+        many = " ".join(f"@user{i}" for i in range(30))
+        self.assertEqual(
+            len(extract_mention_usernames(many)), MAX_MENTIONS_PER_POST
+        )
+
+        # Dots are legal inside an ORG handle but never terminate one.
+        self.assertEqual(extract_mention_usernames("@kochi.fc."), ["kochi.fc"])
+        self.assertEqual(extract_mention_usernames("email me@ x"), [])
+
+
+# =====================================================================
+# Saved posts — per ACTOR, private to the saver
+# =====================================================================
+
+class SavedPostTests(APITestCase):
+    """
+    A save belongs to the actor that made it: a person and an org they run
+    keep completely separate lists of the same post.
+    """
+
+    def setUp(self):
+        self.me = self._user("me", "Me")
+        self.author = self._user("author", "Author")
+        self.org = self._org("dreamfc", "Dream FC", member=self.me)
+        self.client.force_authenticate(user=self.me)
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234", username=username,
+        )
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _org(self, username, name, member=None):
+        org = Organization.objects.create(
+            name=name, username=username, type=Organization.Type.CLUB
+        )
+        OrganizationProfile.objects.create(organization=org, logo="")
+        if member is not None:
+            OrganizationMember.objects.create(
+                organization=org, user=member, role=OrganizationMember.Role.OWNER
+            )
+        return org
+
+    def _org_headers(self):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(self.org.id),
+        }
+
+    def _post(self, content="p"):
+        return Post.objects.create(author_user=self.author, content=content)
+
+    def _toggle(self, post_id, as_org=False):
+        headers = self._org_headers() if as_org else {}
+        return self.client.post(
+            SAVE_URL, {"post_id": str(post_id)}, format="json", **headers
+        )
+
+    def _saved_list(self, as_org=False):
+        headers = self._org_headers() if as_org else {}
+        return self.client.get(SAVED_LIST_URL, **headers)
+
+    def _list_row(self, post_id):
+        """The post as the main list serializes it, for the annotation checks."""
+        resp = self.client.get(LIST_URL, {"post_id": str(post_id)})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp.data["data"]["results"][0]
+
+    # ── toggle as a user ─────────────────────────────────────────
+
+    def test_toggle_as_user_saves_then_unsaves(self):
+        post = self._post()
+
+        on = self._toggle(post.id)
+        self.assertEqual(on.status_code, status.HTTP_200_OK, on.data)
+        self.assertTrue(on.data["data"]["is_saved"])
+        self.assertEqual(on.data["data"]["post_id"], str(post.id))
+
+        row = SavedPost.objects.get(post=post)
+        self.assertEqual(row.user_id, self.me.id)
+        self.assertIsNone(row.org_id)
+        self.assertTrue(self._list_row(post.id)["is_saved"])
+
+        off = self._toggle(post.id)
+        self.assertEqual(off.status_code, status.HTTP_200_OK, off.data)
+        self.assertFalse(off.data["data"]["is_saved"])
+        self.assertFalse(SavedPost.objects.filter(post=post).exists())
+        self.assertFalse(self._list_row(post.id)["is_saved"])
+
+    # ── the two actors are independent ───────────────────────────
+
+    def test_org_save_is_a_separate_row_and_list(self):
+        post = self._post()
+
+        self._toggle(post.id)                 # as me
+        self._toggle(post.id, as_org=True)    # as the org
+
+        self.assertEqual(SavedPost.objects.filter(post=post).count(), 2)
+        self.assertTrue(
+            SavedPost.objects.filter(post=post, user=self.me, org__isnull=True).exists()
+        )
+        self.assertTrue(
+            SavedPost.objects.filter(post=post, org=self.org, user__isnull=True).exists()
+        )
+
+        # Unsaving as the org leaves the person's save untouched.
+        self._toggle(post.id, as_org=True)
+        self.assertTrue(SavedPost.objects.filter(post=post, user=self.me).exists())
+        self.assertFalse(SavedPost.objects.filter(post=post, org=self.org).exists())
+
+    def test_saved_list_is_actor_scoped(self):
+        mine = self._post("mine")
+        theirs = self._post("org's")
+
+        self._toggle(mine.id)
+        self._toggle(theirs.id, as_org=True)
+
+        as_user = self._saved_list()
+        self.assertEqual(as_user.status_code, status.HTTP_200_OK, as_user.data)
+        self.assertEqual(
+            [r["id"] for r in as_user.data["data"]["results"]], [str(mine.id)]
+        )
+
+        as_org = self._saved_list(as_org=True)
+        self.assertEqual(as_org.status_code, status.HTTP_200_OK, as_org.data)
+        self.assertEqual(
+            [r["id"] for r in as_org.data["data"]["results"]], [str(theirs.id)]
+        )
+
+    def test_saved_list_is_newest_saved_first(self):
+        first = self._post("first")
+        second = self._post("second")
+        third = self._post("third")
+
+        # Saved out of post order — the LIST order must follow the saves.
+        self._toggle(second.id)
+        self._toggle(third.id)
+        self._toggle(first.id)
+
+        resp = self._saved_list()
+        self.assertEqual(
+            [r["id"] for r in resp.data["data"]["results"]],
+            [str(first.id), str(third.id), str(second.id)],
+        )
+
+    def test_saved_list_carries_is_saved_true(self):
+        post = self._post()
+        self._toggle(post.id)
+
+        resp = self._saved_list()
+        row = resp.data["data"]["results"][0]
+        # Trivially true here, but an absent/False flag renders an empty
+        # bookmark on the saved list itself.
+        self.assertTrue(row["is_saved"])
+
+    # ── annotation across viewers ────────────────────────────────
+
+    def test_is_saved_is_false_for_a_non_saver(self):
+        post = self._post()
+        self._toggle(post.id)
+
+        self.client.force_authenticate(user=self.author)
+        self.assertFalse(self._list_row(post.id)["is_saved"])
+
+    # ── constraints + errors ─────────────────────────────────────
+
+    def test_row_with_both_user_and_org_is_rejected(self):
+        from django.db.utils import IntegrityError
+
+        post = self._post()
+        with self.assertRaises(IntegrityError):
+            SavedPost.objects.create(post=post, user=self.me, org=self.org)
+
+    def test_row_with_neither_user_nor_org_is_rejected(self):
+        from django.db.utils import IntegrityError
+
+        post = self._post()
+        with self.assertRaises(IntegrityError):
+            SavedPost.objects.create(post=post)
+
+    def test_saving_a_deleted_post_returns_404(self):
+        post = self._post()
+        post.is_deleted = True
+        post.save(update_fields=["is_deleted"])
+
+        resp = self._toggle(post.id)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND, resp.data)
+        self.assertFalse(SavedPost.objects.filter(post=post).exists())
+
+    def test_saving_an_unknown_post_returns_404(self):
+        import uuid as _uuid
+
+        resp = self._toggle(_uuid.uuid4())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND, resp.data)
+
+    def test_missing_post_id_returns_400(self):
+        resp = self.client.post(SAVE_URL, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_unsaving_hides_the_post_from_the_saved_list(self):
+        post = self._post()
+        self._toggle(post.id)
+        self._toggle(post.id)
+
+        resp = self._saved_list()
+        self.assertEqual(resp.data["data"]["results"], [])

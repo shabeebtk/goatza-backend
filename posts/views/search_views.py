@@ -5,6 +5,7 @@ from rest_framework.exceptions import NotFound
 from core.views.base_views import BaseAPIView
 from posts.serializers.posts_serializers import PostListSerializer
 from posts.services.post_search_service import PostSearchService
+from posts.services.saved_post_service import annotate_is_saved
 from posts.pagination import PostSearchCursorPagination
 from feed.services.feed_services import FeedService
 from utils.response import response_data
@@ -50,7 +51,11 @@ class PostSearchAPIView(BaseAPIView):
             q = q[:SEARCH_MAX_LEN]
 
             # 1. QUERYSET
-            queryset = PostSearchService.search_posts_queryset(q)
+            # The search service is actor-free (the result set is global), so
+            # the viewer-specific is_saved is layered on here.
+            queryset = annotate_is_saved(
+                PostSearchService.search_posts_queryset(q), actor
+            )
 
             # 2. PAGINATION (keyset on -id, page size 15)
             paginator = PostSearchCursorPagination()

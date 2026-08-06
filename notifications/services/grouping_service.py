@@ -201,6 +201,12 @@ class NotificationGroupingService:
                 return f"{', '.join(names)} and {others_count} others commented on your post"
             return f"{', '.join(names)} commented on your post"
 
+        if notification_type == "mention":
+            # Never repeats: PostMention is unique per (post, target), so a
+            # group holds exactly one row and there is no "and N others" form
+            # to build — same family as follow / recruitment_application.
+            return f"{names[0]} mentioned you in a post" if names else "You were mentioned in a post"
+
         if notification_type == "follow":
             return f"{names[0]} started following you" if names else "You have a new follower"
 

@@ -6,6 +6,7 @@ from core.views.base_views import BaseAPIView
 from posts.models import Post
 from connections.services.follow_services import FollowService
 from posts.serializers.posts_serializers import PostListSerializer
+from posts.services.saved_post_service import annotate_is_saved
 from utils.response import response_data
 from feed.services.feed_services import FeedService
 from feed.pagination import FeedCursorPagination
@@ -44,7 +45,11 @@ class FeedAPIView(BaseAPIView):
                     seen_ids = []
 
             # 1. GET FEED QUERYSET
-            queryset = FeedService.get_feed_queryset(actor, seen_ids=seen_ids)
+            # is_saved is annotated at the view layer for every post endpoint —
+            # one uniform rule, and the actor is only resolved here.
+            queryset = annotate_is_saved(
+                FeedService.get_feed_queryset(actor, seen_ids=seen_ids), actor
+            )
 
             # 2. PAGINATION
             paginator = FeedCursorPagination()
