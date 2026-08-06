@@ -19,10 +19,11 @@ class PostSearchService:
 
     @staticmethod
     def search_posts_queryset(q):
-        # Hashtags are stored without the leading "#", but users type "#football".
-        # Strip a single leading "#" for the hashtag branch only; the content
-        # branch matches the raw query as given.
-        hashtag_term = q[1:] if q.startswith("#") else q
+        # Hashtags are stored without the leading "#" and LOWERCASED by
+        # post_content_service.extract_hashtags, but users type "#FootBall".
+        # Strip a single leading "#" and fold the case to match the stored
+        # form; the content branch matches the raw query as given.
+        hashtag_term = (q[1:] if q.startswith("#") else q).lower()
 
         # EXISTS subquery for the hashtag branch: a post with several matching
         # hashtags still yields ONE truthy Exists row, so the post appears once.

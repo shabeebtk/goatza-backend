@@ -825,3 +825,143 @@ class CommentDeleteTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         c.refresh_from_db()
         self.assertTrue(c.is_deleted)
+
+
+# =====================================================================
+# Hashtags — parsed out of the body on write, diff-synced on edit
+# =====================================================================
+
+class PostHashtagTests(APITestCase):
+    """
+    Hashtag rows are DERIVED from post.content, never sent by the client.
+    Create and update run the same diff-sync, and the search endpoint reads
+    the lowercased stored form.
+    """
+
+    def setUp(self):
+        self.me = User.objects.create_user(
+            email="me@example.com", password="pass1234", username="me",
+        )
+        UserProfile.objects.create(user=self.me, name="Me")
+        self.client.force_authenticate(user=self.me)
+
+    def _tags(self, post):
+        """Stored tag names for a post, sorted for stable comparison."""
+        return sorted(
+            PostHashtag.objects
+            .filter(post=post)
+            .values_list("hashtag__name", flat=True)
+        )
+
+    def _create(self, content):
+        resp = self.client.post(CREATE_URL, {"content": content}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return Post.objects.get(id=resp.data["data"]["post_id"])
+
+    # ── create ───────────────────────────────────────────────────
+
+    def test_create_extracts_unique_lowercased_tags(self):
+        post = self._create("Big win #Football #football #GOATZA_2026")
+
+        # "#Football" and "#football" are the SAME tag once folded — 2 rows, not 3.
+        self.assertEqual(self._tags(post), ["football", "goatza_2026"])
+        self.assertEqual(PostHashtag.objects.filter(post=post).count(), 2)
+
+    def test_create_without_hashtags_creates_no_rows(self):
+        post = self._create("just a plain caption")
+        self.assertEqual(self._tags(post), [])
+
+    # ── update ───────────────────────────────────────────────────
+
+    def test_edit_content_diffs_the_rows(self):
+        post = self._create("first #football #goatza")
+        self.assertEqual(self._tags(post), ["football", "goatza"])
+
+        resp = self.client.patch(
+            UPDATE_URL,
+            {"post_id": str(post.id), "content": "second #goatza #trials"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        # football dropped, trials added, goatza kept (not deleted+recreated).
+        self.assertEqual(self._tags(post), ["goatza", "trials"])
+
+    def test_edit_that_skips_content_leaves_rows_alone(self):
+        post = self._create("keep me #football")
+        row_ids = set(
+            PostHashtag.objects.filter(post=post).values_list("id", flat=True)
+        )
+
+        resp = self.client.patch(
+            UPDATE_URL,
+            {"post_id": str(post.id), "visibility": "followers"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        self.assertEqual(self._tags(post), ["football"])
+        # Same rows, untouched — the sync never ran.
+        self.assertEqual(
+            set(PostHashtag.objects.filter(post=post).values_list("id", flat=True)),
+            row_ids,
+        )
+
+    # ── search ───────────────────────────────────────────────────
+
+    def test_search_finds_stored_tag_case_insensitively(self):
+        post = self._create("no keyword in the body at all #FootBall")
+
+        resp = self.client.get(SEARCH_URL, {"q": "#FOOTBALL"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        ids = [str(r["id"]) for r in resp.data["data"]["results"]]
+        self.assertIn(str(post.id), ids)
+
+    # ── the parser itself ────────────────────────────────────────
+
+    def test_extract_hashtags_caps_and_truncates(self):
+        from posts.services.post_content_service import (
+            MAX_HASHTAGS_PER_POST,
+            extract_hashtags,
+        )
+
+        # 40 distinct tags → only the first 30 survive, in order.
+        many = " ".join(f"#tag{i}" for i in range(40))
+        tags = extract_hashtags(many)
+        self.assertEqual(len(tags), MAX_HASHTAGS_PER_POST)
+        self.assertEqual(tags[0], "tag0")
+        self.assertEqual(tags[-1], "tag29")
+
+        # A 60-char run yields a 50-char tag — the pattern stops at the cap
+        # rather than rejecting the tag outright.
+        long_tag = extract_hashtags("#" + ("a" * 60))
+        self.assertEqual(long_tag, ["a" * 50])
+
+        # Punctuation ends a tag; a bare "#" is not one.
+        self.assertEqual(extract_hashtags("end of #season."), ["season"])
+        self.assertEqual(extract_hashtags("# ## nothing here"), [])
+
+    # ── backfill command ─────────────────────────────────────────
+
+    def test_backfill_creates_rows_and_is_idempotent(self):
+        from io import StringIO
+        from django.core.management import call_command
+
+        # A post from before the write path existed: content, but no rows.
+        legacy = Post.objects.create(
+            author_user=self.me, content="old glory #football #kerala"
+        )
+        untagged = Post.objects.create(author_user=self.me, content="no tags here")
+        self.assertEqual(self._tags(legacy), [])
+
+        call_command("backfill_post_hashtags", stdout=StringIO())
+        self.assertEqual(self._tags(legacy), ["football", "kerala"])
+        self.assertEqual(self._tags(untagged), [])
+
+        after_first = PostHashtag.objects.count()
+
+        # Re-running must be a no-op, not a duplicate-key crash.
+        call_command("backfill_post_hashtags", stdout=StringIO())
+        self.assertEqual(PostHashtag.objects.count(), after_first)
+        self.assertEqual(self._tags(legacy), ["football", "kerala"])

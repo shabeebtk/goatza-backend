@@ -16,6 +16,7 @@ from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
 from services.storage.factory import get_storage_service
 from services.location.location_service import LocationService
 from posts.services.post_service import PostService
+from posts.services.post_content_service import sync_post_content
 from organization.services.user_organization_services import UserOrganizationService
 from connections.services.follow_services import FollowService
 
@@ -262,6 +263,10 @@ class CreatePostAPIView(BaseAPIView):
                 if media_objs:
                     PostMedia.objects.bulk_create(media_objs)
 
+                # Hashtag rows are derived from the body — inside the same
+                # transaction, so a post is never visible without its tags.
+                sync_post_content(post)
+
             # Safe actor logging
             actor_id = actor.user.id if actor.is_user else actor.organization.id
 
@@ -333,7 +338,8 @@ class UpdatePostAPIView(BaseAPIView):
                 # -------------------------
                 # CONTENT
                 # -------------------------
-                if "content" in data:
+                content_changed = "content" in data
+                if content_changed:
                     content = (data.get("content") or "").strip()
                     if not content and not post.media.exists():
                         return response_data(False, message="Post cannot be empty", status_code=400)
@@ -394,6 +400,11 @@ class UpdatePostAPIView(BaseAPIView):
                         post.longitude = None
 
                 post.save()
+
+                # Only the body carries hashtags, so an edit that changes just
+                # the sport/visibility/location leaves the existing rows alone.
+                if content_changed:
+                    sync_post_content(post)
 
             # -------------------------
             # SERIALIZE (with this actor's reaction)
