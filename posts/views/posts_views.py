@@ -21,6 +21,7 @@ from services.storage.factory import get_storage_service
 from services.location.location_service import LocationService
 from posts.services.post_service import PostService
 from posts.services.post_content_service import sync_post_content
+from posts.services.saved_post_service import annotate_is_saved
 from organization.services.user_organization_services import UserOrganizationService
 from connections.services.follow_services import FollowService
 
@@ -481,7 +482,7 @@ class UpdatePostAPIView(BaseAPIView):
             # SERIALIZE (with this actor's reaction)
             # -------------------------
             post = (
-                Post.objects
+                annotate_is_saved(Post.objects.all(), actor)
                 .select_related("author_user__profile", "author_org", "sport")
                 .prefetch_related("media", POST_MENTIONS_PREFETCH)
                 .get(id=post.id)
@@ -606,7 +607,7 @@ class ListPostsAPIView(BaseAPIView):
             # -------------------------
             # OPTIMIZATION
             # -------------------------
-            queryset = queryset.select_related(
+            queryset = annotate_is_saved(queryset, actor).select_related(
                 "author_user__profile",
                 "author_org",
                 "sport"

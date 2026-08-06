@@ -13,7 +13,7 @@ from organization.models import (
     OrganizationMember,
 )
 from posts.models import (
-    Post, PostMedia, Like, Comment, Hashtag, PostHashtag, PostMention,
+    Post, PostMedia, Like, Comment, Hashtag, PostHashtag, PostMention, SavedPost,
 )
 from sports.models import Sport
 
@@ -24,6 +24,8 @@ UPDATE_URL = "/posts/update"
 COMMENT_DELETE_URL = "/posts/comments/delete"
 MY_MENTIONS_URL = "/posts/mentions/my"
 MENTION_SUGGEST_URL = "/posts/mention/suggest"
+SAVE_URL = "/posts/save"
+SAVED_LIST_URL = "/posts/saved/list"
 
 
 class PostSearchTests(APITestCase):
@@ -1302,3 +1304,204 @@ class PostMentionTests(APITestCase):
         # Dots are legal inside an ORG handle but never terminate one.
         self.assertEqual(extract_mention_usernames("@kochi.fc."), ["kochi.fc"])
         self.assertEqual(extract_mention_usernames("email me@ x"), [])
+
+
+# =====================================================================
+# Saved posts — per ACTOR, private to the saver
+# =====================================================================
+
+class SavedPostTests(APITestCase):
+    """
+    A save belongs to the actor that made it: a person and an org they run
+    keep completely separate lists of the same post.
+    """
+
+    def setUp(self):
+        self.me = self._user("me", "Me")
+        self.author = self._user("author", "Author")
+        self.org = self._org("dreamfc", "Dream FC", member=self.me)
+        self.client.force_authenticate(user=self.me)
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234", username=username,
+        )
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _org(self, username, name, member=None):
+        org = Organization.objects.create(
+            name=name, username=username, type=Organization.Type.CLUB
+        )
+        OrganizationProfile.objects.create(organization=org, logo="")
+        if member is not None:
+            OrganizationMember.objects.create(
+                organization=org, user=member, role=OrganizationMember.Role.OWNER
+            )
+        return org
+
+    def _org_headers(self):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(self.org.id),
+        }
+
+    def _post(self, content="p"):
+        return Post.objects.create(author_user=self.author, content=content)
+
+    def _toggle(self, post_id, as_org=False):
+        headers = self._org_headers() if as_org else {}
+        return self.client.post(
+            SAVE_URL, {"post_id": str(post_id)}, format="json", **headers
+        )
+
+    def _saved_list(self, as_org=False):
+        headers = self._org_headers() if as_org else {}
+        return self.client.get(SAVED_LIST_URL, **headers)
+
+    def _list_row(self, post_id):
+        """The post as the main list serializes it, for the annotation checks."""
+        resp = self.client.get(LIST_URL, {"post_id": str(post_id)})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp.data["data"]["results"][0]
+
+    # ── toggle as a user ─────────────────────────────────────────
+
+    def test_toggle_as_user_saves_then_unsaves(self):
+        post = self._post()
+
+        on = self._toggle(post.id)
+        self.assertEqual(on.status_code, status.HTTP_200_OK, on.data)
+        self.assertTrue(on.data["data"]["is_saved"])
+        self.assertEqual(on.data["data"]["post_id"], str(post.id))
+
+        row = SavedPost.objects.get(post=post)
+        self.assertEqual(row.user_id, self.me.id)
+        self.assertIsNone(row.org_id)
+        self.assertTrue(self._list_row(post.id)["is_saved"])
+
+        off = self._toggle(post.id)
+        self.assertEqual(off.status_code, status.HTTP_200_OK, off.data)
+        self.assertFalse(off.data["data"]["is_saved"])
+        self.assertFalse(SavedPost.objects.filter(post=post).exists())
+        self.assertFalse(self._list_row(post.id)["is_saved"])
+
+    # ── the two actors are independent ───────────────────────────
+
+    def test_org_save_is_a_separate_row_and_list(self):
+        post = self._post()
+
+        self._toggle(post.id)                 # as me
+        self._toggle(post.id, as_org=True)    # as the org
+
+        self.assertEqual(SavedPost.objects.filter(post=post).count(), 2)
+        self.assertTrue(
+            SavedPost.objects.filter(post=post, user=self.me, org__isnull=True).exists()
+        )
+        self.assertTrue(
+            SavedPost.objects.filter(post=post, org=self.org, user__isnull=True).exists()
+        )
+
+        # Unsaving as the org leaves the person's save untouched.
+        self._toggle(post.id, as_org=True)
+        self.assertTrue(SavedPost.objects.filter(post=post, user=self.me).exists())
+        self.assertFalse(SavedPost.objects.filter(post=post, org=self.org).exists())
+
+    def test_saved_list_is_actor_scoped(self):
+        mine = self._post("mine")
+        theirs = self._post("org's")
+
+        self._toggle(mine.id)
+        self._toggle(theirs.id, as_org=True)
+
+        as_user = self._saved_list()
+        self.assertEqual(as_user.status_code, status.HTTP_200_OK, as_user.data)
+        self.assertEqual(
+            [r["id"] for r in as_user.data["data"]["results"]], [str(mine.id)]
+        )
+
+        as_org = self._saved_list(as_org=True)
+        self.assertEqual(as_org.status_code, status.HTTP_200_OK, as_org.data)
+        self.assertEqual(
+            [r["id"] for r in as_org.data["data"]["results"]], [str(theirs.id)]
+        )
+
+    def test_saved_list_is_newest_saved_first(self):
+        first = self._post("first")
+        second = self._post("second")
+        third = self._post("third")
+
+        # Saved out of post order — the LIST order must follow the saves.
+        self._toggle(second.id)
+        self._toggle(third.id)
+        self._toggle(first.id)
+
+        resp = self._saved_list()
+        self.assertEqual(
+            [r["id"] for r in resp.data["data"]["results"]],
+            [str(first.id), str(third.id), str(second.id)],
+        )
+
+    def test_saved_list_carries_is_saved_true(self):
+        post = self._post()
+        self._toggle(post.id)
+
+        resp = self._saved_list()
+        row = resp.data["data"]["results"][0]
+        # Trivially true here, but an absent/False flag renders an empty
+        # bookmark on the saved list itself.
+        self.assertTrue(row["is_saved"])
+
+    # ── annotation across viewers ────────────────────────────────
+
+    def test_is_saved_is_false_for_a_non_saver(self):
+        post = self._post()
+        self._toggle(post.id)
+
+        self.client.force_authenticate(user=self.author)
+        self.assertFalse(self._list_row(post.id)["is_saved"])
+
+    # ── constraints + errors ─────────────────────────────────────
+
+    def test_row_with_both_user_and_org_is_rejected(self):
+        from django.db.utils import IntegrityError
+
+        post = self._post()
+        with self.assertRaises(IntegrityError):
+            SavedPost.objects.create(post=post, user=self.me, org=self.org)
+
+    def test_row_with_neither_user_nor_org_is_rejected(self):
+        from django.db.utils import IntegrityError
+
+        post = self._post()
+        with self.assertRaises(IntegrityError):
+            SavedPost.objects.create(post=post)
+
+    def test_saving_a_deleted_post_returns_404(self):
+        post = self._post()
+        post.is_deleted = True
+        post.save(update_fields=["is_deleted"])
+
+        resp = self._toggle(post.id)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND, resp.data)
+        self.assertFalse(SavedPost.objects.filter(post=post).exists())
+
+    def test_saving_an_unknown_post_returns_404(self):
+        import uuid as _uuid
+
+        resp = self._toggle(_uuid.uuid4())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND, resp.data)
+
+    def test_missing_post_id_returns_400(self):
+        resp = self.client.post(SAVE_URL, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_unsaving_hides_the_post_from_the_saved_list(self):
+        post = self._post()
+        self._toggle(post.id)
+        self._toggle(post.id)
+
+        resp = self._saved_list()
+        self.assertEqual(resp.data["data"]["results"], [])

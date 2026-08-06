@@ -12,6 +12,7 @@ from posts.pagination import PostSearchCursorPagination
 from posts.serializers.posts_serializers import (
     PostListSerializer, POST_MENTIONS_PREFETCH,
 )
+from posts.services.saved_post_service import annotate_is_saved
 from feed.services.feed_services import FeedService
 from utils.response import response_data
 
@@ -62,12 +63,11 @@ class MyMentionsAPIView(BaseAPIView):
             page = paginator.paginate_queryset(mention_queryset, request)
             page_post_ids = [mention.post_id for mention in page]
 
-            posts = (
-                Post.objects
-                .filter(id__in=page_post_ids)
-                .select_related("author_user__profile", "author_org__profile", "sport")
-                .prefetch_related("media", POST_MENTIONS_PREFETCH)
-            )
+            posts = annotate_is_saved(
+                Post.objects.filter(id__in=page_post_ids), actor
+            ).select_related(
+                "author_user__profile", "author_org__profile", "sport"
+            ).prefetch_related("media", POST_MENTIONS_PREFETCH)
 
             # `id__in` returns them in whatever order the DB likes — restore
             # the mention ordering from the page.

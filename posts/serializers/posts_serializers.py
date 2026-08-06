@@ -41,6 +41,7 @@ class PostListSerializer(serializers.ModelSerializer):
     reaction = serializers.SerializerMethodField()
     location = serializers.SerializerMethodField()
     mentions = serializers.SerializerMethodField()
+    is_saved = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -60,6 +61,7 @@ class PostListSerializer(serializers.ModelSerializer):
             "reaction",
             "location",
             "mentions",
+            "is_saved",
         ]
 
     def get_author(self, obj):
@@ -90,6 +92,17 @@ class PostListSerializer(serializers.ModelSerializer):
             "latitude": obj.latitude,
             "longitude": obj.longitude,
     }
+
+    def get_is_saved(self, obj):
+        """
+        Whether the CURRENT actor saved this post.
+
+        Supplied by saved_post_service.annotate_is_saved on every list
+        queryset. The default keeps an un-annotated path rendering a bookmark
+        instead of raising — but it is a bug at the call site, not a feature:
+        every queryset feeding this serializer must carry the annotation.
+        """
+        return bool(getattr(obj, "is_saved", False))
 
     def get_mentions(self, obj):
         """

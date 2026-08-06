@@ -342,8 +342,19 @@ class PostMention(BaseUUIDModel):
 
 
 class SavedPost(BaseUUIDModel):
+    # Dual-actor, same shape as PostMention: a save belongs to the actor who
+    # made it, so a person and an org they run keep separate lists.
     user = models.ForeignKey(
         User,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="saved_posts"
+    )
+    org = models.ForeignKey(
+        Organization,
+        null=True,
+        blank=True,
         on_delete=models.CASCADE,
         related_name="saved_posts"
     )
@@ -357,10 +368,25 @@ class SavedPost(BaseUUIDModel):
     class Meta:
         db_table = "saved_posts"
         constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(user__isnull=False, org__isnull=True) |
+                    Q(user__isnull=True, org__isnull=False)
+                ),
+                name="saved_post_user_or_org",
+            ),
+            # Partial uniques — NULL never equals NULL, so an unconditional
+            # unique on a nullable column would let duplicates through.
             models.UniqueConstraint(
                 fields=["user", "post"],
-                name="unique_saved_post"
-            )
+                condition=Q(user__isnull=False),
+                name="unique_saved_post_user",
+            ),
+            models.UniqueConstraint(
+                fields=["org", "post"],
+                condition=Q(org__isnull=False),
+                name="unique_saved_post_org",
+            ),
         ]
 
 
