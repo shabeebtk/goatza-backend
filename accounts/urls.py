@@ -17,6 +17,7 @@ from accounts.views.user_views import (
     GetUserDetails, GetUserDetailsByID, UpdateUserMediaAPIView, UpdateUserProfileAPIView,
     CheckUsernameAvailabilityAPIView, SetUserRoleAPIView, CompleteOnboardingAPIView
 )
+from accounts.views.user_privacy_views import UserPublicProfilePrivacyAPIView
 from accounts.views.user_upload_signature_views import GetUploadConfigAPIView
 # base url - /user/
 
@@ -42,6 +43,9 @@ urlpatterns = [
     path('update/profile/data', UpdateUserProfileAPIView.as_view()),
     path('role', SetUserRoleAPIView.as_view()),
     path('onboarding/complete', CompleteOnboardingAPIView.as_view()),
+
+    # privacy
+    path('privacy/public-profile', UserPublicProfilePrivacyAPIView.as_view()),
 
     # user upload media signature
     path('get/upload/signature', GetUploadConfigAPIView.as_view()),

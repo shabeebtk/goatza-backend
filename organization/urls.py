@@ -7,6 +7,9 @@ from organization.views.organization_location_views import (
     OrganizationLocationAPIView, DeleteOrganizationLocationAPIView
 )
 from organization.views.dashboard_views import OrganizationDashboardAPIView
+from organization.views.organization_privacy_views import (
+    OrganizationPublicProfilePrivacyAPIView
+)
 
 # base endpoint '/organizations/'
 
@@ -16,6 +19,9 @@ urlpatterns = [
     path('details', OrganizationsDetailsAPIView.as_view()),
     path('update/logo/cover', UpdateOrganizationMediaAPIView.as_view()),
     path('update', UpdateOrganizationAPIView.as_view()),
+
+    # Privacy
+    path('privacy/public-profile', OrganizationPublicProfilePrivacyAPIView.as_view()),
 
     # Dashboard
     path('dashboard', OrganizationDashboardAPIView.as_view()),

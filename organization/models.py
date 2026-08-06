@@ -97,6 +97,15 @@ class OrganizationProfile(BaseUUIDModel):
     following_count = models.PositiveIntegerField(default=0)
     posts_count = models.PositiveIntegerField(default=0)
 
+    # Governs the LOGGED-OUT web view only (GET /public/organization/<username>).
+    # Same semantics as UserProfile.is_public_profile: signed-in actors are
+    # unaffected, and a hidden org is still shareable in DMs. Only OWNER/ADMIN
+    # members may flip it — enforced in OrganizationPrivacyService.
+    is_public_profile = models.BooleanField(
+        default=True,
+        help_text="Visible to logged-out visitors. Does not affect in-app visibility.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

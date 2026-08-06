@@ -20,6 +20,9 @@ place, because sharing needs a combination no existing selector offers:
               CLOSED is allowed as well as ACTIVE. A closed trial is still
               worth forwarding ("look what I missed"); a draft or cancelled one
               is not, and is never shareable.
+  * profiles  — reachability only (see is_user_profile_shareable). Profiles
+              have no followers-only tier, so this path never consults the
+              follow graph.
 """
 
 from django.utils.functional import cached_property
@@ -139,3 +142,37 @@ def is_recruitment_shareable(recruitment, viewer: ShareViewer) -> bool:
 
     # PRIVATE — owner only, handled above.
     return False
+
+
+def is_user_profile_shareable(user, viewer: ShareViewer) -> bool:
+    """
+    True when ``viewer`` may forward — or be shown a preview card of —
+    ``user``'s profile.
+
+    Reachability, not visibility. The only questions are whether the account
+    still exists, is still active, and has a username (``User.username`` is
+    nullable, and a profile with no handle has no URL to open):
+
+      * ``is_public_profile`` is DELIBERATELY not checked. That flag governs the
+        logged-out web view only. Inside Goatza every signed-in actor can
+        already see every profile, so a hidden profile stays shareable in DMs
+        and its preview card renders normally — refusing here would break a
+        capability the recipient already has, and would leak the owner's
+        privacy setting to whoever tried.
+
+      * No follow lookup. Profiles have no followers-only tier, so there is
+        nothing a follow could unlock. ``viewer`` is accepted for signature
+        symmetry with the other rules and is left untouched on purpose —
+        reading ``ShareViewer._follows`` here would fire a follow query per
+        share for an answer that cannot change the outcome.
+    """
+    return bool(user is not None and user.is_active and user.username)
+
+
+def is_org_profile_shareable(org, viewer: ShareViewer) -> bool:
+    """
+    True when ``viewer`` may forward ``org``'s profile. Same reasoning as the
+    user twin; ``Organization.username`` is required by the model, so activity
+    is the only check left.
+    """
+    return bool(org is not None and org.is_active)

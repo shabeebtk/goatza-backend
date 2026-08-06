@@ -140,9 +140,20 @@ class Message(BaseUUIDModel):
         SYSTEM = "system", "System"
         SHARED_POST = "shared_post", "Shared Post"
         SHARED_RECRUITMENT = "shared_recruitment", "Shared Recruitment"
+        # Two profile types rather than one generic "shared_profile": the
+        # one-type-one-FK pattern below extends without special-casing, and a
+        # single type would need a discriminator column to say which of the two
+        # FKs to read.
+        SHARED_USER_PROFILE = "shared_user_profile", "Shared User Profile"
+        SHARED_ORG_PROFILE = "shared_org_profile", "Shared Organization Profile"
 
     # Types whose meaning depends on a shared object being attached.
-    SHARED_TYPES = (Type.SHARED_POST, Type.SHARED_RECRUITMENT)
+    SHARED_TYPES = (
+        Type.SHARED_POST,
+        Type.SHARED_RECRUITMENT,
+        Type.SHARED_USER_PROFILE,
+        Type.SHARED_ORG_PROFILE,
+    )
 
     conversation = models.ForeignKey(
         Conversation,
@@ -193,6 +204,25 @@ class Message(BaseUUIDModel):
         related_name="+"
     )
 
+    # Forwarded profiles. Same SET_NULL reasoning as the two above: a
+    # deactivated account must not take the conversation history with it, so the
+    # message survives and the serializer renders an "unavailable" card.
+    shared_profile_user = models.ForeignKey(
+        "accounts.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+"
+    )
+
+    shared_profile_org = models.ForeignKey(
+        "organization.Organization",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+"
+    )
+
     # media support
     media_url = models.URLField(blank=True)
 
@@ -237,20 +267,50 @@ class Message(BaseUUIDModel):
             #
             # What IS safe to enforce in the DB is the reverse direction — a
             # shared FK may only be attached to its matching type, and never
-            # both at once. NULLing a column can never violate this, so it
-            # survives SET_NULL and still stops a mislabeled row being written.
+            # more than one at once. NULLing a column can never violate this, so
+            # it survives SET_NULL and still stops a mislabeled row being
+            # written.
+            #
+            # Every branch must name EVERY other FK as null, so this grows
+            # quadratically with the number of shared types. That is the price
+            # of one column per target: it is worth paying while the list is
+            # short, and the day it stops being short the answer is a generic
+            # (content_type, object_id) pair, not a fifth column.
             models.CheckConstraint(
                 condition=(
-                    Q(shared_post__isnull=True, shared_recruitment__isnull=True)
+                    Q(
+                        shared_post__isnull=True,
+                        shared_recruitment__isnull=True,
+                        shared_profile_user__isnull=True,
+                        shared_profile_org__isnull=True,
+                    )
                     | Q(
                         message_type="shared_post",
                         shared_post__isnull=False,
                         shared_recruitment__isnull=True,
+                        shared_profile_user__isnull=True,
+                        shared_profile_org__isnull=True,
                     )
                     | Q(
                         message_type="shared_recruitment",
                         shared_recruitment__isnull=False,
                         shared_post__isnull=True,
+                        shared_profile_user__isnull=True,
+                        shared_profile_org__isnull=True,
+                    )
+                    | Q(
+                        message_type="shared_user_profile",
+                        shared_profile_user__isnull=False,
+                        shared_post__isnull=True,
+                        shared_recruitment__isnull=True,
+                        shared_profile_org__isnull=True,
+                    )
+                    | Q(
+                        message_type="shared_org_profile",
+                        shared_profile_org__isnull=False,
+                        shared_post__isnull=True,
+                        shared_recruitment__isnull=True,
+                        shared_profile_user__isnull=True,
                     )
                 ),
                 name="message_shared_object_matches_type"

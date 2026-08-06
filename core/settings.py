@@ -171,6 +171,10 @@ REST_FRAMEWORK = {
         'change_password': '5/hour',
         'message_share': '30/min',   # per actor — see messaging.throttles
         'chat_media': '30/min',      # per actor — chat photo uploads
+        # Public profile reads. Per IP (see core.throttles.PublicReadThrottle),
+        # and generous on purpose: one shared link opening in a group chat
+        # produces a burst of crawler + human hits from a handful of addresses.
+        'public_profile': '60/min',
     }
 }
 
@@ -220,6 +224,12 @@ CSRF_TRUSTED_ORIGINS = [
 # SESSION_COOKIE_SECURE = True
 # CSRF_COOKIE_SECURE = True
 
+# The Vercel frontend origin (https://goatza.com) is listed here. In production
+# the browser rarely needs it: NEXT_PUBLIC_API_URL is the "/api" Vercel rewrite,
+# so calls are same-origin and proxied. It still matters for direct calls
+# (a preview build pointed at this API) and it must stay in step with
+# NEXT_PUBLIC_SITE_URL — that value is what the public profile's canonical and
+# Open Graph URLs are built from.
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://goatza-backend.onrender.com",

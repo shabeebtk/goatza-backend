@@ -17,7 +17,16 @@ class FollowService:
             "user_ids": [...],
             "org_ids": [...]
         }
+
+        ``actor`` is None for an anonymous caller (core.actor.resolve_actor
+        returns None when there is no token) — the public profile endpoints
+        reach here through the shared post-visibility filter. An anonymous
+        viewer follows nobody, so the empty answer is the correct one and every
+        caller's `id in following_ids[...]` test degrades to False on its own.
         """
+
+        if actor is None:
+            return {"user_ids": [], "org_ids": []}
 
         if actor.is_user:
             user_ids = Follow.objects.filter(
@@ -218,7 +227,15 @@ class FollowService:
     def get_relationship(actor, target_id, target_type):
         """
         Returns relationship between actor and target (user/org)
+
+        ``actor`` is None for an anonymous caller. Nobody is following anybody
+        in that case, so return the all-false shape rather than querying: the
+        client renders the same "Follow" affordance it would for a stranger,
+        and tapping it hits the login wall.
         """
+        if actor is None:
+            return FollowService._anonymous_response()
+
         # ----------------------------------
         # SELF CHECK
         # ----------------------------------
@@ -288,6 +305,16 @@ class FollowService:
     def _self_response():
         return {
             "is_me": True,
+            "is_following": False,
+            "is_followed_by": False,
+            "is_connected": False,
+        }
+
+    @staticmethod
+    def _anonymous_response():
+        """Same shape as a stranger's — `is_me` False, every edge absent."""
+        return {
+            "is_me": False,
             "is_following": False,
             "is_followed_by": False,
             "is_connected": False,

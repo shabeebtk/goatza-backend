@@ -19,6 +19,7 @@ from posts.serializers.posts_serializers import (
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS
 from services.storage.factory import get_storage_service
 from services.location.location_service import LocationService
+from posts.selectors.post_visibility_selectors import profile_visibility_filter
 from posts.services.post_service import PostService
 from posts.services.post_content_service import sync_post_content
 from posts.services.saved_post_service import annotate_is_saved
@@ -567,40 +568,14 @@ class ListPostsAPIView(BaseAPIView):
                 queryset = queryset.filter(sport_id=sport_id)
 
             # -------------------------
-            # VISIBILITY 
+            # VISIBILITY
             # -------------------------
-            visibility_filter = Q(visibility=Post.Visibility.PUBLIC)
-
-            # Get following ids once 
-            following_ids = FollowService.get_following_ids(actor)  # :contentReference[oaicite:0]{index=0}
-
-            # Target-specific visibility
-            if profile:
-                if profile["type"] == TYPE_USER:
-                    is_following = profile["id"] in following_ids["user_ids"]
-
-                    if is_following:
-                        visibility_filter |= Q(
-                            visibility=Post.Visibility.FOLLOWERS,
-                            author_user_id=profile["id"]
-                        )
-
-                else:
-                    is_following = profile["id"] in following_ids["org_ids"]
-
-                    if is_following:
-                        visibility_filter |= Q(
-                            visibility=Post.Visibility.FOLLOWERS,
-                            author_org_id=profile["id"]
-                        )
-
-            # Own posts always visible
-            if actor.is_user:
-                visibility_filter |= Q(author_user=actor.user)
-            else:
-                visibility_filter |= Q(author_org=actor.organization)
-
-            queryset = queryset.filter(visibility_filter)
+            # The rule now lives in posts.selectors.post_visibility_selectors so
+            # the public (logged-out) profile list runs the identical filter
+            # instead of a second copy. Behaviour here is unchanged.
+            queryset = queryset.filter(
+                profile_visibility_filter(actor, profile)
+            )
 
             total_count = queryset.count()
 

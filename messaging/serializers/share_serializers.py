@@ -1,7 +1,12 @@
 from rest_framework import serializers
 
 from core.constant import TYPE_ORGANIZATION, TYPE_USER
-from messaging.services.share_service import TARGET_POST, TARGET_RECRUITMENT
+from messaging.services.share_service import (
+    TARGET_ORGANIZATION,
+    TARGET_POST,
+    TARGET_RECRUITMENT,
+    TARGET_USER,
+)
 
 # One share call may fan out to at most this many existing threads, and open at
 # most this many new ones. Caps the blast radius of a single request; the
@@ -13,7 +18,18 @@ NOTE_MAX_LENGTH = 1000
 
 
 class ShareTargetSerializer(serializers.Serializer):
-    type = serializers.ChoiceField(choices=[TARGET_POST, TARGET_RECRUITMENT])
+    # TARGET_USER / TARGET_ORGANIZATION happen to equal the actor-type strings
+    # used by ShareRecipientSerializer below, but they mean different things —
+    # "what is being shared" vs "who it goes to" — and the two lists are kept
+    # separate so neither can be widened by editing the other.
+    type = serializers.ChoiceField(
+        choices=[
+            TARGET_POST,
+            TARGET_RECRUITMENT,
+            TARGET_USER,
+            TARGET_ORGANIZATION,
+        ]
+    )
     id = serializers.UUIDField()
 
 
