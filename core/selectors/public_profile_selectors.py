@@ -76,6 +76,12 @@ def get_public_user(username):
             "sports__sport",
             "positions__position",
             "positions__sport",
+            # The primary sport's own attribute values ("Preferred foot",
+            # "Batting style"). Prefetched whole and filtered to the primary
+            # sport in Python — a per-sport queryset here would cost a query
+            # and the rows are a handful either way.
+            "attributes__attribute",
+            "attributes__option",
         )
         .filter(username=username, is_active=True)
         .first()
