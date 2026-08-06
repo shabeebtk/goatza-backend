@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from organization.models import (
-    Organization, OrganizationProfile, OrganizationLocation, OrganizationSport
+    Organization, OrganizationProfile, OrganizationLocation, OrganizationSport,
+    OrganizationMember
 )
 
 class OrganizationLocationInputSerializer(serializers.Serializer):
@@ -135,6 +136,9 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
     following_count = serializers.SerializerMethodField()
     posts_count = serializers.SerializerMethodField()
 
+    is_public_profile = serializers.SerializerMethodField()
+    my_role = serializers.SerializerMethodField()
+
     locations = OrganizationLocationSerializer(
         many=True,
         read_only=True
@@ -164,6 +168,9 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
             "followers_count",
             "following_count",
             "posts_count",
+
+            "is_public_profile",
+            "my_role",
 
             "locations",
             "sports",
@@ -209,7 +216,43 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
     def get_posts_count(self, obj):
         profile = self._profile(obj)
         return profile.posts_count if profile else 0
-    
+
+    def get_is_public_profile(self, obj):
+        """
+        Whether logged-out visitors can see this org's profile.
+
+        Not a secret — the answer is observable by opening the public URL — and
+        the settings screen needs it to render the toggle in the right state.
+        """
+        profile = self._profile(obj)
+        return profile.is_public_profile if profile else True
+
+    def get_my_role(self, obj):
+        """
+        The REQUESTING user's role in this org, or null if they aren't a member.
+
+        Drives the disabled state on owner/admin-only settings rows. It is a
+        hint for the UI and nothing more — the real gate is server-side in
+        OrganizationPrivacyService, which re-reads the membership.
+
+        Costs one query, and only when the caller puts a request in the
+        serializer context. List callers leave it out so a page of orgs never
+        fans out into one membership lookup per row.
+        """
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+
+        if not user or not user.is_authenticated:
+            return None
+
+        return (
+            OrganizationMember.objects
+            .filter(organization=obj, user=user)
+            .values_list("role", flat=True)
+            .first()
+        )
+
+
 
 # ---------------------------------------------- 
 # media update 

@@ -19,8 +19,10 @@ from asgiref.sync import async_to_sync
 from messaging.models import Message, Conversation, ConversationParticipant
 from messaging.selectors.share_selectors import (
     ShareViewer,
+    is_org_profile_shareable,
     is_post_shareable,
     is_recruitment_shareable,
+    is_user_profile_shareable,
 )
 from messaging.services.exceptions import (
     ContentUnavailableError,
@@ -139,6 +141,60 @@ class MessageService:
             message_type=Message.Type.SHARED_RECRUITMENT,
             content=note or "",
             shared_recruitment=recruitment,
+        )
+
+    # SHARE A USER PROFILE
+    @staticmethod
+    def send_shared_user_profile(
+        conversation: Conversation,
+        sender_user=None,
+        sender_org=None,
+        profile_user=None,
+        note: str = "",
+    ):
+        """
+        Forward a person's profile into a conversation. ``note`` is an optional
+        caption and is stored as the message content.
+        """
+        viewer = ShareViewer(user=sender_user, org=sender_org)
+
+        if not is_user_profile_shareable(profile_user, viewer):
+            raise ContentUnavailableError("This profile is no longer available")
+
+        return MessageService._create_and_dispatch(
+            conversation,
+            sender_user,
+            sender_org,
+            message_type=Message.Type.SHARED_USER_PROFILE,
+            content=note or "",
+            shared_profile_user=profile_user,
+        )
+
+    # SHARE AN ORGANIZATION PROFILE
+    @staticmethod
+    def send_shared_org_profile(
+        conversation: Conversation,
+        sender_user=None,
+        sender_org=None,
+        profile_org=None,
+        note: str = "",
+    ):
+        """
+        Forward an organization's profile into a conversation. ``note`` is an
+        optional caption and is stored as the message content.
+        """
+        viewer = ShareViewer(user=sender_user, org=sender_org)
+
+        if not is_org_profile_shareable(profile_org, viewer):
+            raise ContentUnavailableError("This profile is no longer available")
+
+        return MessageService._create_and_dispatch(
+            conversation,
+            sender_user,
+            sender_org,
+            message_type=Message.Type.SHARED_ORG_PROFILE,
+            content=note or "",
+            shared_profile_org=profile_org,
         )
 
     # SEND AN IMAGE

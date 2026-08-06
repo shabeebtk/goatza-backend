@@ -3,8 +3,10 @@ from rest_framework import serializers
 from messaging.models import Message
 from messaging.selectors.share_selectors import (
     ShareViewer,
+    is_org_profile_shareable,
     is_post_shareable,
     is_recruitment_shareable,
+    is_user_profile_shareable,
 )
 from shared.serializers.actor_serializers import ActorMiniSerializer
 
@@ -20,6 +22,8 @@ class MessageSerializer(serializers.ModelSerializer):
     sender = serializers.SerializerMethodField()
     shared_post_preview = serializers.SerializerMethodField()
     shared_recruitment_preview = serializers.SerializerMethodField()
+    shared_user_profile_preview = serializers.SerializerMethodField()
+    shared_org_profile_preview = serializers.SerializerMethodField()
     is_read = serializers.SerializerMethodField()
 
     class Meta:
@@ -44,6 +48,8 @@ class MessageSerializer(serializers.ModelSerializer):
             # shared content
             "shared_post_preview",
             "shared_recruitment_preview",
+            "shared_user_profile_preview",
+            "shared_org_profile_preview",
         ]
 
     # ----------------------------------------
@@ -179,4 +185,94 @@ class MessageSerializer(serializers.ModelSerializer):
             "cover_url": (
                 (cover.thumbnail_url or cover.file_url) if cover else ""
             ),
+        }
+
+    # ----------------------------------------
+    # SHARED PROFILE PREVIEWS
+    # ----------------------------------------
+    # Every value below is a str/int/None. These dicts are built by hand rather
+    # than by DRF fields, and the same payload is msgpack'd onto the channel
+    # layer by MessageService._trigger_realtime, which can only carry
+    # primitives — UserProfile.weight_kg is a DecimalField, which is why nothing
+    # reads it here and why any future physical stat has to be cast.
+
+    def get_shared_user_profile_preview(self, obj):
+        if obj.message_type != Message.Type.SHARED_USER_PROFILE:
+            return None
+
+        user = obj.shared_profile_user
+
+        # user is None once the account was hard-deleted (FK is SET_NULL), and
+        # is_user_profile_shareable also rejects a deactivated or usernameless
+        # one — never a 500, always an unavailable card.
+        if not is_user_profile_shareable(user, self._viewer):
+            return UNAVAILABLE
+
+        profile = getattr(user, "profile", None)
+
+        # Read off the prefetched lists (MessageSelector joins them) rather than
+        # re-filtering in SQL, so a page of shared profiles stays flat.
+        primary_sport = next(
+            (s for s in user.sports.all() if s.is_primary), None
+        )
+        primary_position = next(
+            (
+                p for p in user.positions.all()
+                if p.is_primary
+                and primary_sport is not None
+                and p.sport_id == primary_sport.sport_id
+            ),
+            None,
+        )
+
+        return {
+            "unavailable": False,
+            "id": str(user.id),
+            "username": user.username or "",
+            "name": profile.name if profile else "",
+            "avatar": profile.profile_photo if profile else "",
+            "headline": profile.headline if profile else "",
+            "role": user.role,
+            "primary_sport": primary_sport.sport.name if primary_sport else "",
+            "primary_position": (
+                primary_position.position.name if primary_position else ""
+            ),
+            # City-level only, matching the public profile payload — a chat card
+            # is not a reason to carry coordinates the profile itself withholds.
+            "city": profile.city if profile else "",
+            "country_code": profile.country_code if profile else "",
+            "followers_count": profile.followers_count if profile else 0,
+        }
+
+    def get_shared_org_profile_preview(self, obj):
+        if obj.message_type != Message.Type.SHARED_ORG_PROFILE:
+            return None
+
+        org = obj.shared_profile_org
+
+        if not is_org_profile_shareable(org, self._viewer):
+            return UNAVAILABLE
+
+        profile = getattr(org, "profile", None)
+
+        # The card prints one city. An org's locations are business addresses
+        # and there may be several — the primary one is the club's home ground,
+        # which is the one that means anything at a glance.
+        locations = list(org.locations.all())
+        primary_location = next(
+            (loc for loc in locations if loc.is_primary),
+            locations[0] if locations else None,
+        )
+
+        return {
+            "unavailable": False,
+            "id": str(org.id),
+            "username": org.username or "",
+            "name": org.name,
+            "logo": profile.logo if profile else "",
+            "type": org.type,
+            "level": profile.level if profile else "",
+            "city": primary_location.city if primary_location else "",
+            "is_verified": org.is_verified,
+            "followers_count": profile.followers_count if profile else 0,
         }

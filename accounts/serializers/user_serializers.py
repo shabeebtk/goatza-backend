@@ -53,10 +53,18 @@ class UserFullSerializer(BaseUserSerializer):
     primary_sport = serializers.SerializerMethodField()
     location = serializers.SerializerMethodField()
     highlights_count = serializers.SerializerMethodField()
+    # The owner's own privacy setting, so the Settings screen can render the
+    # toggle without a second request. Safe here and ONLY here: this serializer
+    # is behind IsAuthenticated and already carries the email — it must never
+    # be reused for public output (see public_profile_serializers.py).
+    is_public_profile = serializers.BooleanField(
+        source='profile.is_public_profile', read_only=True
+    )
 
     class Meta(BaseUserSerializer.Meta):
         fields = BaseUserSerializer.Meta.fields + [
             'highlights_count',
+            'is_public_profile',
             'cover_photo',
             'headline',
             'about',

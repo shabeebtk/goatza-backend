@@ -1,19 +1,23 @@
 """
-Share a post or recruitment into one or more conversations.
+Share a post, a recruitment or a profile into one or more conversations.
 
-Sharing happens from the feed and can fan out to several threads at once, so
-this is a REST call rather than a websocket send: there is no single socket to
-send it on, and the sender may not have any of the target conversations open.
+Sharing happens from the feed or a profile header and can fan out to several
+threads at once, so this is a REST call rather than a websocket send: there is
+no single socket to send it on, and the sender may not have any of the target
+conversations open.
 
 Every target is independent — one bad conversation id does not sink the rest.
 The caller gets {"sent": [...], "failed": [{"id", "reason"}]}.
 """
 
+from accounts.models import User
 from messaging.models import Conversation
 from messaging.selectors.share_selectors import (
     ShareViewer,
+    is_org_profile_shareable,
     is_post_shareable,
     is_recruitment_shareable,
+    is_user_profile_shareable,
 )
 from messaging.services.conversation_service import ConversationService
 from messaging.services.exceptions import (
@@ -25,11 +29,12 @@ from messaging.services.exceptions import (
 from messaging.services.message_service import MessageService
 from posts.models import Post
 from recruitments.models import Recruitment
-from accounts.models import User
 from organization.models import Organization
 
 TARGET_POST = "post"
 TARGET_RECRUITMENT = "recruitment"
+TARGET_USER = "user"
+TARGET_ORGANIZATION = "organization"
 
 
 class ShareService:
@@ -44,9 +49,12 @@ class ShareService:
 
         Raises ContentUnavailableError for BOTH "does not exist" and "exists but
         you cannot see it" — distinguishing them would let anyone probe for the
-        existence of followers-only content by watching the status code.
+        existence of followers-only content by watching the status code. The
+        profile branches keep that behaviour even though nothing about a profile
+        is followers-only: one error code across all four targets means the
+        client's failure copy stays uniform.
 
-        Returns (kind, object) where kind is TARGET_POST / TARGET_RECRUITMENT.
+        Returns (kind, object) where kind is one of the TARGET_* constants.
         """
         viewer = ShareViewer.from_actor(actor)
 
@@ -64,6 +72,40 @@ class ShareService:
             if not is_post_shareable(post, viewer):
                 raise ContentUnavailableError("Post not found or not available")
             return TARGET_POST, post
+
+        if target_type == TARGET_USER:
+            # Same fan-out reasoning: the preview reads the profile plus the
+            # primary sport and position, so join and prefetch them once rather
+            # than 10 times.
+            profile_user = (
+                User.objects
+                .select_related("profile")
+                .prefetch_related(
+                    "sports__sport",
+                    "positions__position",
+                )
+                .filter(id=target_id)
+                .first()
+            )
+            if not is_user_profile_shareable(profile_user, viewer):
+                raise ContentUnavailableError(
+                    "Profile not found or not available"
+                )
+            return TARGET_USER, profile_user
+
+        if target_type == TARGET_ORGANIZATION:
+            profile_org = (
+                Organization.objects
+                .select_related("profile")
+                .prefetch_related("locations")
+                .filter(id=target_id)
+                .first()
+            )
+            if not is_org_profile_shareable(profile_org, viewer):
+                raise ContentUnavailableError(
+                    "Profile not found or not available"
+                )
+            return TARGET_ORGANIZATION, profile_org
 
         recruitment = (
             Recruitment.objects
@@ -150,21 +192,28 @@ class ShareService:
     # ----------------------------------------
     @staticmethod
     def _send(kind, obj, conversation, sender_user, sender_org, note):
+        common = {
+            "conversation": conversation,
+            "sender_user": sender_user,
+            "sender_org": sender_org,
+            "note": note,
+        }
+
         if kind == TARGET_POST:
-            return MessageService.send_shared_post(
-                conversation=conversation,
-                sender_user=sender_user,
-                sender_org=sender_org,
-                post=obj,
-                note=note,
+            return MessageService.send_shared_post(post=obj, **common)
+
+        if kind == TARGET_USER:
+            return MessageService.send_shared_user_profile(
+                profile_user=obj, **common
+            )
+
+        if kind == TARGET_ORGANIZATION:
+            return MessageService.send_shared_org_profile(
+                profile_org=obj, **common
             )
 
         return MessageService.send_shared_recruitment(
-            conversation=conversation,
-            sender_user=sender_user,
-            sender_org=sender_org,
-            recruitment=obj,
-            note=note,
+            recruitment=obj, **common
         )
 
     # ----------------------------------------

@@ -147,7 +147,11 @@ class OrganizationsDetailsAPIView(BaseAPIView):
             # SERIALIZE
             # -------------------------
             if view_type == "all":
-                serializer = OrganizationFullSerializer(organization)
+                # request in the context → `my_role`, which the settings screen
+                # uses to disable owner/admin-only rows.
+                serializer = OrganizationFullSerializer(
+                    organization, context={"request": request}
+                )
             else:
                 serializer = OrganizationMiniSerializer(organization)
 

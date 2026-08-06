@@ -120,6 +120,16 @@ class UserProfile(BaseUUIDModel):
     following_count = models.PositiveIntegerField(default=0)
     connections_count = models.PositiveIntegerField(default=0)
 
+    # Governs the LOGGED-OUT web view only (GET /public/profile/<username>).
+    # It is not a "private account" switch: every signed-in Goatza actor still
+    # sees this profile exactly as they do today, and a hidden profile stays
+    # shareable in DMs — the share preview renders normally. Turning it off
+    # only stops anonymous visitors and link-preview crawlers.
+    is_public_profile = models.BooleanField(
+        default=True,
+        help_text="Visible to logged-out visitors. Does not affect in-app visibility.",
+    )
+
     gender = models.CharField(
         max_length=10,
         choices=Gender.choices,

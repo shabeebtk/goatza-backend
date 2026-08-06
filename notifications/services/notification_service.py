@@ -29,6 +29,22 @@ RECRUITMENT_STATUS_COPY_DEFAULT = {"verb": "updated your application", "body": "
 MESSAGE_SHARE_NOUN = {
     "post": "a post",
     "recruitment": "a recruitment",
+    # One noun for both profile kinds: "shared a profile with you" reads
+    # naturally whether the card is a player or a club, and the recipient finds
+    # out which the moment they open it.
+    "user_profile": "a profile",
+    "org_profile": "a profile",
+}
+
+# message_type → (shared_kind for the copy above, the FK holding the target).
+# A mapping rather than a chain of ifs: four types is where an if/else stops
+# being readable, and a fifth added without a matching entry here shows up as a
+# generic "shared something" push instead of an AttributeError.
+MESSAGE_SHARE_KINDS = {
+    "shared_post": ("post", "shared_post_id"),
+    "shared_recruitment": ("recruitment", "shared_recruitment_id"),
+    "shared_user_profile": ("user_profile", "shared_profile_user_id"),
+    "shared_org_profile": ("org_profile", "shared_profile_org_id"),
 }
 
 # Copy for an org's decision on a career entry, keyed by notification type.
@@ -547,10 +563,11 @@ class NotificationService:
         if Notification.objects.filter(dedup_key=dedup_key).exists():
             return
 
-        shared_kind = (
-            "post"
-            if message.message_type == "shared_post"
-            else "recruitment"
+        shared_kind, shared_id_attr = MESSAGE_SHARE_KINDS.get(
+            message.message_type, ("", None)
+        )
+        shared_id = (
+            getattr(message, shared_id_attr, None) if shared_id_attr else None
         )
 
         notification = Notification.objects.create(
@@ -561,16 +578,15 @@ class NotificationService:
             # notification list renders those with PostMiniSerializer, which
             # applies no visibility check — safe for likes/comments (the
             # recipient IS the author) but not here, where the recipient may
-            # not be allowed to see what was shared. The notification only says
-            # "X shared something"; the visibility-checked preview lives on the
-            # message. Ids stay in `data` for deep-linking.
+            # not be allowed to see what was shared. The same reasoning covers
+            # the two profile FKs: the notification only says "X shared
+            # something"; the visibility-checked preview lives on the message.
+            # Ids stay in `data` for deep-linking.
             data={
                 "conversation_id": str(conversation_id),
                 "message_id": str(message.id),
                 "shared_kind": shared_kind,
-                "shared_id": str(
-                    message.shared_post_id or message.shared_recruitment_id
-                ),
+                "shared_id": str(shared_id) if shared_id else "",
                 "note": message.content[:120],
             },
             **NotificationService._actor_kwargs(

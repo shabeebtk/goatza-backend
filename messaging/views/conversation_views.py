@@ -3,6 +3,7 @@ from django.db.models import Q, Exists, OuterRef, Case, When, BooleanField
 from rest_framework import status
 from core.views.base_views import BaseAPIView
 from messaging.models import Conversation, ConversationParticipant, Message
+from messaging.selectors.message_selectors import SHARED_SELECT_RELATED
 from messaging.selectors.share_selectors import ShareViewer
 from messaging.serializers.conversation_serializers import (
      ConversationListSerializer, ConversationDetailSerializer
@@ -16,6 +17,26 @@ from organization.models import Organization
 from accounts.services.user_services import UserService
 from organization.services.organization_service import OrganizationService
 
+
+# The conversation list and detail both render `last_message` through
+# MessageSerializer, so they need the same joins a page of messages needs — one
+# level deeper. Derived from MessageSelector's list rather than restated, so a
+# new shared type can never be joined in one place and missed in the other.
+LAST_MESSAGE_SELECT_RELATED = tuple(
+    f"last_message__{path}" for path in SHARED_SELECT_RELATED
+)
+
+# The many-sided reads. Not narrowed to is_primary the way MessageSelector
+# narrows them: there is exactly one last_message per conversation, so the
+# saving would be a row or two per thread and the extra Prefetch objects would
+# cost more to keep in sync than they save.
+LAST_MESSAGE_PREFETCH = (
+    "last_message__shared_post__media",
+    "last_message__shared_recruitment__media",
+    "last_message__shared_profile_user__sports__sport",
+    "last_message__shared_profile_user__positions__position",
+    "last_message__shared_profile_org__locations",
+)
 
 
 class GetOrCreateConversationAPIView(BaseAPIView):
@@ -197,16 +218,12 @@ class ConversationListAPIView(BaseAPIView):
                 .select_related(
                     "last_message",
                     # the last message may be a share — join what its preview reads
-                    "last_message__shared_post__author_user__profile",
-                    "last_message__shared_post__author_org__profile",
-                    "last_message__shared_recruitment__organization__profile",
-                    "last_message__shared_recruitment__sport",
+                    *LAST_MESSAGE_SELECT_RELATED,
                 )
                 .prefetch_related(
                     "participants__user__profile",
                     "participants__org__profile",
-                    "last_message__shared_post__media",
-                    "last_message__shared_recruitment__media",
+                    *LAST_MESSAGE_PREFETCH,
                 )
                 .order_by("-last_message_at", "-created_at")
                 .distinct()
@@ -308,15 +325,11 @@ class ConversationDetailAPIView(BaseAPIView):
                     Conversation.objects
                     .select_related(
                         "last_message",
-                        "last_message__shared_post__author_user__profile",
-                        "last_message__shared_post__author_org__profile",
-                        "last_message__shared_recruitment__organization__profile",
-                        "last_message__shared_recruitment__sport",
+                        *LAST_MESSAGE_SELECT_RELATED,
                     )
                     .prefetch_related(
                         "participants__user__profile", "participants__org__profile",
-                        "last_message__shared_post__media",
-                        "last_message__shared_recruitment__media",
+                        *LAST_MESSAGE_PREFETCH,
                     )
                     .get(id=conversation_id)
                 )

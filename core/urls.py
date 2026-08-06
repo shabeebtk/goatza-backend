@@ -19,6 +19,11 @@ from django.urls import path, include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    # The one anonymous-reachable prefix — see core/public_urls.py. Everything
+    # outside it stays behind IsAuthenticated.
+    path('public/', include('core.public_urls')),
+
     path('user/', include('accounts.urls')),
     path('sports/', include('sports.urls')),
     path('connections/', include('connections.urls')),
