@@ -1,6 +1,7 @@
 from django.db.models import Q, Exists, OuterRef
 
 from posts.models import Post, PostHashtag
+from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
 
 
 class PostSearchService:
@@ -57,4 +58,4 @@ class PostSearchService:
             "author_user__profile",
             "author_org__profile",
             "sport",
-        ).prefetch_related("media")
+        ).prefetch_related("media", POST_MENTIONS_PREFETCH)

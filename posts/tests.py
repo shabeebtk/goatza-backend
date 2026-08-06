@@ -5,12 +5,16 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import User, UserProfile
+from connections.models import Follow
+from notifications.models import Notification
 from organization.models import (
     Organization,
     OrganizationProfile,
     OrganizationMember,
 )
-from posts.models import Post, PostMedia, Like, Comment, Hashtag, PostHashtag
+from posts.models import (
+    Post, PostMedia, Like, Comment, Hashtag, PostHashtag, PostMention,
+)
 from sports.models import Sport
 
 SEARCH_URL = "/posts/search"
@@ -18,6 +22,8 @@ LIST_URL = "/posts/list"
 CREATE_URL = "/posts/create"
 UPDATE_URL = "/posts/update"
 COMMENT_DELETE_URL = "/posts/comments/delete"
+MY_MENTIONS_URL = "/posts/mentions/my"
+MENTION_SUGGEST_URL = "/posts/mention/suggest"
 
 
 class PostSearchTests(APITestCase):
@@ -965,3 +971,334 @@ class PostHashtagTests(APITestCase):
         call_command("backfill_post_hashtags", stdout=StringIO())
         self.assertEqual(PostHashtag.objects.count(), after_first)
         self.assertEqual(self._tags(legacy), ["football", "kerala"])
+
+
+# =====================================================================
+# Mentions — @handles resolved to users OR orgs, notified once, listed
+# =====================================================================
+
+class PostMentionTests(APITestCase):
+    """
+    Mentions are parsed out of the body and resolved against two SEPARATE
+    username tables (users win collisions). Rows are always created; the
+    NOTIFICATION is what visibility gates.
+    """
+
+    def setUp(self):
+        self.me = self._user("me", "Me")
+        self.client.force_authenticate(user=self.me)
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234", username=username,
+        )
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _org(self, username, name, member=None):
+        org = Organization.objects.create(
+            name=name, username=username, type=Organization.Type.CLUB
+        )
+        OrganizationProfile.objects.create(
+            organization=org, logo=f"https://cdn.example.com/{username}.png"
+        )
+        if member is not None:
+            OrganizationMember.objects.create(
+                organization=org, user=member, role=OrganizationMember.Role.OWNER
+            )
+        return org
+
+    def _org_headers(self, org):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(org.id),
+        }
+
+    def _create(self, content, visibility="public", org=None):
+        """Create a post through the API, running on_commit callbacks."""
+        headers = self._org_headers(org) if org is not None else {}
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                CREATE_URL,
+                {"content": content, "visibility": visibility},
+                format="json",
+                **headers,
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return Post.objects.get(id=resp.data["data"]["post_id"])
+
+    def _edit(self, post, content, org=None):
+        headers = self._org_headers(org) if org is not None else {}
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                UPDATE_URL,
+                {"post_id": str(post.id), "content": content},
+                format="json",
+                **headers,
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp
+
+    def _mention_targets(self, post):
+        rows = PostMention.objects.filter(post=post).select_related(
+            "mentioned_user", "mentioned_org"
+        )
+        return sorted(
+            (row.mentioned_user.username if row.mentioned_user_id
+             else row.mentioned_org.username)
+            for row in rows
+        )
+
+    def _mention_notifications(self, **recipient):
+        return Notification.objects.filter(
+            type=Notification.Type.MENTION, **recipient
+        )
+
+    # ── extraction + resolution ──────────────────────────────────
+
+    def test_create_resolves_users_and_orgs_and_ignores_unknown(self):
+        rahul = self._user("rahul10", "Rahul")
+        kochi = self._org("kochifc", "Kochi FC")
+
+        post = self._create("gg @rahul10 @KochiFC @nosuchname")
+
+        self.assertEqual(self._mention_targets(post), ["kochifc", "rahul10"])
+        self.assertEqual(PostMention.objects.filter(post=post).count(), 2)
+
+        row_user = PostMention.objects.get(post=post, mentioned_user__isnull=False)
+        row_org = PostMention.objects.get(post=post, mentioned_org__isnull=False)
+        self.assertEqual(row_user.mentioned_user_id, rahul.id)
+        self.assertEqual(row_org.mentioned_org_id, kochi.id)
+
+    def test_username_collision_resolves_to_the_user(self):
+        # The same handle exists on BOTH tables — documented policy: user wins.
+        twin_user = self._user("dreamfc", "Dream Person")
+        self._org("dreamfc", "Dream FC")
+
+        post = self._create("shoutout @dreamfc")
+
+        rows = PostMention.objects.filter(post=post)
+        self.assertEqual(rows.count(), 1)
+        self.assertEqual(rows.first().mentioned_user_id, twin_user.id)
+        self.assertIsNone(rows.first().mentioned_org_id)
+
+    def test_trailing_punctuation_is_not_part_of_the_handle(self):
+        self._org("kochifc", "Kochi FC")
+
+        post = self._create("great game @kochifc.")
+
+        self.assertEqual(self._mention_targets(post), ["kochifc"])
+
+    # ── notifications ────────────────────────────────────────────
+
+    def test_edit_notifies_only_the_newly_added_mention(self):
+        rahul = self._user("rahul10", "Rahul")
+        newguy = self._user("newguy", "New Guy")
+
+        post = self._create("first @rahul10")
+        self.assertEqual(self._mention_notifications(recipient_user=rahul).count(), 1)
+
+        self._edit(post, "first @rahul10 and @newguy")
+
+        # Rows diffed correctly...
+        self.assertEqual(self._mention_targets(post), ["newguy", "rahul10"])
+        # ...and only the new person heard about it.
+        self.assertEqual(self._mention_notifications(recipient_user=newguy).count(), 1)
+        self.assertEqual(self._mention_notifications(recipient_user=rahul).count(), 1)
+
+    def test_edit_removing_a_mention_drops_the_row(self):
+        self._user("rahul10", "Rahul")
+        self._user("newguy", "New Guy")
+
+        post = self._create("first @rahul10")
+        self._edit(post, "second @newguy")
+
+        self.assertEqual(self._mention_targets(post), ["newguy"])
+
+    def test_self_mention_creates_a_row_but_no_notification(self):
+        post = self._create("talking about @me here")
+
+        self.assertEqual(self._mention_targets(post), ["me"])
+        self.assertEqual(self._mention_notifications(recipient_user=self.me).count(), 0)
+
+    def test_followers_only_post_notifies_followers_only(self):
+        follower = self._user("follower", "Follower")
+        stranger = self._user("stranger", "Stranger")
+        Follow.objects.create(follower_user=follower, following_user=self.me)
+
+        post = self._create(
+            "private drills @follower @stranger", visibility="followers"
+        )
+
+        # Rows exist for BOTH — visibility gates the notification, not the row.
+        self.assertEqual(self._mention_targets(post), ["follower", "stranger"])
+        self.assertEqual(
+            self._mention_notifications(recipient_user=follower).count(), 1
+        )
+        self.assertEqual(
+            self._mention_notifications(recipient_user=stranger).count(), 0
+        )
+
+    def test_org_authored_post_notifies_a_mentioned_user(self):
+        org = self._org("dreamfc", "Dream FC", member=self.me)
+        rahul = self._user("rahul10", "Rahul")
+
+        post = self._create("welcome @rahul10", org=org)
+
+        self.assertEqual(post.author_org_id, org.id)
+        notification = self._mention_notifications(recipient_user=rahul).first()
+        self.assertIsNotNone(notification)
+        self.assertEqual(notification.actor_org_id, org.id)
+
+    def test_user_authored_post_notifies_a_mentioned_org(self):
+        kochi = self._org("kochifc", "Kochi FC")
+
+        post = self._create("trials at @kochifc")
+
+        notification = self._mention_notifications(recipient_org=kochi).first()
+        self.assertIsNotNone(notification)
+        self.assertEqual(notification.actor_user_id, self.me.id)
+        self.assertEqual(notification.post_id, post.id)
+
+    # ── payload ──────────────────────────────────────────────────
+
+    def test_mention_payload_builds_for_user_and_org_recipients(self):
+        from notifications.services.notification_service import (
+            build_notification_payload,
+        )
+
+        rahul = self._user("rahul10", "Rahul")
+        kochi = self._org("kochifc", "Kochi FC")
+        post = self._create("hello @rahul10 @kochifc")
+
+        for recipient in ({"recipient_user": rahul}, {"recipient_org": kochi}):
+            notification = self._mention_notifications(**recipient).first()
+            self.assertIsNotNone(notification, recipient)
+
+            payload = build_notification_payload(notification)
+            self.assertEqual(payload["type"], "mention")
+            self.assertEqual(payload["title"], "Me mentioned you in a post")
+            self.assertEqual(payload["url"], f"/post/{post.id}")
+            self.assertEqual(payload["target_id"], str(post.id))
+
+    def test_grouped_text_renders_for_mention(self):
+        from notifications.services.grouping_service import (
+            NotificationGroupingService,
+        )
+
+        rahul = self._user("rahul10", "Rahul")
+        self._create("hello @rahul10")
+
+        notifications = list(
+            self._mention_notifications(recipient_user=rahul)
+            .select_related("actor_user__profile", "post")
+        )
+        grouped = NotificationGroupingService.group_notifications(notifications)
+
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped[0]["text"], "Me mentioned you in a post")
+
+    # ── mentions/my ──────────────────────────────────────────────
+
+    def test_my_mentions_is_actor_scoped(self):
+        org = self._org("dreamfc", "Dream FC", member=self.me)
+        author = self._user("author", "Author")
+
+        # Someone mentions the USER in one post and the ORG in another.
+        self.client.force_authenticate(user=author)
+        user_post = self._create("hey @me")
+        org_post = self._create("hey @dreamfc")
+
+        self.client.force_authenticate(user=self.me)
+
+        as_user = self.client.get(MY_MENTIONS_URL)
+        self.assertEqual(as_user.status_code, status.HTTP_200_OK, as_user.data)
+        user_ids = [r["id"] for r in as_user.data["data"]["results"]]
+        self.assertEqual(user_ids, [str(user_post.id)])
+
+        as_org = self.client.get(MY_MENTIONS_URL, **self._org_headers(org))
+        self.assertEqual(as_org.status_code, status.HTTP_200_OK, as_org.data)
+        org_ids = [r["id"] for r in as_org.data["data"]["results"]]
+        self.assertEqual(org_ids, [str(org_post.id)])
+
+    def test_my_mentions_excludes_deleted_posts_and_exposes_mentions(self):
+        author = self._user("author", "Author")
+        self.client.force_authenticate(user=author)
+        live = self._create("hey @me")
+        gone = self._create("also @me")
+        gone.is_deleted = True
+        gone.save(update_fields=["is_deleted"])
+
+        self.client.force_authenticate(user=self.me)
+        resp = self.client.get(MY_MENTIONS_URL)
+
+        results = resp.data["data"]["results"]
+        self.assertEqual([r["id"] for r in results], [str(live.id)])
+        # The serializer field the client linkifies with.
+        self.assertEqual(
+            results[0]["mentions"], [{"username": "me", "type": "user"}]
+        )
+
+    # ── suggest ──────────────────────────────────────────────────
+
+    def test_suggest_returns_prefix_matches_for_both_types(self):
+        self._user("rahul10", "Rahul")
+        self._user("rahulraj", "Rahul Raj")
+        self._user("notrahul", "Not Rahul")     # contains, does not start with
+        self._org("rahulfc", "Rahul FC")
+        self._org("otherfc", "Other FC")
+
+        resp = self.client.get(MENTION_SUGGEST_URL, {"q": "rahul"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        data = resp.data["data"]
+        self.assertEqual(
+            sorted(u["username"] for u in data["users"]), ["rahul10", "rahulraj"]
+        )
+        self.assertEqual(
+            [o["username"] for o in data["organizations"]], ["rahulfc"]
+        )
+        # Org avatars come back under `logo`, the actual model field.
+        self.assertTrue(data["organizations"][0]["logo"])
+        self.assertIn("profile_photo", data["users"][0])
+
+    def test_suggest_tolerates_a_leading_at_and_empty_query(self):
+        self._user("rahul10", "Rahul")
+
+        typed = self.client.get(MENTION_SUGGEST_URL, {"q": "@rahul"})
+        self.assertEqual(
+            [u["username"] for u in typed.data["data"]["users"]], ["rahul10"]
+        )
+
+        empty = self.client.get(MENTION_SUGGEST_URL, {"q": "  "})
+        self.assertEqual(empty.status_code, status.HTTP_200_OK)
+        self.assertEqual(empty.data["data"], {"users": [], "organizations": []})
+
+    def test_suggest_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        resp = self.client.get(MENTION_SUGGEST_URL, {"q": "rahul"})
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    # ── the parser itself ────────────────────────────────────────
+
+    def test_extract_mention_usernames_folds_case_and_caps(self):
+        from posts.services.post_content_service import (
+            MAX_MENTIONS_PER_POST,
+            extract_mention_usernames,
+        )
+
+        # Case-insensitive uniqueness, original case preserved for lookup.
+        self.assertEqual(
+            extract_mention_usernames("@Rahul10 hi @rahul10"), ["Rahul10"]
+        )
+
+        many = " ".join(f"@user{i}" for i in range(30))
+        self.assertEqual(
+            len(extract_mention_usernames(many)), MAX_MENTIONS_PER_POST
+        )
+
+        # Dots are legal inside an ORG handle but never terminate one.
+        self.assertEqual(extract_mention_usernames("@kochi.fc."), ["kochi.fc"])
+        self.assertEqual(extract_mention_usernames("email me@ x"), [])

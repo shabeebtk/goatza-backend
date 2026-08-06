@@ -8,6 +8,7 @@ from django.utils.timezone import now
 from datetime import timedelta
 
 from posts.models import Post, Like
+from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
 from connections.models import Follow
 from sports.models import UserSport
 
@@ -133,7 +134,7 @@ class FeedService:
             "author_user__profile",
             "author_org__profile",   # org feed needs org profile too
             "sport"
-        ).prefetch_related("media")
+        ).prefetch_related("media", POST_MENTIONS_PREFETCH)
 
     # REACTIONS HELPER
     @staticmethod
