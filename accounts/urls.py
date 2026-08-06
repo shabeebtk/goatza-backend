@@ -5,6 +5,7 @@ from accounts.views.user_auth_views import (
     UserLoginAPIView,
     ForgotPasswordAPIView,
     ResetPasswordAPIView,
+    ChangePasswordAPIView,
     TokenRefreshAPIView,
     UserLogoutAPIView
 )
@@ -25,6 +26,7 @@ urlpatterns = [
     path('login', UserLoginAPIView.as_view()),
     path('forgot/password', ForgotPasswordAPIView.as_view()),
     path('reset/password', ResetPasswordAPIView.as_view()),
+    path('change/password', ChangePasswordAPIView.as_view()),
     path('token/refresh', TokenRefreshAPIView.as_view()),
     path('logout', UserLogoutAPIView.as_view()),
     
