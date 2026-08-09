@@ -13,6 +13,7 @@ class ApplicationSelector:
         recruitment,
         status=None,
         search=None,
+        age_category=None,
         limit=20,
         offset=0
     ):
@@ -32,6 +33,20 @@ class ApplicationSelector:
         if status and status in RecruitmentApplication.Status.values:
             queryset = queryset.filter(status=status)
 
+        # AGE GROUP FILTER — the group the applicant applied under. Only honour
+        # an id this recruitment actually owns: junk (or another recruitment's
+        # group) is ignored the same lenient way a bad status is, and never
+        # reaches the DB as a malformed UUID.
+        if age_category:
+            owned_category_ids = {
+                str(category_id)
+                for category_id in recruitment.age_categories.values_list(
+                    "id", flat=True
+                )
+            }
+            if str(age_category) in owned_category_ids:
+                queryset = queryset.filter(age_category_id=age_category)
+
         # SEARCH — applicant username or profile name (mirrors ListPostLikes).
         if search:
             queryset = queryset.filter(
@@ -43,7 +58,8 @@ class ApplicationSelector:
         total_count = queryset.count()
 
         page = queryset.select_related(
-            "applicant__profile"
+            "applicant__profile",
+            "age_category"
         ).order_by("-applied_at")[offset: offset + limit]
 
         return page, total_count
@@ -80,6 +96,7 @@ class ApplicationSelector:
             "recruitment__organization",
             "recruitment__organization__profile",
             "recruitment__sport",
+            "age_category",
         ).order_by("-applied_at")[offset: offset + limit]
 
         return page, total_count
@@ -129,6 +146,7 @@ class ApplicationSelector:
                 "applicant__profile",
                 "recruitment",
                 "recruitment__organization",
+                "age_category",
             )
             .prefetch_related(
                 Prefetch("answers", queryset=answers_qs)

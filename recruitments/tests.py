@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import IntegrityError, transaction
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework import status
@@ -24,6 +25,7 @@ from recruitments.models import (
     RecruitmentApplicationStatusHistory,
     RecruitmentQuestion,
     RecruitmentAgeCategory,
+    RecruitmentEligibilityCriteria,
 )
 from recruitments.selectors.recruitment_selectors import RecruitmentSelector
 from notifications.models import Notification
@@ -1362,3 +1364,589 @@ class RecruitmentDiscoveryTests(APITestCase):
         row = resp.data["data"]["results"][0]
         self.assertEqual(str(row["id"]), str(withdrawn.id))
         self.assertEqual(row["status"], "withdrawn")
+
+
+class RecruitmentEligibilityTests(APITestCase):
+    """Recruiter-authored eligibility: open-ended age groups, the age-category
+    diff sync (applications must survive an org edit), the group an applicant
+    applies under, and the free-text criteria lines.
+
+    Nothing here enforces eligibility — the platform only records and displays
+    what the recruiter wrote and what the applicant picked."""
+
+    def setUp(self):
+        cache.clear()  # username→profile lookups are cached
+        self.owner = User.objects.create_user(
+            email="elig_o@example.com", password="pass1234",
+            username="elig_owner",
+        )
+        self.org = Organization.objects.create(
+            name="Eagle FC", username="eaglefc", type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.player = User.objects.create_user(
+            email="elig_p@example.com", password="pass1234",
+            username="elig_player",
+        )
+        self.other_player = User.objects.create_user(
+            email="elig_p2@example.com", password="pass1234",
+            username="elig_player2",
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+
+    # ── helpers ──────────────────────────────────────────────────
+
+    def _org_headers(self):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(self.org.id),
+        }
+
+    def _payload(self, **overrides):
+        payload = {
+            "title": "Academy Trials",
+            "recruitment_type": "open_trial",
+            "sport_id": str(self.sport.id),
+            "positions": [],
+        }
+        payload.update(overrides)
+        return payload
+
+    def _create(self, **overrides):
+        self.client.force_authenticate(user=self.owner)
+        return self.client.post(
+            CREATE_URL, self._payload(**overrides),
+            format="json", **self._org_headers(),
+        )
+
+    def _create_recruitment(self, **overrides):
+        """Create via the API and return the Recruitment (asserts success)."""
+        resp = self._create(**overrides)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return Recruitment.objects.get(
+            id=resp.data["data"]["recruitment_id"]
+        )
+
+    def _update(self, recruitment, **overrides):
+        self.client.force_authenticate(user=self.owner)
+        return self.client.patch(
+            f"/recruitments/{recruitment.id}/update",
+            self._payload(**overrides),
+            format="json", **self._org_headers(),
+        )
+
+    def _detail(self, recruitment):
+        self.client.force_authenticate(user=self.owner)
+        return self.client.get(
+            f"/recruitments/{recruitment.id}/details", **self._org_headers()
+        )
+
+    def _groups(self, recruitment):
+        return list(recruitment.age_categories.order_by("display_order"))
+
+    def _group_payload(self, category, **overrides):
+        """Round-trip an existing group back as the client would on edit —
+        carrying its id so the diff sync updates it in place."""
+        data = {
+            "id": str(category.id),
+            "title": category.title,
+            "min_birth_year": category.min_birth_year,
+            "max_birth_year": category.max_birth_year,
+            "display_order": category.display_order,
+        }
+        if category.reporting_time:
+            data["reporting_time"] = category.reporting_time.isoformat()
+        data.update(overrides)
+        return data
+
+    def _apply(self, recruitment, user=None, **extra):
+        payload = {
+            "shared_name": "Player One",
+            "shared_phone": "+919876543210",
+        }
+        payload.update(extra)
+        self.client.force_authenticate(user=user or self.player)
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(
+                f"/recruitments/{recruitment.id}/apply",
+                payload, format="json",
+            )
+
+    # ── AGE GROUP VALIDATION ─────────────────────────────────────
+
+    def test_create_rejects_age_group_with_no_years(self):
+        # Both bounds empty is not "all ages" — all ages is an EMPTY list.
+        resp = self._create(
+            age_categories=[{"title": "Anyone"}]
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("minimum or a maximum", resp.data["message"])
+        self.assertFalse(RecruitmentAgeCategory.objects.exists())
+
+    def test_create_accepts_min_only_age_group(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U17", "min_birth_year": 2010}
+            ]
+        )
+
+        group = recruitment.age_categories.get()
+        self.assertEqual(group.min_birth_year, 2010)
+        self.assertIsNone(group.max_birth_year)
+
+    def test_create_accepts_max_only_age_group(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "Veterans 35+", "max_birth_year": 1991}
+            ]
+        )
+
+        group = recruitment.age_categories.get()
+        self.assertIsNone(group.min_birth_year)
+        self.assertEqual(group.max_birth_year, 1991)
+
+    def test_create_rejects_inverted_birth_year_range(self):
+        resp = self._create(
+            age_categories=[
+                {
+                    "title": "Backwards",
+                    "min_birth_year": 2012,
+                    "max_birth_year": 2010,
+                }
+            ]
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid birth year range", resp.data["message"])
+
+    def test_create_rejects_birth_year_below_1950(self):
+        resp = self._create(
+            age_categories=[
+                {"title": "Ancient", "max_birth_year": 1949}
+            ]
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("1950", resp.data["message"])
+
+    def test_db_constraint_rejects_age_group_with_no_years(self):
+        # The serializer is not the only gate — bulk_create skips model
+        # validation, so the constraint has to hold at the DB level too.
+        recruitment = self._create_recruitment()
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                RecruitmentAgeCategory.objects.create(
+                    recruitment=recruitment, title="Broken",
+                )
+
+    def test_detail_exposes_open_ended_age_groups(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {
+                    "title": "U15",
+                    "min_birth_year": 2011,
+                    "max_birth_year": 2012,
+                    "display_order": 0,
+                },
+                {"title": "U17", "min_birth_year": 2010, "display_order": 1},
+            ]
+        )
+
+        resp = self._detail(recruitment)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        groups = resp.data["data"]["age_categories"]
+        self.assertEqual([g["title"] for g in groups], ["U15", "U17"])
+        self.assertEqual(groups[1]["min_birth_year"], 2010)
+        self.assertIsNone(groups[1]["max_birth_year"])
+
+    # ── AGE GROUP DIFF SYNC ──────────────────────────────────────
+
+    def test_update_with_same_ids_preserves_rows_and_applications(self):
+        # THE regression this whole diff sync exists for: an org renaming a
+        # group must not wipe the group every applicant applied under.
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {
+                    "title": "U15",
+                    "min_birth_year": 2011,
+                    "max_birth_year": 2012,
+                    "display_order": 0,
+                },
+                {"title": "U17", "min_birth_year": 2010, "display_order": 1},
+            ]
+        )
+        u15, u17 = self._groups(recruitment)
+
+        apply_resp = self._apply(recruitment, age_category=str(u17.id))
+        self.assertEqual(apply_resp.status_code, status.HTTP_200_OK)
+        application = RecruitmentApplication.objects.get(
+            id=apply_resp.data["data"]["application_id"]
+        )
+        self.assertEqual(application.age_category_id, u17.id)
+
+        resp = self._update(
+            recruitment,
+            age_categories=[
+                self._group_payload(u15),
+                self._group_payload(u17, title="U17 Boys"),
+            ],
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        # Same rows, updated in place — not recreated.
+        self.assertEqual(
+            {g.id for g in self._groups(recruitment)}, {u15.id, u17.id}
+        )
+        u17.refresh_from_db()
+        self.assertEqual(u17.title, "U17 Boys")
+        # ...and the applicant is still in their group.
+        application.refresh_from_db()
+        self.assertEqual(application.age_category_id, u17.id)
+
+    def test_update_deletes_dropped_group_and_nulls_its_applications(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U15", "min_birth_year": 2011, "display_order": 0},
+                {"title": "U17", "min_birth_year": 2010, "display_order": 1},
+            ]
+        )
+        u15, u17 = self._groups(recruitment)
+        apply_resp = self._apply(recruitment, age_category=str(u15.id))
+        application = RecruitmentApplication.objects.get(
+            id=apply_resp.data["data"]["application_id"]
+        )
+
+        # U15 dropped from the payload → deleted; U17 kept.
+        resp = self._update(
+            recruitment, age_categories=[self._group_payload(u17)]
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual([g.id for g in self._groups(recruitment)], [u17.id])
+        self.assertFalse(
+            RecruitmentAgeCategory.objects.filter(id=u15.id).exists()
+        )
+        # SET_NULL, not a cascade — the application survives without a group.
+        application.refresh_from_db()
+        self.assertIsNone(application.age_category_id)
+
+    def test_update_adds_new_group_alongside_existing_ones(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U15", "min_birth_year": 2011, "display_order": 0}
+            ]
+        )
+        u15 = self._groups(recruitment)[0]
+
+        resp = self._update(
+            recruitment,
+            age_categories=[
+                self._group_payload(u15),
+                {
+                    "title": "Veterans 35+",
+                    "max_birth_year": 1991,
+                    "display_order": 1,
+                },
+            ],
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        groups = self._groups(recruitment)
+        self.assertEqual([g.title for g in groups], ["U15", "Veterans 35+"])
+        self.assertEqual(groups[0].id, u15.id)  # untouched
+        self.assertIsNone(groups[1].min_birth_year)
+
+    def test_update_rejects_age_group_id_from_another_recruitment(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U15", "min_birth_year": 2011, "display_order": 0}
+            ]
+        )
+        other = self._create_recruitment(
+            title="Other Trials",
+            age_categories=[
+                {"title": "Foreign", "min_birth_year": 2000, "display_order": 0}
+            ],
+        )
+        foreign_group = self._groups(other)[0]
+
+        resp = self._update(
+            recruitment,
+            age_categories=[
+                self._group_payload(foreign_group, title="Stolen")
+            ],
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid age category id", resp.data["message"])
+        # Nothing moved: the foreign group still belongs to the other
+        # recruitment, under its original name.
+        foreign_group.refresh_from_db()
+        self.assertEqual(foreign_group.recruitment_id, other.id)
+        self.assertEqual(foreign_group.title, "Foreign")
+        self.assertEqual(
+            [g.title for g in self._groups(recruitment)], ["U15"]
+        )
+
+    def test_update_all_ages_clears_every_group(self):
+        # "Open to all ages" is submitted as an empty list, not a flag.
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U15", "min_birth_year": 2011, "display_order": 0}
+            ]
+        )
+
+        resp = self._update(recruitment, age_categories=[])
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._groups(recruitment), [])
+
+    # ── APPLYING UNDER A GROUP ───────────────────────────────────
+
+    def test_apply_with_group_stores_and_surfaces_it(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {
+                    "title": "U17",
+                    "min_birth_year": 2010,
+                    "reporting_time": "09:00:00",
+                    "display_order": 0,
+                }
+            ]
+        )
+        group = self._groups(recruitment)[0]
+
+        resp = self._apply(recruitment, age_category=str(group.id))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        application = RecruitmentApplication.objects.get(
+            id=resp.data["data"]["application_id"]
+        )
+        self.assertEqual(application.age_category_id, group.id)
+
+        # the player sees their own group + its reporting time on the detail
+        self.client.force_authenticate(user=self.player)
+        detail = self.client.get(f"/recruitments/{recruitment.id}/details")
+        mine = detail.data["data"]["my_application"]
+        self.assertEqual(mine["age_category"]["title"], "U17")
+        self.assertEqual(mine["age_category"]["reporting_time"], "09:00:00")
+
+        # and so does the org, on its applicants list
+        self.client.force_authenticate(user=self.owner)
+        listing = self.client.get(
+            f"/recruitments/{recruitment.id}/applications",
+            **self._org_headers(),
+        )
+        row = listing.data["data"]["results"][0]
+        self.assertEqual(row["age_category"]["title"], "U17")
+
+    def test_apply_rejects_group_from_another_recruitment(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U17", "min_birth_year": 2010, "display_order": 0}
+            ]
+        )
+        other = self._create_recruitment(
+            title="Other Trials",
+            age_categories=[
+                {"title": "U19", "min_birth_year": 2008, "display_order": 0}
+            ],
+        )
+        foreign_group = self._groups(other)[0]
+
+        resp = self._apply(recruitment, age_category=str(foreign_group.id))
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid age group", resp.data["message"])
+        self.assertFalse(
+            RecruitmentApplication.objects.filter(
+                recruitment=recruitment
+            ).exists()
+        )
+
+    def test_apply_without_group_still_works(self):
+        # Optional at the API level — older clients and all-ages recruitments.
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U17", "min_birth_year": 2010, "display_order": 0}
+            ]
+        )
+
+        resp = self._apply(recruitment)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        application = RecruitmentApplication.objects.get(
+            id=resp.data["data"]["application_id"]
+        )
+        self.assertIsNone(application.age_category_id)
+
+    def test_reapply_updates_the_chosen_group(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U15", "min_birth_year": 2011, "display_order": 0},
+                {"title": "U17", "min_birth_year": 2010, "display_order": 1},
+            ]
+        )
+        u15, u17 = self._groups(recruitment)
+
+        first = self._apply(recruitment, age_category=str(u15.id))
+        application_id = first.data["data"]["application_id"]
+
+        self.client.force_authenticate(user=self.player)
+        self.client.post(
+            f"/recruitments/applications/{application_id}/withdraw"
+        )
+
+        second = self._apply(recruitment, age_category=str(u17.id))
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        # same revived row, new group
+        self.assertEqual(
+            second.data["data"]["application_id"], application_id
+        )
+        application = RecruitmentApplication.objects.get(id=application_id)
+        self.assertEqual(application.age_category_id, u17.id)
+
+    def test_org_applicants_list_filters_by_group(self):
+        recruitment = self._create_recruitment(
+            age_categories=[
+                {"title": "U15", "min_birth_year": 2011, "display_order": 0},
+                {"title": "U17", "min_birth_year": 2010, "display_order": 1},
+            ]
+        )
+        u15, u17 = self._groups(recruitment)
+        in_u15 = RecruitmentApplication.objects.create(
+            recruitment=recruitment, applicant=self.player,
+            shared_name="A", shared_phone="+919876543210", age_category=u15,
+        )
+        in_u17 = RecruitmentApplication.objects.create(
+            recruitment=recruitment, applicant=self.other_player,
+            shared_name="B", shared_phone="+919876543211", age_category=u17,
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        url = f"/recruitments/{recruitment.id}/applications"
+
+        resp = self.client.get(
+            url, {"age_category": str(u17.id)}, **self._org_headers()
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [str(r["id"]) for r in resp.data["data"]["results"]],
+            [str(in_u17.id)],
+        )
+
+        # junk → filter ignored (lenient), never a 500
+        resp = self.client.get(
+            url, {"age_category": "not-a-uuid"}, **self._org_headers()
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            {str(r["id"]) for r in resp.data["data"]["results"]},
+            {str(in_u15.id), str(in_u17.id)},
+        )
+
+    # ── DISCOVERY: birth_year vs open-ended groups ───────────────
+
+    def test_list_birth_year_matches_open_ended_groups(self):
+        min_only = self._create_recruitment(
+            title="U17 Trials",
+            age_categories=[
+                {"title": "U17", "min_birth_year": 2010, "display_order": 0}
+            ],
+        )
+        max_only = self._create_recruitment(
+            title="Veterans Trials",
+            age_categories=[
+                {
+                    "title": "Veterans 35+",
+                    "max_birth_year": 1991,
+                    "display_order": 0,
+                }
+            ],
+        )
+
+        self.client.force_authenticate(user=self.player)
+
+        def ids(birth_year):
+            resp = self.client.get("/recruitments/list", {"birth_year": birth_year})
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            return {str(r["id"]) for r in resp.data["data"]["results"]}
+
+        # "born 2010 or later" — a null max must not exclude a later year.
+        self.assertEqual(ids(2012), {str(min_only.id)})
+        # "born 1991 or earlier" — likewise for a null min.
+        self.assertEqual(ids(1980), {str(max_only.id)})
+        # a year outside both still matches neither.
+        self.assertEqual(ids(2000), set())
+
+    # ── ELIGIBILITY CRITERIA ─────────────────────────────────────
+
+    def test_eligibility_criteria_create_update_round_trip(self):
+        recruitment = self._create_recruitment(
+            eligibility_criteria=[
+                {"title": "Kerala residents only", "display_order": 0},
+                {
+                    "title": "District-level experience required",
+                    "display_order": 1,
+                },
+            ]
+        )
+
+        resp = self._detail(recruitment)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [c["title"] for c in resp.data["data"]["eligibility_criteria"]],
+            ["Kerala residents only", "District-level experience required"],
+        )
+
+        # replace-on-update: the old lines go, the new ones keep their order
+        update = self._update(
+            recruitment,
+            eligibility_criteria=[
+                {"title": "Own boots required", "display_order": 0},
+                {"title": "Aadhaar card at the venue", "display_order": 1},
+            ],
+        )
+        self.assertEqual(update.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            list(
+                recruitment.eligibility_criteria
+                .order_by("display_order")
+                .values_list("title", flat=True)
+            ),
+            ["Own boots required", "Aadhaar card at the venue"],
+        )
+        self.assertEqual(
+            RecruitmentEligibilityCriteria.objects.filter(
+                recruitment=recruitment
+            ).count(),
+            2,
+        )
+
+    def test_update_clears_eligibility_criteria_when_omitted(self):
+        recruitment = self._create_recruitment(
+            eligibility_criteria=[{"title": "Kerala residents only"}]
+        )
+
+        resp = self._update(recruitment)  # payload carries no criteria
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(recruitment.eligibility_criteria.count(), 0)
+
+    def test_all_ages_recruitment_has_no_groups_or_criteria(self):
+        # The all-ages path end to end: no groups, no criteria, and the detail
+        # payload says so with empty lists rather than anything special.
+        recruitment = self._create_recruitment()
+
+        resp = self._detail(recruitment)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["data"]["age_categories"], [])
+        self.assertEqual(resp.data["data"]["eligibility_criteria"], [])

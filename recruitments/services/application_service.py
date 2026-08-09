@@ -120,12 +120,18 @@ class ApplicationService:
                 "You have already applied to this recruitment."
             )
 
+        # The age group the applicant chose, already validated as belonging to
+        # this recruitment by the serializer. Never checked against their
+        # birthdate — verification happens at the venue.
+        age_category_id = validated_data.get("age_category")
+
         if existing:
             # REAPPLY — revive the withdrawn row (keep notes + history audit).
             application = existing
             application.shared_name = validated_data["shared_name"]
             application.shared_email = validated_data.get("shared_email", "")
             application.shared_phone = validated_data["shared_phone"]
+            application.age_category_id = age_category_id
             application.status = RecruitmentApplication.Status.APPLIED
             application.reviewed_by = None
             application.reviewed_at = None
@@ -134,7 +140,8 @@ class ApplicationService:
             application.applied_at = timezone.now()
             application.save(update_fields=[
                 "shared_name", "shared_email", "shared_phone",
-                "status", "reviewed_by", "reviewed_at", "applied_at",
+                "age_category", "status", "reviewed_by", "reviewed_at",
+                "applied_at",
             ])
             # Replace the old answers wholesale.
             application.answers.all().delete()
@@ -150,6 +157,7 @@ class ApplicationService:
                     shared_name=validated_data["shared_name"],
                     shared_email=validated_data.get("shared_email", ""),
                     shared_phone=validated_data["shared_phone"],
+                    age_category_id=age_category_id,
                 )
             except IntegrityError:
                 raise ValidationError(
