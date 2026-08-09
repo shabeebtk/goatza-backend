@@ -148,13 +148,19 @@ class RecruitmentSelector:
             )
 
         # BIRTH YEAR — keep recruitments with at least one age category whose
-        # [min_birth_year, max_birth_year] range contains the year. The related
-        # join can duplicate a recruitment across matching categories, so
-        # .distinct() collapses it back to one row.
+        # range contains the year. Either bound may be null (open-ended: "born
+        # 2010 or later"), and a null bound never excludes — so it is only the
+        # bounds that ARE set that have to contain the year. Both conditions sit
+        # in one .filter() call so they must hold for the SAME category row, not
+        # one each across two of them. The related join can duplicate a
+        # recruitment across matching categories, so .distinct() collapses it
+        # back to one row.
         if birth_year is not None:
             queryset = queryset.filter(
-                age_categories__min_birth_year__lte=birth_year,
-                age_categories__max_birth_year__gte=birth_year,
+                Q(age_categories__min_birth_year__isnull=True)
+                | Q(age_categories__min_birth_year__lte=birth_year),
+                Q(age_categories__max_birth_year__isnull=True)
+                | Q(age_categories__max_birth_year__gte=birth_year),
             ).distinct()
 
         # COUNT
@@ -188,13 +194,13 @@ class RecruitmentSelector:
         ApplicationService.apply, so a closed or private recruitment still
         resolves here and the service can return a precise error instead of a
         bare 404. Questions + options are prefetched for the apply serializer's
-        answer validation.
+        answer validation, age categories for its age-group validation.
         """
         return (
             Recruitment.objects
             .filter(id=recruitment_id, is_deleted=False)
             .select_related("organization")
-            .prefetch_related("questions__options")
+            .prefetch_related("questions__options", "age_categories")
             .first()
         )
 
@@ -221,6 +227,7 @@ class RecruitmentSelector:
             "contacts",
             "benefits",
             "requirements",
+            "eligibility_criteria",
         )
 
         recruitment = queryset.first()

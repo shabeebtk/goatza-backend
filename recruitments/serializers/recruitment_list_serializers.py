@@ -1,9 +1,10 @@
 # recruitments/serializers/recruitment_list_serializers.py
 from rest_framework import serializers
 from recruitments.models import (
-    Recruitment, RecruitmentMedia, RecruitmentQuestion, 
+    Recruitment, RecruitmentMedia, RecruitmentQuestion,
     RecruitmentQuestionOption, RecruitmentApplication, RecruitmentPosition,
-    RecruitmentAgeCategory, RecruitmentContact, RecruitmentBenefit, RecruitmentRequirement
+    RecruitmentAgeCategory, RecruitmentContact, RecruitmentBenefit, RecruitmentRequirement,
+    RecruitmentEligibilityCriteria
 )
 from organization.serializers.organization_serializers import OrganizationMiniSerializer
 from sports.serializers.sports_serializers import SportSerializer, SportPositionSerializer
@@ -34,6 +35,20 @@ class RecruitmentAgeCategorySerializer(serializers.ModelSerializer):
         ]
 
     
+# The age group ON AN APPLICATION — the slice both sides need: which group the
+# applicant chose, and when that group reports. The birth-year range belongs to
+# the recruitment's own age_categories list, not to the application row.
+class ApplicationAgeCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecruitmentAgeCategory
+
+        fields = [
+            "id",
+            "title",
+            "reporting_time",
+        ]
+
+
 class RecruitmentContactSerializer(serializers.ModelSerializer):
     class Meta:
         model = RecruitmentContact
@@ -67,11 +82,23 @@ class RecruitmentRequirementSerializer(serializers.ModelSerializer):
         ]
 
 
+class RecruitmentEligibilityCriteriaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecruitmentEligibilityCriteria
+        fields = [
+            "id",
+            "title",
+        ]
+
+
 class RecruitmentListSerializer(serializers.ModelSerializer):
     organization = OrganizationMiniSerializer(read_only=True)
     sport = SportSerializer(read_only=True)
     positions = RecruitmentPositionMiniSerializer(many=True, read_only=True)
     cover_media = serializers.SerializerMethodField()
+    # The list selector already prefetches age_categories, so the card's age
+    # chip costs no extra query. An empty list means "open to all ages".
+    age_categories = RecruitmentAgeCategorySerializer(many=True, read_only=True)
 
     class Meta:
 
@@ -92,6 +119,7 @@ class RecruitmentListSerializer(serializers.ModelSerializer):
             "sport",
             "positions",
             "cover_media",
+            "age_categories",
         ]
 
     def get_cover_media(self, obj):
@@ -168,6 +196,7 @@ class RecruitmentQuestionSerializer(
 
 # PLAYER APPLICATION
 class MyApplicationSerializer(serializers.ModelSerializer):
+    age_category = ApplicationAgeCategorySerializer(read_only=True)
 
     class Meta:
         model = RecruitmentApplication
@@ -177,6 +206,7 @@ class MyApplicationSerializer(serializers.ModelSerializer):
             "status",
             "applied_at",
             "updated_at",
+            "age_category",
         ]
 
 
@@ -194,6 +224,9 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
     contacts = RecruitmentContactSerializer(many=True, read_only=True)
     benefits = RecruitmentBenefitSerializer(many=True, read_only=True)
     requirements = RecruitmentRequirementSerializer(many=True, read_only=True)
+    eligibility_criteria = RecruitmentEligibilityCriteriaSerializer(
+        many=True, read_only=True
+    )
 
     class Meta:
         model = Recruitment
@@ -242,6 +275,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
             "contacts",
             "benefits",
             "requirements",
+            "eligibility_criteria",
 
             "my_application",
             "can_apply",
@@ -259,7 +293,9 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
         if not actor or not actor.is_user:
             return None
 
-        application = obj.applications.filter(
+        application = obj.applications.select_related(
+            "age_category"
+        ).filter(
             applicant=actor.user
         ).first()
 

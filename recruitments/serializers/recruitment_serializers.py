@@ -25,28 +25,59 @@ class RecruitmentQuestionOptionInputSerializer(serializers.Serializer):
 
 
 # AGE CATEGORY INPUT
+# `id` is optional and only meaningful on update — the service diff-syncs on
+# it so an edit updates a group in place instead of recreating it (which would
+# drop the group every applicant applied under).
+# Both birth years are optional: leaving one out makes the group open-ended
+# ("born 2010 or later"). A group with NEITHER is meaningless — "open to all
+# ages" is expressed by sending an empty age_categories list.
 class RecruitmentAgeCategoryInputSerializer(
     serializers.Serializer
 ):
 
+    id = serializers.UUIDField(required=False)
     title = serializers.CharField(max_length=50)
-    min_birth_year = serializers.IntegerField(min_value=1950)
-    max_birth_year = serializers.IntegerField(min_value=1950)
-    reporting_time = serializers.TimeField(required=False)
+    min_birth_year = serializers.IntegerField(
+        min_value=1950,
+        required=False,
+        allow_null=True
+    )
+    max_birth_year = serializers.IntegerField(
+        min_value=1950,
+        required=False,
+        allow_null=True
+    )
+    reporting_time = serializers.TimeField(
+        required=False,
+        allow_null=True
+    )
     display_order = serializers.IntegerField(default=0)
 
     def validate(self, attrs):
 
+        min_birth_year = attrs.get("min_birth_year")
+        max_birth_year = attrs.get("max_birth_year")
+
+        # mirrors the age_category_birth_year_required DB constraint
         if (
-            attrs["min_birth_year"]
-            > attrs["max_birth_year"]
+            min_birth_year is None
+            and max_birth_year is None
+        ):
+            raise serializers.ValidationError(
+                "Enter a minimum or a maximum birth year."
+            )
+
+        if (
+            min_birth_year is not None
+            and max_birth_year is not None
+            and min_birth_year > max_birth_year
         ):
             raise serializers.ValidationError(
                 "Invalid birth year range."
             )
 
         return attrs
-    
+
 
 # CONTACT INPUT
 class RecruitmentContactInputSerializer(serializers.Serializer):
@@ -159,6 +190,15 @@ class RecruitmentRequirementInputSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
     is_mandatory = serializers.BooleanField(default=True)
     display_order = serializers.IntegerField(default=0)
+
+
+# ELIGIBILITY CRITERIA INPUT
+# Free-text "who can attend" lines authored by the org. Displayed only — the
+# platform never checks an applicant against them.
+class RecruitmentEligibilityCriteriaInputSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255)
+    display_order = serializers.IntegerField(default=0)
+
 
 # LOCATION INPUT
 class RecruitmentLocationInputSerializer(serializers.Serializer):
@@ -297,6 +337,12 @@ class RecruitmentCreateSerializer(serializers.Serializer):
     )
     requirements = (
         RecruitmentRequirementInputSerializer(
+            many=True,
+            required=False
+        )
+    )
+    eligibility_criteria = (
+        RecruitmentEligibilityCriteriaInputSerializer(
             many=True,
             required=False
         )

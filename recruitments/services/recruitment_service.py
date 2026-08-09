@@ -11,7 +11,8 @@ from recruitments.models import (
     RecruitmentAgeCategory,
     RecruitmentRequirement,
     RecruitmentBenefit,
-    RecruitmentContact
+    RecruitmentContact,
+    RecruitmentEligibilityCriteria
 )
 from sports.models import Sport
 from services.storage.factory import get_storage_service
@@ -62,6 +63,9 @@ class RecruitmentService:
         contacts_data = validated_data.pop("contacts", [])
         benefits_data = validated_data.pop("benefits", [])
         requirements_data = validated_data.pop("requirements", [])
+        eligibility_criteria_data = validated_data.pop(
+            "eligibility_criteria", []
+        )
 
         location_data = validated_data.pop("location", None)
 
@@ -135,6 +139,9 @@ class RecruitmentService:
         RecruitmentService._sync_requirements(
             recruitment, requirements_data
         )
+        RecruitmentService._sync_eligibility_criteria(
+            recruitment, eligibility_criteria_data
+        )
 
         return recruitment
 
@@ -150,6 +157,9 @@ class RecruitmentService:
         contacts_data = validated_data.pop("contacts", [])
         benefits_data = validated_data.pop("benefits", [])
         requirements_data = validated_data.pop("requirements", [])
+        eligibility_criteria_data = validated_data.pop(
+            "eligibility_criteria", []
+        )
 
         location_data = validated_data.pop("location", None)
 
@@ -230,6 +240,9 @@ class RecruitmentService:
         RecruitmentService._sync_benefits(recruitment, benefits_data)
         RecruitmentService._sync_requirements(
             recruitment, requirements_data
+        )
+        RecruitmentService._sync_eligibility_criteria(
+            recruitment, eligibility_criteria_data
         )
 
         return recruitment
@@ -358,6 +371,8 @@ class RecruitmentService:
     # no-op (no rows yet); on update it gives clean replace-on-update.
     # Shared by both create_recruitment and update_recruitment so the
     # child-building logic can never drift between the two paths.
+    # EXCEPTION: _sync_age_categories diff-syncs instead, because applications
+    # reference those rows — see its docstring.
     # -----------------------------------------------------------------
 
     @staticmethod
@@ -475,33 +490,94 @@ class RecruitmentService:
 
     @staticmethod
     def _sync_age_categories(recruitment, age_categories_data):
-        recruitment.age_categories.all().delete()
+        """
+        DIFF sync, not the delete-and-recreate the sibling helpers use.
 
-        age_category_objs = [
-            RecruitmentAgeCategory(
-                recruitment=recruitment,
-                title=age["title"],
-                min_birth_year=age[
-                    "min_birth_year"
-                ],
-                max_birth_year=age[
-                    "max_birth_year"
-                ],
-                reporting_time=age.get(
-                    "reporting_time"
-                ),
-                display_order=age.get(
-                    "display_order",
-                    idx
+        Applications point at these rows (RecruitmentApplication.age_category),
+        so recreating them on every edit would SET_NULL the group every
+        applicant applied under — silent data loss on a rename. Instead:
+        payload rows carrying an `id` are updated in place, rows without one
+        are created, and rows the payload dropped are deleted (their
+        applications correctly fall back to no group — it no longer exists).
+
+        An `id` the recruitment does not own is rejected rather than adopted,
+        so an edit can never steal another recruitment's group.
+        """
+        existing = {
+            str(category.id): category
+            for category in recruitment.age_categories.all()
+        }
+
+        seen_ids = set()
+        to_create = []
+        to_update = []
+
+        for idx, age in enumerate(age_categories_data):
+            raw_id = age.get("id")
+            display_order = age.get("display_order", idx)
+
+            if raw_id is None:
+                to_create.append(
+                    RecruitmentAgeCategory(
+                        recruitment=recruitment,
+                        title=age["title"],
+                        min_birth_year=age.get(
+                            "min_birth_year"
+                        ),
+                        max_birth_year=age.get(
+                            "max_birth_year"
+                        ),
+                        reporting_time=age.get(
+                            "reporting_time"
+                        ),
+                        display_order=display_order
+                    )
                 )
-            )
-            for idx, age
-            in enumerate(age_categories_data)
-        ]
+                continue
 
-        if age_category_objs:
+            category_id = str(raw_id)
+
+            if category_id in seen_ids:
+                raise ValidationError(
+                    f"Duplicate age category id: {category_id}"
+                )
+
+            category = existing.get(category_id)
+            if category is None:
+                raise ValidationError(
+                    f"Invalid age category id: {category_id}"
+                )
+
+            seen_ids.add(category_id)
+
+            category.title = age["title"]
+            category.min_birth_year = age.get("min_birth_year")
+            category.max_birth_year = age.get("max_birth_year")
+            category.reporting_time = age.get("reporting_time")
+            category.display_order = display_order
+            to_update.append(category)
+
+        removed_ids = set(existing) - seen_ids
+        if removed_ids:
+            recruitment.age_categories.filter(
+                id__in=removed_ids
+            ).delete()
+
+        if to_update:
+            RecruitmentAgeCategory.objects.bulk_update(
+                to_update,
+                [
+                    "title",
+                    "min_birth_year",
+                    "max_birth_year",
+                    "reporting_time",
+                    "display_order",
+                ]
+            )
+
+        if to_create:
             RecruitmentAgeCategory.objects.bulk_create(
-                age_category_objs
+                to_create
             )
 
     @staticmethod
@@ -576,6 +652,32 @@ class RecruitmentService:
             RecruitmentRequirement.objects.bulk_create(
                 requirement_objs
             )
-    
+
+    @staticmethod
+    def _sync_eligibility_criteria(
+        recruitment, eligibility_criteria_data
+    ):
+        # Plain replace-on-update: unlike age categories, nothing references
+        # these rows, so recreating them costs nothing.
+        recruitment.eligibility_criteria.all().delete()
+
+        criteria_objs = [
+            RecruitmentEligibilityCriteria(
+                recruitment=recruitment,
+                title=criteria["title"],
+                display_order=criteria.get(
+                    "display_order",
+                    idx
+                )
+            )
+            for idx, criteria
+            in enumerate(eligibility_criteria_data)
+        ]
+
+        if criteria_objs:
+            RecruitmentEligibilityCriteria.objects.bulk_create(
+                criteria_objs
+            )
+
 
 

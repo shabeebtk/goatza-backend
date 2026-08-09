@@ -258,14 +258,26 @@ class Recruitment(BaseUUIDModel):
 
 
 class RecruitmentAgeCategory(BaseUUIDModel):
+    """
+    One age group a recruitment is open to, expressed in birth YEARS (the way
+    trials are actually posted), never dates.
+
+    Either bound may be null, which makes the group open-ended:
+      min=2011, max=2012 → born 2011-2012 (inclusive range)
+      min=2010, max=None → born 2010 or later ("U17")
+      min=None, max=1991 → born 1991 or earlier ("Veterans 35+")
+    Both null is meaningless — "open to all ages" is expressed by the
+    recruitment having NO age categories at all — so the DB rejects it.
+    """
+
     recruitment = models.ForeignKey(
         Recruitment,
         on_delete=models.CASCADE,
         related_name="age_categories"
     )
     title = models.CharField(max_length=50)
-    min_birth_year = models.PositiveIntegerField()
-    max_birth_year = models.PositiveIntegerField()
+    min_birth_year = models.PositiveIntegerField(null=True, blank=True)
+    max_birth_year = models.PositiveIntegerField(null=True, blank=True)
     reporting_time = models.TimeField(null=True, blank=True)
     display_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -279,6 +291,19 @@ class RecruitmentAgeCategory(BaseUUIDModel):
         indexes = [
             models.Index(fields=["recruitment"]),
         ]
+
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(min_birth_year__isnull=False) |
+                    Q(max_birth_year__isnull=False)
+                ),
+                name="age_category_birth_year_required"
+            )
+        ]
+
+    def __str__(self):
+        return self.title
 
 
 class RecruitmentContact(BaseUUIDModel):
@@ -412,6 +437,33 @@ class RecruitmentRequirement(BaseUUIDModel):
         return self.title
 
 
+class RecruitmentEligibilityCriteria(BaseUUIDModel):
+    """
+    A free-text line the recruiter wrote about who may attend ("Kerala
+    residents only", "District-level experience required"). Displayed only —
+    nothing is ever checked against an applicant's profile.
+    """
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="eligibility_criteria"
+    )
+    title = models.CharField(max_length=255)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_eligibility_criteria"
+        ordering = ["display_order"]
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+
 
 class RecruitmentMedia(BaseUUIDModel):
     class MediaType(models.TextChoices):
@@ -486,6 +538,18 @@ class RecruitmentApplication(BaseUUIDModel):
 
     applied_position = models.ForeignKey(
         SportPosition,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="applications"
+    )
+
+    # The age group the applicant chose to apply under. Never verified against
+    # their profile — it is what the org filters its pipeline by, and what the
+    # player is shown a reporting time for. SET_NULL so deleting a group on an
+    # edit degrades to "no group" instead of deleting the application.
+    age_category = models.ForeignKey(
+        RecruitmentAgeCategory,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,

@@ -11,6 +11,9 @@ from sports.serializers.sports_serializers import SportSerializer
 # Reuse the exact same E.164-ish phone pattern the recruitment contact
 # validation already uses, so the two can never drift.
 from recruitments.serializers.recruitment_serializers import PHONE_RE
+from recruitments.serializers.recruitment_list_serializers import (
+    ApplicationAgeCategorySerializer,
+)
 
 
 # Field types that are answered by picking option(s) rather than free text.
@@ -54,6 +57,14 @@ class RecruitmentApplySerializer(serializers.Serializer):
     )
     shared_phone = serializers.CharField(max_length=15)
 
+    # The age group the applicant is applying under. Optional at the API level
+    # (older clients, and eligibility is never enforced by the platform) — the
+    # client requires a choice in the UI when the recruitment has groups.
+    age_category = serializers.UUIDField(
+        required=False,
+        allow_null=True
+    )
+
     answers = ApplicationAnswerInputSerializer(
         many=True,
         required=False,
@@ -82,6 +93,21 @@ class RecruitmentApplySerializer(serializers.Serializer):
     def validate(self, attrs):
         recruitment = self.context["recruitment"]
         answers = attrs.get("answers", [])
+
+        # AGE CATEGORY — same belongs-to-THIS-recruitment rule the answers get
+        # below. A group id from another recruitment is rejected outright; it is
+        # never silently dropped, or the org would filter on a group the player
+        # never picked. (Age categories are prefetched by the apply selector.)
+        age_category_id = attrs.get("age_category")
+        if age_category_id is not None:
+            valid_category_ids = {
+                str(category.id)
+                for category in recruitment.age_categories.all()
+            }
+            if str(age_category_id) not in valid_category_ids:
+                raise serializers.ValidationError(
+                    "Invalid age group for this recruitment."
+                )
 
         # Questions (with options) are prefetched on the recruitment by the
         # selector, so these .all() calls hit the cache — no extra queries.
@@ -254,6 +280,9 @@ class ApplicantMiniSerializer(serializers.ModelSerializer):
 class ApplicantListItemSerializer(serializers.ModelSerializer):
     applicant = ApplicantMiniSerializer(read_only=True)
     highlights_count = serializers.SerializerMethodField()
+    # null when the recruitment had no age groups, or the applicant applied
+    # before groups existed / the group was deleted on a later edit.
+    age_category = ApplicationAgeCategorySerializer(read_only=True)
 
     class Meta:
         model = RecruitmentApplication
@@ -266,6 +295,7 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
             "shared_phone",
             "applicant",
             "highlights_count",
+            "age_category",
         ]
 
     def get_highlights_count(self, obj):
@@ -386,6 +416,7 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
 # LIST ITEM — one row in the authenticated player's own applications list.
 class MyApplicationListSerializer(serializers.ModelSerializer):
     recruitment = MyApplicationRecruitmentSerializer(read_only=True)
+    age_category = ApplicationAgeCategorySerializer(read_only=True)
 
     class Meta:
         model = RecruitmentApplication
@@ -395,6 +426,7 @@ class MyApplicationListSerializer(serializers.ModelSerializer):
             "applied_at",
             "updated_at",
             "recruitment",
+            "age_category",
         ]
 
 

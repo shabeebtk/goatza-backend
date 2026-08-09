@@ -114,6 +114,7 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
 
             status_filter = request.query_params.get("status")
             search = request.query_params.get("search", "").strip()
+            age_category = request.query_params.get("age_category")
 
             # Validate + clamp pagination — exactly like ListPostLikesAPIView.
             try:
@@ -153,6 +154,7 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
                     recruitment=recruitment,
                     status=status_filter,
                     search=search,
+                    age_category=age_category,
                     limit=limit,
                     offset=offset
                 )
