@@ -33,6 +33,7 @@ from messaging.services.exceptions import (
     NotMessageSenderError,
     NotParticipantError,
 )
+from feed.services.affinity_services import AffinityService
 from notifications.services.deeplink_service import build_conversation_url
 from notifications.services.fcm_service import FCMService
 from notifications.services.notification_service import (
@@ -402,8 +403,39 @@ class MessageService:
         # never roll back a persisted message)
         MessageService._trigger_realtime(conversation, message)
         MessageService._trigger_push(conversation, message)
+        MessageService._record_affinity(conversation, message)
 
         return message
+
+    @staticmethod
+    def _record_affinity(conversation, message):
+        """
+        §3.6 — messaging someone is the strongest signal in the model (+5), so
+        their posts float up the sender's feed.
+
+        Only the SENDER's affinity moves: they chose to reach out; the recipient
+        chose nothing. Org senders are skipped — affinity is keyed to a person
+        and ``_create_and_dispatch`` only knows which org sent, not which member.
+        """
+        if not message.sender_user_id:
+            return
+
+        participants = (
+            ConversationParticipant.objects
+            .filter(conversation=conversation)
+            .values_list("user_id", "org_id")
+        )
+
+        for user_id, org_id in participants:
+            # The sender is skipped by AffinityService itself (no self-affinity);
+            # filtering them out in SQL would need an IS NULL guard for the org
+            # participants, which is more fragile than just letting it through.
+            AffinityService.record(
+                message.sender_user,
+                AffinityService.MESSAGE,
+                author_user_id=user_id,
+                author_org_id=org_id,
+            )
 
     # ----------------------------------------
     # DELETE (unsend)

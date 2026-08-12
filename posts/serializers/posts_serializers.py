@@ -42,6 +42,7 @@ class PostListSerializer(serializers.ModelSerializer):
     location = serializers.SerializerMethodField()
     mentions = serializers.SerializerMethodField()
     is_saved = serializers.SerializerMethodField()
+    feed_source = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -62,6 +63,7 @@ class PostListSerializer(serializers.ModelSerializer):
             "location",
             "mentions",
             "is_saved",
+            "feed_source",
         ]
 
     def get_author(self, obj):
@@ -103,6 +105,17 @@ class PostListSerializer(serializers.ModelSerializer):
         every queryset feeding this serializer must carry the annotation.
         """
         return bool(getattr(obj, "is_saved", False))
+
+    def get_feed_source(self, obj):
+        """
+        Which candidate source put this post in the home feed —
+        "followed" | "trending" | "interest" (§3.4).
+
+        Null everywhere else (profile lists, explore, search): only the home
+        feed blends sources, and only there does the client need to explain a
+        stranger's post with a "Suggested" chip.
+        """
+        return getattr(obj, "feed_source", None)
 
     def get_mentions(self, obj):
         """

@@ -171,6 +171,10 @@ REST_FRAMEWORK = {
         'change_password': '5/hour',
         'message_share': '30/min',   # per actor — see messaging.throttles
         'chat_media': '30/min',      # per actor — chat photo uploads
+        # Feed impression flushes (see feed.throttles). Its own scope so a long
+        # scroll's telemetry never drains the shared 'user' budget that posting,
+        # liking and messaging draw on.
+        'feed_impressions': '60/min',
         # Public profile reads. Per IP (see core.throttles.PublicReadThrottle),
         # and generous on purpose: one shared link opening in a group chat
         # produces a burst of crawler + human hits from a handful of addresses.

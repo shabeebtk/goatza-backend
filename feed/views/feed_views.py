@@ -1,20 +1,29 @@
 import logging, uuid
-from django.db.models import Q
 from rest_framework import status
+from rest_framework.exceptions import NotFound
+from rest_framework.response import Response
 
 from core.views.base_views import BaseAPIView
-from posts.models import Post
-from connections.services.follow_services import FollowService
 from posts.serializers.posts_serializers import PostListSerializer
-from posts.services.saved_post_service import annotate_is_saved
 from utils.response import response_data
 from feed.services.feed_services import FeedService
-from feed.pagination import FeedCursorPagination
+from feed.services.impression_services import FeedImpressionService
+from feed.services.ranking_services import FeedRankingService
+from feed.throttles import FeedImpressionThrottle
 
 logger = logging.getLogger(__name__)
 
 
 class FeedAPIView(BaseAPIView):
+    """
+    GET /feed/list
+
+    The ranked home feed. Candidates are blended in SQL (§3.4) and scored with
+    the gravity decay (§3.1); the seen-penalty, session jitter and author cap
+    run in Python over the whole 300-row window (§3.2, 3.3, 3.5). See
+    ``FeedRankingService`` for why this cannot be keyset pagination.
+    """
+
     MAX_SEEN_IDS = 30
 
     def get(self, request):
@@ -22,8 +31,6 @@ class FeedAPIView(BaseAPIView):
 
         try:
             actor = request.actor
-            user = request.user
-            seen_ids_param = request.query_params.get("seen_ids")
 
             if not actor or (not actor.is_user and not actor.is_org):
                 return response_data(
@@ -32,56 +39,50 @@ class FeedAPIView(BaseAPIView):
                     status_code=400
                 )
 
-            seen_ids = []
-            if seen_ids_param:
-                try:
-                    seen_ids = [
-                        uuid.UUID(sid.strip())
-                        for sid in seen_ids_param.split(",")
-                        if sid.strip()
-                    ]
-                    seen_ids = seen_ids[:self.MAX_SEEN_IDS]
-                except Exception:
-                    seen_ids = []
-
-            # 1. GET FEED QUERYSET
-            # is_saved is annotated at the view layer for every post endpoint —
-            # one uniform rule, and the actor is only resolved here.
-            queryset = annotate_is_saved(
-                FeedService.get_feed_queryset(actor, seen_ids=seen_ids), actor
+            seen_ids = self._parse_seen_ids(
+                request.query_params.get("seen_ids")
             )
 
-            # 2. PAGINATION
-            paginator = FeedCursorPagination()
-            paginated_posts = paginator.paginate_queryset(queryset, request)
+            # 1. RANKED PAGE (ranking cached per session; see ranking_services)
+            page = FeedRankingService.get_page(
+                actor,
+                request.user,
+                cursor=request.query_params.get("cursor"),
+                seen_ids=seen_ids,
+            )
+            posts = page["posts"]
 
-            # 3. DIVERSIFY POSTS
-            paginated_posts = FeedService.diversify_posts(paginated_posts)
+            # 2. ACTOR REACTIONS
+            user_reactions = FeedService.get_actor_reactions(
+                actor, [post.id for post in posts]
+            )
 
-            post_ids = [p.id for p in paginated_posts]
-
-            # 4. USER REACTIONS
-            user_reactions = FeedService.get_actor_reactions(actor, post_ids)
-
-            # 5. SERIALIZE
+            # 3. SERIALIZE
             serializer = PostListSerializer(
-                paginated_posts,
+                posts,
                 many=True,
                 context={"user_reactions": user_reactions}
             )
 
-            # 6. RESPONSE
             return response_data(
                 success=True,
                 message="Feed fetched successfully",
                 data={
-                    "next_cursor": paginator.get_next_cursor(),
+                    "next_cursor": page["next_cursor"],
                     "results": serializer.data
                 }
             )
 
+        except NotFound as e:
+            # Malformed pagination cursor — same handling as the explore views.
+            return response_data(
+                success=False,
+                message=str(e.detail),
+                status_code=400,
+            )
+
         except Exception as e:
-            logger.error(f"{TAG} | Error | {str(e)}")
+            logger.error(f"{TAG} | Error | {str(e)}", exc_info=True)
 
             return response_data(
                 success=False,
@@ -89,3 +90,59 @@ class FeedAPIView(BaseAPIView):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 error=str(e)
             )
+
+    def _parse_seen_ids(self, raw):
+        """
+        Comma-separated uuids from the client, capped. A malformed token voids
+        the whole param (unchanged behaviour) — it is only a de-duplication
+        hint, so being wrong about it costs a repeated post, not an error.
+        """
+        if not raw:
+            return []
+
+        try:
+            seen_ids = [
+                uuid.UUID(sid.strip())
+                for sid in raw.split(",")
+                if sid.strip()
+            ]
+            return seen_ids[:self.MAX_SEEN_IDS]
+        except Exception:
+            return []
+
+
+class FeedImpressionsAPIView(BaseAPIView):
+    """
+    POST /feed/impressions  {"post_ids": [...]}
+
+    Records what the reader has actually seen (§3.2). Fire-and-forget: junk is
+    ignored rather than rejected, and the response is an empty 204 so the client
+    has nothing to parse and nothing to show.
+
+    Throttled on its own scope so a scroll's telemetry cannot drain the shared
+    per-user bucket that real actions (posting, liking, messaging) share.
+    """
+
+    throttle_classes = [FeedImpressionThrottle]
+
+    def post(self, request):
+        TAG = "FeedImpressionsAPIView"
+
+        try:
+            post_ids = FeedImpressionService.parse_post_ids(
+                request.data.get("post_ids")
+            )
+
+            if post_ids:
+                FeedImpressionService.record(request.user, post_ids)
+
+            # Retention, inline — there is no nightly job to do it.
+            FeedImpressionService.maybe_prune(request.user)
+
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        except Exception as e:
+            # Even a genuine failure returns 204: the reader gets nothing out of
+            # knowing, and the client is explicitly built to ignore the result.
+            logger.error(f"{TAG} | Error | {str(e)}", exc_info=True)
+            return Response(status=status.HTTP_204_NO_CONTENT)
