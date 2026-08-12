@@ -33,8 +33,12 @@ from messaging.services.exceptions import (
     NotMessageSenderError,
     NotParticipantError,
 )
+from notifications.services.deeplink_service import build_conversation_url
 from notifications.services.fcm_service import FCMService
-from notifications.services.notification_service import NotificationService
+from notifications.services.notification_service import (
+    NotificationService,
+    get_org_admin_users,
+)
 from services.storage.factory import get_storage_service
 from services.storage.validators import (
     build_video_thumbnail_url,
@@ -604,26 +608,43 @@ class MessageService:
 
             # Text/media keep the existing push-only behaviour — no in-app
             # notification row is written for ordinary chat.
+            #
+            # An org has no device of its own, so its push fans out to the
+            # OWNER/ADMIN members the same way a notification row does. Without
+            # this branch an org participant got no push at all for ordinary
+            # chat — only for shares, which go through NotificationService above.
             if participant.user:
-                # Caption if there is one, else a media-type-specific line.
-                if message.content:
-                    body = message.content[:50]
-                elif message.message_type == Message.Type.IMAGE:
-                    body = "📷 Sent you a photo"
-                elif message.message_type == Message.Type.VIDEO:
-                    body = "🎥 Sent you a video"
-                else:
-                    body = ""
+                targets = [participant.user]
+            elif participant.org:
+                targets = get_org_admin_users(participant.org)
+            else:
+                continue
 
-                FCMService.send_to_user(
-                    participant.user,
-                    {
-                        "type": "message",
-                        "title": "New message",
-                        "body": body,
-                        "conversation_id": str(conversation.id),
-                        "sender_name": message.sender_user.profile_name
-                        if message.sender_user else "",
-                        "url": f"/messages/{conversation.id}"
-                    }
-                )
+            if not targets:
+                continue
+
+            # Caption if there is one, else a media-type-specific line.
+            if message.content:
+                body = message.content[:50]
+            elif message.message_type == Message.Type.IMAGE:
+                body = "📷 Sent you a photo"
+            elif message.message_type == Message.Type.VIDEO:
+                body = "🎥 Sent you a video"
+            else:
+                body = ""
+
+            payload = {
+                "type": "message",
+                "title": "New message",
+                "body": body,
+                "conversation_id": str(conversation.id),
+                "sender_name": message.sender_user.profile_name
+                if message.sender_user else "",
+                # Resolved in the RECIPIENT's route space — an org member opening
+                # this must land inside /organization/admin/<id>/… or the client
+                # switches them back to their personal account.
+                "url": build_conversation_url(conversation.id, participant.org_id),
+            }
+
+            for target in targets:
+                FCMService.send_to_user(target, payload)

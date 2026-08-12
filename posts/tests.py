@@ -1175,14 +1175,26 @@ class PostMentionTests(APITestCase):
         kochi = self._org("kochifc", "Kochi FC")
         post = self._create("hello @rahul10 @kochifc")
 
-        for recipient in ({"recipient_user": rahul}, {"recipient_org": kochi}):
+        # One post, two destinations: the URL is resolved in the RECIPIENT's
+        # route space, so the org's copy stays inside the admin area rather than
+        # switching the reader back to their personal account. (Plural /posts/ —
+        # /post/<id> is not a route.)
+        cases = (
+            ({"recipient_user": rahul}, f"/posts/{post.id}"),
+            (
+                {"recipient_org": kochi},
+                f"/organization/admin/{kochi.id}/posts/{post.id}",
+            ),
+        )
+
+        for recipient, expected_url in cases:
             notification = self._mention_notifications(**recipient).first()
             self.assertIsNotNone(notification, recipient)
 
             payload = build_notification_payload(notification)
             self.assertEqual(payload["type"], "mention")
             self.assertEqual(payload["title"], "Me mentioned you in a post")
-            self.assertEqual(payload["url"], f"/post/{post.id}")
+            self.assertEqual(payload["url"], expected_url)
             self.assertEqual(payload["target_id"], str(post.id))
 
     def test_grouped_text_renders_for_mention(self):

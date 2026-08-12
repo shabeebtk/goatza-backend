@@ -1,5 +1,6 @@
 from collections import defaultdict
 from posts.serializers.posts_serializers import PostMiniSerializer
+from notifications.services.deeplink_service import build_notification_url
 from notifications.services.notification_service import (
     ACHIEVEMENT_DECISION_COPY,
     CAREER_DECISION_COPY,
@@ -50,20 +51,24 @@ class NotificationGroupingService:
 
     @staticmethod
     def _get_actor_data(notification):
+        # `type` follows PostMiniSerializer.get_author(): "user" /
+        # "organization", the same two words the actor headers use.
         if notification.actor_user:
             return {
                 "id": str(notification.actor_user.id),
                 "name": notification.actor_user.profile_name,
                 "username": notification.actor_user.username,
-                "avatar": getattr(notification.actor_user.profile, "profile_photo", None)
+                "avatar": getattr(notification.actor_user.profile, "profile_photo", None),
+                "type": "user",
             }
 
         if notification.actor_org:
             return {
                 "id": str(notification.actor_org.id),
                 "name": notification.actor_org.name,
-                "username": str(notification.actor_org.username), 
-                "avatar": getattr(notification.actor_org.profile, "logo", None)
+                "username": str(notification.actor_org.username),
+                "avatar": getattr(notification.actor_org.profile, "logo", None),
+                "type": "organization",
             }
 
         return None
@@ -166,6 +171,14 @@ class NotificationGroupingService:
             "others_count": others_count,
             "is_read": all(n.is_read for n in items),
             "created_at": primary.created_at,
+
+            # Where the row opens. Built from the primary row by the same
+            # resolver the push payload uses, so a tapped row and the push for
+            # the same event can't drift apart. The client navigates to it
+            # verbatim — it derives nothing from `type`.
+            "url": build_notification_url(primary),
+            "actor_type": "organization" if primary.actor_org_id else "user",
+            "recipient_type": "organization" if primary.recipient_org_id else "user",
 
             "post": post_data,
             "comment": comment_data,

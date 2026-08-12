@@ -1,13 +1,18 @@
 # notifications/serializers.py
 from rest_framework import serializers
 from notifications.models import Notification
+from notifications.services.deeplink_service import build_notification_url
 
 
 class NotificationSerializer(serializers.ModelSerializer):
     actor_name = serializers.SerializerMethodField()
     actor_avatar = serializers.SerializerMethodField()
     actor_username = serializers.SerializerMethodField()
+    actor_type = serializers.SerializerMethodField()
     post_id = serializers.SerializerMethodField()
+    # Same resolver the grouped shape and the push payload use. Carried here too
+    # so the ungrouped response can't quietly drift from the grouped one.
+    url = serializers.SerializerMethodField()
 
     class Meta:
         model = Notification
@@ -17,7 +22,9 @@ class NotificationSerializer(serializers.ModelSerializer):
             "actor_name",
             "actor_avatar",
             "actor_username",
+            "actor_type",
             "post_id",
+            "url",
             "data",
             "is_read",
             "created_at",
@@ -46,6 +53,16 @@ class NotificationSerializer(serializers.ModelSerializer):
             return getattr(obj.actor_org.profile, "logo", None)  
         return None
     
+
+    def get_actor_type(self, obj):
+        if obj.actor_user:
+            return "user"
+        if obj.actor_org:
+            return "organization"
+        return None
+
+    def get_url(self, obj):
+        return build_notification_url(obj)
 
     def get_post_id(self, obj):
         if obj.post:
