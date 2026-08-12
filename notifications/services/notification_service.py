@@ -2,6 +2,7 @@ from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
 from notifications.models import Notification
+from notifications.services.deeplink_service import build_notification_url
 from notifications.services.fcm_service import FCMService
 from accounts.models import User
 from organization.models import OrganizationMember
@@ -101,6 +102,27 @@ def _resolve_actor_display(notification: "Notification"):
     return name, username, avatar
 
 
+def get_org_admin_users(organization) -> list:
+    """
+    The people who receive an organization's pushes: its OWNER / ADMIN members.
+
+    Exported because messaging fans ordinary chat pushes out to an org
+    participant the same way — an org has no device of its own, only members.
+    """
+    if organization is None:
+        return []
+
+    member_user_ids = OrganizationMember.objects.filter(
+        organization=organization,
+        role__in=[
+            OrganizationMember.Role.OWNER,
+            OrganizationMember.Role.ADMIN,
+        ]
+    ).values_list("user_id", flat=True)
+
+    return list(User.objects.filter(id__in=member_user_ids, is_active=True))
+
+
 def _get_recipient_users(notification: "Notification") -> list:
     """
     Return a list of User objects that should receive the push.
@@ -112,15 +134,7 @@ def _get_recipient_users(notification: "Notification") -> list:
         return [notification.recipient_user]
 
     if notification.recipient_org:
-        member_user_ids = OrganizationMember.objects.filter(
-            organization=notification.recipient_org,
-            role__in=[
-                OrganizationMember.Role.OWNER,
-                OrganizationMember.Role.ADMIN,
-            ]
-        ).values_list("user_id", flat=True)
-
-        return list(User.objects.filter(id__in=member_user_ids, is_active=True))
+        return get_org_admin_users(notification.recipient_org)
 
     return []
 
@@ -133,12 +147,10 @@ def build_notification_payload(notification: "Notification") -> dict:
 
     title = "Goatza"
     body = "Tap to view"
-    url = "/"
 
     if notification.type == Notification.Type.LIKE:
         title = f"{actor_name} liked your post"
         body = "Tap to view"
-        url = f"/post/{notification.post_id}"
 
     elif notification.type == Notification.Type.COMMENT:
         comment_text = getattr(notification.comment, "comment", "")   # field is `comment`, not `content`
@@ -150,76 +162,51 @@ def build_notification_payload(notification: "Notification") -> dict:
         else:
             title = f"{actor_name} commented on your post"
         body = short_comment or "Tap to view"
-        url = f"/post/{notification.post_id}"
 
     elif notification.type == Notification.Type.MENTION:
         post_text = getattr(notification.post, "content", "") or ""
         short_text = post_text[:60] + "..." if len(post_text) > 60 else post_text
         title = f"{actor_name} mentioned you in a post"
         body = short_text or "Tap to view"
-        # Same shape the like/comment pushes use, so the service worker's
-        # existing post deep-link handling covers this type with no change.
-        url = f"/post/{notification.post_id}"
 
     elif notification.type == Notification.Type.FOLLOW:
         title = f"{actor_name} started following you"
         body = "Tap to view profile"
-        url = f"/profile/{actor_username}"
 
     elif notification.type == Notification.Type.FOLLOW_BACK:
         title = f"{actor_name} followed you back"
         body = "Tap to view profile"
-        url = f"/profile/{actor_username}"
 
     elif notification.type == Notification.Type.RECRUITMENT_APPLICATION:
         recruitment_title = notification.data.get(
             "recruitment_title", "your recruitment"
         )
-        recruitment_id = (
-            notification.recruitment_id
-            or notification.data.get("recruitment_id", "")
-        )
         title = f"{actor_name} applied to {recruitment_title}"
         body = "Tap to view applicants"
-        url = (
-            f"/organization/admin/{notification.recipient_org_id}"
-            f"/recruitments/{recruitment_id}?tab=applicants"
-        )
 
     elif notification.type == Notification.Type.MESSAGE:
-        conversation_id = notification.data.get("conversation_id", "")
         shared_kind = notification.data.get("shared_kind", "")
         noun = MESSAGE_SHARE_NOUN.get(shared_kind, "something")
         title = f"{actor_name} shared {noun} with you"
         # The note is the sender's own caption — safe to surface, and it's what
         # makes the push worth opening. Falls back to a generic nudge.
         body = notification.data.get("note", "") or "Tap to view"
-        url = f"/messages/{conversation_id}"
 
     elif notification.type == Notification.Type.RECRUITMENT_APPLICATION_STATUS:
         to_status = notification.data.get("to_status", "")
         recruitment_title = getattr(
             notification.recruitment, "title", "your recruitment"
         )
-        recruitment_id = (
-            notification.recruitment_id
-            or notification.data.get("recruitment_id", "")
-        )
         copy = RECRUITMENT_STATUS_COPY.get(
             to_status, RECRUITMENT_STATUS_COPY_DEFAULT
         )
         title = f"{actor_name} {copy['verb']}"
         body = f"Your application for {recruitment_title} {copy['body']}"
-        url = f"/recruitments/{recruitment_id}"
 
     elif notification.type == Notification.Type.CAREER_VERIFICATION_REQUEST:
         entry_title = notification.data.get("entry_title", "a career entry")
         title = f"{actor_name} listed you on their career"
         body = f"{entry_title} — tap to verify or reject"
-        url = (
-            f"/organization/admin/{notification.recipient_org_id}"
-            f"/career-verifications"
-        )
 
     elif notification.type == Notification.Type.ACHIEVEMENT_VERIFICATION_REQUEST:
         achievement_title = notification.data.get(
@@ -227,29 +214,16 @@ def build_notification_payload(notification: "Notification") -> dict:
         )
         title = f"{actor_name} credited you with an achievement"
         body = f"{achievement_title} — tap to verify or reject"
-        # The review screen is one page with a domain tab, not two routes —
-        # /achievement-verifications does not exist and a push landing there
-        # would 404. The service worker navigates to this URL verbatim.
-        url = (
-            f"/organization/admin/{notification.recipient_org_id}"
-            f"/verifications?tab=achievements"
-        )
 
     elif notification.type == Notification.Type.CAREER_ADD_PROMPT:
         recruitment_title = getattr(
             notification.recruitment, "title", "a recruitment"
-        )
-        application_id = notification.data.get("application_id", "")
-        recruitment_id = (
-            notification.recruitment_id
-            or notification.data.get("recruitment_id", "")
         )
         # Deliberately different from the "selected you 🎉" status push that
         # goes out with it: that one announces the result, this one is the
         # call to action.
         title = f"Add {actor_name} to your career"
         body = f"You were selected for {recruitment_title} — add it to your profile"
-        url = f"/recruitments/{recruitment_id}?addToCareer={application_id}"
 
     elif notification.type in (
         Notification.Type.CAREER_VERIFIED,
@@ -261,10 +235,6 @@ def build_notification_payload(notification: "Notification") -> dict:
         reason = notification.data.get("reason", "")
         title = f"{actor_name} {copy['verb']}"
         body = reason or f"{entry_title} {copy['body']}"
-        url = (
-            f"/profile/{notification.data.get('owner_username', '')}"
-            f"?tab=career"
-        )
 
     elif notification.type in (
         Notification.Type.ACHIEVEMENT_VERIFIED,
@@ -278,13 +248,6 @@ def build_notification_payload(notification: "Notification") -> dict:
         reason = notification.data.get("reason", "")
         title = f"{actor_name} {copy['verb']}"
         body = reason or f"{achievement_title} {copy['body']}"
-        # A fragment, not `?tab=`: the profile page has no tab router, it has an
-        # `id="achievements"` section, and the fragment is what actually scrolls
-        # the owner to the award that changed.
-        url = (
-            f"/profile/{notification.data.get('owner_username', '')}"
-            f"#achievements"
-        )
 
     return {
         "type": notification.type,
@@ -295,6 +258,13 @@ def build_notification_payload(notification: "Notification") -> dict:
         "actor_username": actor_username,
         "actor_avatar": actor_avatar,
         "actor_initials": actor_name[:2].upper() if actor_name else "??",
+        "actor_type": "organization" if notification.actor_org_id else "user",
+
+        # recipient — the client needs the route space, not just the id: the
+        # same push can reach a person as themselves or as one of their clubs,
+        # and the two open different screens.
+        "recipient_type": "organization" if notification.recipient_org_id else "user",
+        "recipient_org_id": str(notification.recipient_org_id or ""),
 
         # target
         "target_id": str(notification.post_id or ""),
@@ -304,7 +274,9 @@ def build_notification_payload(notification: "Notification") -> dict:
         # push content
         "title": title,
         "body": body,
-        "url": url,
+        # The only URL any channel uses. The client navigates to it verbatim —
+        # nothing downstream re-derives a path from `type` + ids.
+        "url": build_notification_url(notification),
 
         # grouping
         "group_key": notification.group_key or "",

@@ -1,6 +1,7 @@
 # feed/services/explore_services.py
 
 import math
+from collections import defaultdict, deque
 from datetime import timedelta
 
 from django.db.models import (
@@ -482,3 +483,33 @@ class ExploreService:
             "author_org__profile",
             "sport",
         ).prefetch_related("media", POST_MENTIONS_PREFETCH)
+
+    # ------------------------------------------------------------------ #
+    # DISPLAY DIVERSIFICATION
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def diversify_posts(posts):
+        """
+        Round-robin one page's posts so a single author does not open the page
+        with a block of their own content.
+
+        This used to live on FeedService and serve both feeds. The home feed no
+        longer needs it: it applies a real per-author cap across the whole
+        candidate window before paging (§3.3), which this cannot do — running
+        after pagination, over 15 already-chosen rows, it can only reorder what
+        one author already monopolized. Explore still pages on a keyset over its
+        own score, so for it this remains the right (display-only) tool.
+        """
+        author_buckets = defaultdict(deque)
+        for post in posts:
+            author_id = post.author_user_id or f"org_{post.author_org_id}"
+            author_buckets[author_id].append(post)
+
+        diversified = []
+        while author_buckets:
+            for author_id in list(author_buckets.keys()):
+                if author_buckets[author_id]:
+                    diversified.append(author_buckets[author_id].popleft())
+                if not author_buckets[author_id]:
+                    del author_buckets[author_id]
+        return diversified

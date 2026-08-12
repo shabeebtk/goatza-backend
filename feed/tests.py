@@ -1031,3 +1031,608 @@ class ExploreOrganizationsFilterTests(APITestCase):
         self.assertIn(str(near.id), ids)
         self.assertNotIn(str(followed.id), ids)   # rails still exclude followed
         self.assertEqual(set(data["results"][0].keys()), ORG_KEYS)
+
+
+# ══════════════════════════════════════════════════════════════════
+# HOME FEED — ranked serving (Feed Ranking spec, Phase 1)
+# ══════════════════════════════════════════════════════════════════
+
+import base64
+import uuid as uuid_module
+from unittest.mock import patch
+
+from django.core.cache import cache
+
+from feed.models import ActorAffinity, PostImpression
+from feed.services.feed_services import MAX_POSTS_PER_AUTHOR_PER_PAGE, PAGE_SIZE
+from feed.services.ranking_services import FeedRankingService
+
+FEED_URL = "/feed/list"
+IMPRESSIONS_URL = "/feed/impressions"
+
+
+class FeedTestBase(APITestCase):
+    """Shared factories + helpers for the ranked home feed."""
+
+    def setUp(self):
+        # The ranking is cached per (actor, hour bucket); LocMem survives
+        # between tests in one process, so start every test from empty.
+        cache.clear()
+        self.me = self._user("me", "Me")
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com",
+            password="pass1234",
+            username=username,
+        )
+        UserProfile.objects.create(
+            user=user, name=name,
+            profile_photo=f"https://cdn.example.com/{username}.jpg",
+        )
+        return user
+
+    def _org(self, username, name):
+        org = Organization.objects.create(
+            name=name, username=username, type=Organization.Type.CLUB
+        )
+        OrganizationProfile.objects.create(organization=org)
+        return org
+
+    def _follow(self, target):
+        if isinstance(target, User):
+            Follow.objects.create(follower_user=self.me, following_user=target)
+        else:
+            Follow.objects.create(follower_user=self.me, following_org=target)
+        return target
+
+    def _followed_user(self, username, name=None):
+        return self._follow(self._user(username, name or username.title()))
+
+    def _post(self, author, likes=0, comments=0, age_hours=1,
+              visibility=Post.Visibility.PUBLIC, content="post", sport=None):
+        kwargs = dict(
+            content=content, visibility=visibility,
+            likes_count=likes, comments_count=comments, sport=sport,
+        )
+        if isinstance(author, User):
+            kwargs["author_user"] = author
+        else:
+            kwargs["author_org"] = author
+        post = Post.objects.create(**kwargs)
+        # created_at is auto_now_add — a raw UPDATE is the only way to age it.
+        Post.objects.filter(pk=post.pk).update(
+            created_at=timezone.now() - timedelta(hours=age_hours)
+        )
+        post.refresh_from_db()
+        return post
+
+    def _impression(self, post, hours_ago):
+        return PostImpression.objects.create(
+            user=self.me,
+            post=post,
+            last_seen_at=timezone.now() - timedelta(hours=hours_ago),
+        )
+
+    # ── request helpers ──────────────────────────────────────────
+
+    def _get(self, **params):
+        self.client.force_authenticate(user=self.me)
+        return self.client.get(FEED_URL, params)
+
+    def _ids(self, resp):
+        return [str(r["id"]) for r in resp.data["data"]["results"]]
+
+    def _no_jitter(self):
+        """
+        Pin the §3.5 noise to 1.0 for tests that assert a SCORE ordering.
+
+        The jitter band is ±10%, so it can legitimately swap two posts whose
+        scores are within ~22% of each other — and ln() keeps engagement
+        differences well inside that. Leaving it on would make these tests
+        assert the dice roll rather than the rule they are named after. The
+        jitter itself is covered by FeedJitterTests.
+        """
+        return patch.object(
+            FeedRankingService, "_jitter", staticmethod(lambda post_id, seed: 1.0)
+        )
+
+
+class FeedDecayScoringTests(FeedTestBase):
+    """§3.1 — multiplicative gravity replaces the additive recency boost."""
+
+    def test_old_popular_post_ranks_below_fresh_quiet_post(self):
+        """
+        The exact inversion §1 names as the root cause: under the old formula
+        2*ln(20 interactions) beat the maximum freshness bonus, so the post
+        stayed pinned to the top forever. Under decay it must not.
+        """
+        loud = self._followed_user("loud")
+        quiet = self._followed_user("quiet")
+
+        old_popular = self._post(loud, likes=20, age_hours=72)   # 3 days
+        fresh_quiet = self._post(quiet, likes=0, age_hours=0)
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(
+            ids.index(str(fresh_quiet.id)),
+            ids.index(str(old_popular.id)),
+        )
+
+    def test_engagement_still_wins_between_equally_fresh_posts(self):
+        """Decay demotes age, not engagement — same age, more likes, higher."""
+        a = self._followed_user("aaa")
+        b = self._followed_user("bbb")
+
+        popular = self._post(a, likes=40, age_hours=2)
+        unpopular = self._post(b, likes=0, age_hours=2)
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(ids.index(str(popular.id)), ids.index(str(unpopular.id)))
+
+    def test_comments_outweigh_likes(self):
+        a = self._followed_user("ca")
+        b = self._followed_user("cb")
+
+        commented = self._post(a, likes=0, comments=10, age_hours=2)
+        liked = self._post(b, likes=10, comments=0, age_hours=2)
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(ids.index(str(commented.id)), ids.index(str(liked.id)))
+
+
+class FeedSeenPenaltyTests(FeedTestBase):
+    """§3.2 — persistent impressions push read posts down, never out."""
+
+    def test_recently_seen_post_drops_below_an_unseen_one(self):
+        a = self._followed_user("seenauthor")
+        b = self._followed_user("unseenauthor")
+
+        # `winner` outranks `loser` on score alone …
+        winner = self._post(a, likes=30, age_hours=2)
+        loser = self._post(b, likes=10, age_hours=2)
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(ids.index(str(winner.id)), ids.index(str(loser.id)))
+
+        # … until it is marked read an hour ago (x0.2), which flips the pair.
+        cache.clear()
+        self._impression(winner, hours_ago=1)
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(ids.index(str(loser.id)), ids.index(str(winner.id)))
+
+    def test_seen_posts_are_penalised_not_excluded(self):
+        author = self._followed_user("onlyauthor")
+        post = self._post(author, likes=5, age_hours=2)
+        self._impression(post, hours_ago=1)
+
+        # With a thin pool, exclusion would empty the feed entirely.
+        self.assertIn(str(post.id), self._ids(self._get()))
+
+    def test_penalty_softens_as_the_impression_ages(self):
+        a = self._followed_user("recentseen")
+        b = self._followed_user("staleseen")
+
+        recent = self._post(a, likes=10, age_hours=2)
+        stale = self._post(b, likes=10, age_hours=2)
+
+        self._impression(recent, hours_ago=1)        # x0.2
+        self._impression(stale, hours_ago=24 * 5)    # x0.8
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(ids.index(str(stale.id)), ids.index(str(recent.id)))
+
+    def test_impressions_are_per_person_not_per_actor(self):
+        """
+        Reading a post as yourself must silence it after switching to your club:
+        the same human already read it.
+        """
+        org = self._org("myclub", "My Club")
+        OrganizationMember.objects.create(
+            organization=org, user=self.me,
+            role=OrganizationMember.Role.OWNER,
+        )
+        author = self._user("stranger", "Stranger")
+        Follow.objects.create(follower_org=org, following_user=author)
+
+        winner = self._post(author, likes=30, age_hours=2)
+        loser = self._post(author, likes=10, age_hours=2)
+        self._impression(winner, hours_ago=1)
+
+        self.client.force_authenticate(user=self.me)
+        with self._no_jitter():
+            resp = self.client.get(
+                FEED_URL,
+                HTTP_X_ACTOR_TYPE="organization",
+                HTTP_X_ACTOR_ID=str(org.id),
+            )
+        ids = self._ids(resp)
+        self.assertLess(ids.index(str(loser.id)), ids.index(str(winner.id)))
+
+
+class FeedAuthorCapTests(FeedTestBase):
+    """§3.3 — at most two posts per author per page, and nothing dropped."""
+
+    def test_cap_pushes_posts_forward_instead_of_dropping_them(self):
+        heavy = self._followed_user("heavy")
+        heavy_posts = [
+            self._post(heavy, likes=50 + i, age_hours=2) for i in range(5)
+        ]
+        other_posts = [
+            self._post(self._followed_user(f"other{i}"), likes=5, age_hours=2)
+            for i in range(5)
+        ]
+        heavy_ids = {str(p.id) for p in heavy_posts}
+
+        collected, cursor, pages = [], None, 0
+        while True:
+            params = {"cursor": cursor} if cursor else {}
+            resp = self._get(**params)
+            page_ids = self._ids(resp)
+
+            heavy_on_page = sum(1 for pid in page_ids if pid in heavy_ids)
+            self.assertLessEqual(heavy_on_page, MAX_POSTS_PER_AUTHOR_PER_PAGE)
+            self.assertLessEqual(len(page_ids), PAGE_SIZE)
+
+            collected.extend(page_ids)
+            cursor = resp.data["data"]["next_cursor"]
+            pages += 1
+            if not cursor or pages > 8:
+                break
+
+        expected = {str(p.id) for p in heavy_posts + other_posts}
+        self.assertEqual(len(collected), len(set(collected)))   # no duplicates
+        self.assertEqual(set(collected), expected)              # nothing dropped
+
+    def test_a_user_and_their_org_count_as_different_authors(self):
+        org = self._org("clubfc", "Club FC")
+        self._follow(org)
+        person = self._followed_user("person")
+
+        org_posts = [self._post(org, likes=20, age_hours=2) for _ in range(2)]
+        person_posts = [self._post(person, likes=20, age_hours=2) for _ in range(2)]
+
+        # 4 posts, 2 authors, cap 2 each → one page holds all of them.
+        ids = self._ids(self._get())
+        self.assertEqual(
+            set(ids), {str(p.id) for p in org_posts + person_posts}
+        )
+
+
+class FeedPaginationTests(FeedTestBase):
+    """Session-ranked pagination: no duplicates, no gaps, cache-miss safe."""
+
+    def _many_posts(self, count=40, authors=8):
+        people = [self._followed_user(f"a{i}") for i in range(authors)]
+        return [
+            self._post(people[i % authors], likes=i, age_hours=1 + i)
+            for i in range(count)
+        ]
+
+    def test_pages_have_no_duplicates_and_no_gaps(self):
+        posts = self._many_posts()
+
+        collected, cursor, pages = [], None, 0
+        while True:
+            resp = self._get(**({"cursor": cursor} if cursor else {}))
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            collected.extend(self._ids(resp))
+            cursor = resp.data["data"]["next_cursor"]
+            pages += 1
+            if not cursor or pages > 8:
+                break
+
+        self.assertEqual(len(collected), len(set(collected)))
+        self.assertEqual(set(collected), {str(p.id) for p in posts})
+
+    def test_first_three_pages_are_disjoint(self):
+        # 60 posts over 20 authors → four full pages, so a cursor still exists
+        # after the third and the walk is genuinely mid-feed.
+        self._many_posts(count=60, authors=20)
+
+        seen = set()
+        cursor = None
+        for _ in range(3):
+            resp = self._get(**({"cursor": cursor} if cursor else {}))
+            page = self._ids(resp)
+            self.assertEqual(len(page), PAGE_SIZE)
+            self.assertTrue(seen.isdisjoint(page))
+            seen.update(page)
+            cursor = resp.data["data"]["next_cursor"]
+            self.assertIsNotNone(cursor)
+
+    def test_cache_miss_between_pages_serves_no_duplicates(self):
+        """
+        A redeploy (or the 10-minute TTL) drops the cached ranking mid-scroll.
+        The seed rides in the cursor so the rebuild comes out near-identical,
+        and seen_ids covers the residual drift — which is why it stays.
+        """
+        self._many_posts(count=45, authors=15)
+
+        first = self._get()
+        page_one = self._ids(first)
+        cursor = first.data["data"]["next_cursor"]
+
+        cache.clear()   # ← the ranking is gone
+
+        second = self._get(cursor=cursor, seen_ids=",".join(page_one))
+        page_two = self._ids(second)
+
+        self.assertTrue(set(page_one).isdisjoint(page_two))
+
+    def test_cursor_ends_the_feed_once_the_ranking_is_exhausted(self):
+        self._many_posts(count=20, authors=10)
+
+        cursor, pages = None, 0
+        while True:
+            resp = self._get(**({"cursor": cursor} if cursor else {}))
+            cursor = resp.data["data"]["next_cursor"]
+            pages += 1
+            if not cursor:
+                break
+            self.assertLess(pages, 6)
+
+        self.assertIsNone(cursor)
+
+    def test_invalid_cursor_returns_400(self):
+        resp = self._get(cursor="garbage")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_forged_cursor_seed_is_rejected(self):
+        # The seed is concatenated into a cache key, so it is validated like
+        # any other untrusted input.
+        forged = base64.b64encode(b"bad seed\n|0").decode()
+        resp = self._get(cursor=forged)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class FeedJitterTests(FeedTestBase):
+    """§3.5 — session-seeded exploration noise."""
+
+    def _ranking(self, seed):
+        actor = type("StubActor", (), {
+            "is_user": True, "is_org": False,
+            "user": self.me, "organization": None,
+        })()
+        return FeedRankingService._build_ranking(actor, self.me, seed)
+
+    def test_same_seed_produces_the_same_ordering(self):
+        for i in range(12):
+            self._post(self._followed_user(f"j{i}"), likes=10, age_hours=2)
+
+        first = self._ranking("user_x:1")
+        second = self._ranking("user_x:1")
+
+        self.assertEqual(first["pages"], second["pages"])
+
+    def test_different_seed_produces_a_different_ordering(self):
+        for i in range(12):
+            self._post(self._followed_user(f"k{i}"), likes=10, age_hours=2)
+
+        first = self._ranking("user_x:1")
+        second = self._ranking("user_x:2")
+
+        self.assertNotEqual(first["pages"], second["pages"])
+        # Same posts, only reordered — jitter must not add or drop anything.
+        self.assertEqual(
+            sorted(sum(first["pages"], [])),
+            sorted(sum(second["pages"], [])),
+        )
+
+    def test_jitter_factor_stays_inside_the_configured_band(self):
+        factors = [
+            FeedRankingService._jitter(f"post-{i}", "seed-1") for i in range(200)
+        ]
+        self.assertTrue(all(0.9 <= f < 1.1 for f in factors))
+        # …and actually varies, or it would not be jitter.
+        self.assertGreater(max(factors) - min(factors), 0.1)
+
+
+class FeedBlendingTests(FeedTestBase):
+    """§3.4 — three candidate sources, de-duplicated, always backfilled."""
+
+    def test_feed_is_not_empty_without_any_followed_accounts(self):
+        # The backfill path: source 1 is empty, so the whole page has to come
+        # from trending / interest.
+        posts = [
+            self._post(self._user(f"nobody{i}", "Nobody"), likes=5, age_hours=2)
+            for i in range(3)
+        ]
+
+        ids = self._ids(self._get())
+        self.assertEqual(set(ids), {str(p.id) for p in posts})
+
+    def test_followed_posts_are_labelled_followed(self):
+        author = self._followed_user("friend")
+        self._post(author, likes=5, age_hours=2)
+
+        row = self._get().data["data"]["results"][0]
+        self.assertEqual(row["feed_source"], "followed")
+
+    def test_stranger_posts_are_labelled_for_the_suggested_chip(self):
+        stranger = self._user("astranger", "A Stranger")
+        self._post(stranger, likes=30, age_hours=2)
+
+        row = self._get().data["data"]["results"][0]
+        self.assertIn(row["feed_source"], {"trending", "interest"})
+
+    def test_sport_interest_posts_surface_from_non_followed_authors(self):
+        sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        UserSport.objects.create(user=self.me, sport=sport, is_primary=True)
+
+        stranger = self._user("baller", "Baller")
+        tagged = self._post(stranger, likes=0, age_hours=2, sport=sport)
+
+        ids = self._ids(self._get())
+        self.assertIn(str(tagged.id), ids)
+
+    def test_a_post_is_never_served_twice_across_sources(self):
+        # A followed author's post also qualifies as trending.
+        author = self._followed_user("dual")
+        post = self._post(author, likes=99, age_hours=1)
+
+        ids = self._ids(self._get())
+        self.assertEqual(ids.count(str(post.id)), 1)
+
+    def test_soft_deleted_and_invisible_posts_never_appear(self):
+        stranger = self._user("hidden", "Hidden")
+        deleted = self._post(stranger, likes=5)
+        Post.objects.filter(pk=deleted.pk).update(is_deleted=True)
+        followers_only = self._post(
+            stranger, likes=5, visibility=Post.Visibility.FOLLOWERS
+        )
+        visible = self._post(stranger, likes=5)
+
+        ids = self._ids(self._get())
+        self.assertIn(str(visible.id), ids)
+        self.assertNotIn(str(deleted.id), ids)
+        self.assertNotIn(str(followers_only.id), ids)
+
+
+class FeedImpressionEndpointTests(FeedTestBase):
+    """POST /feed/impressions — fire-and-forget telemetry."""
+
+    def _flush(self, payload):
+        self.client.force_authenticate(user=self.me)
+        return self.client.post(IMPRESSIONS_URL, payload, format="json")
+
+    def test_stores_impressions_and_returns_204(self):
+        author = self._user("w", "W")
+        posts = [self._post(author) for _ in range(3)]
+
+        resp = self._flush({"post_ids": [str(p.id) for p in posts]})
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(PostImpression.objects.filter(user=self.me).count(), 3)
+
+    def test_caps_at_one_hundred_ids(self):
+        author = self._user("w", "W")
+        posts = Post.objects.bulk_create([
+            Post(author_user=author, content=f"p{i}") for i in range(150)
+        ])
+
+        resp = self._flush({"post_ids": [str(p.id) for p in posts]})
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(PostImpression.objects.filter(user=self.me).count(), 100)
+
+    def test_repeat_flush_increments_seen_count(self):
+        author = self._user("w", "W")
+        post = self._post(author)
+        payload = {"post_ids": [str(post.id)]}
+
+        self._flush(payload)
+        self._flush(payload)
+        self._flush(payload)
+
+        impression = PostImpression.objects.get(user=self.me, post=post)
+        self.assertEqual(impression.seen_count, 3)
+
+    def test_malformed_and_unknown_ids_are_ignored_silently(self):
+        author = self._user("w", "W")
+        good = self._post(author)
+
+        resp = self._flush({
+            "post_ids": [
+                str(good.id),
+                "not-a-uuid",
+                str(uuid_module.uuid4()),   # well-formed, but no such post
+                None,
+            ]
+        })
+
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        stored = list(
+            PostImpression.objects.filter(user=self.me)
+            .values_list("post_id", flat=True)
+        )
+        self.assertEqual(stored, [good.id])
+
+    def test_missing_or_junk_body_still_returns_204(self):
+        self.assertEqual(
+            self._flush({}).status_code, status.HTTP_204_NO_CONTENT
+        )
+        self.assertEqual(
+            self._flush({"post_ids": "nope"}).status_code,
+            status.HTTP_204_NO_CONTENT,
+        )
+
+    def test_recorded_impressions_change_the_next_feed(self):
+        a = self._followed_user("ia")
+        b = self._followed_user("ib")
+        winner = self._post(a, likes=30, age_hours=2)
+        loser = self._post(b, likes=10, age_hours=2)
+
+        self._flush({"post_ids": [str(winner.id)]})
+        cache.clear()
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(ids.index(str(loser.id)), ids.index(str(winner.id)))
+
+
+class FeedAffinityTests(FeedTestBase):
+    """§3.6 — incremental affinity with decay applied at both ends."""
+
+    LIKE_URL = "/posts/like"
+
+    def test_liking_a_post_creates_and_then_grows_affinity(self):
+        author = self._user("fav", "Fav")
+        first = self._post(author)
+        second = self._post(author)
+
+        self.client.force_authenticate(user=self.me)
+        self.client.post(self.LIKE_URL, {"post_id": str(first.id)}, format="json")
+        self.client.post(self.LIKE_URL, {"post_id": str(second.id)}, format="json")
+
+        affinity = ActorAffinity.objects.get(viewer=self.me, author_user=author)
+        # Two likes at +2, decayed by ~nothing over a few milliseconds.
+        self.assertAlmostEqual(affinity.score, 4.0, places=2)
+
+    def test_affinity_lifts_a_favourite_author(self):
+        favourite = self._followed_user("favourite")
+        other = self._followed_user("other")
+
+        lifted = self._post(favourite, likes=10, age_hours=2)
+        rival = self._post(other, likes=12, age_hours=2)
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(ids.index(str(rival.id)), ids.index(str(lifted.id)))
+
+        ActorAffinity.objects.create(
+            viewer=self.me, author_user=favourite, score=4.0
+        )
+        cache.clear()
+
+        with self._no_jitter():
+            ids = self._ids(self._get())
+        self.assertLess(ids.index(str(lifted.id)), ids.index(str(rival.id)))
+
+    def test_affinity_contribution_is_capped(self):
+        from feed.selectors.feed_selectors import affinities_for
+        from feed.services.feed_services import AFFINITY_CAP
+
+        author = self._user("huge", "Huge")
+        ActorAffinity.objects.create(
+            viewer=self.me, author_user=author, score=500.0
+        )
+
+        self.assertEqual(affinities_for(self.me)[str(author.id)], AFFINITY_CAP)
+
+    def test_self_interaction_records_nothing(self):
+        mine = self._post(self.me)
+
+        self.client.force_authenticate(user=self.me)
+        self.client.post(self.LIKE_URL, {"post_id": str(mine.id)}, format="json")
+
+        self.assertFalse(ActorAffinity.objects.filter(viewer=self.me).exists())

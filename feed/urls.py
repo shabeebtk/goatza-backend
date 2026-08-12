@@ -1,5 +1,5 @@
 from django.urls import path
-from feed.views.feed_views import FeedAPIView
+from feed.views.feed_views import FeedAPIView, FeedImpressionsAPIView
 from feed.views.explore_views import (
     ExplorePlayersAPIView, ExploreOrganizationsAPIView,
     ExploreTrendingPostsAPIView,
@@ -9,6 +9,7 @@ from feed.views.explore_views import (
 
 urlpatterns = [
     path('list', FeedAPIView.as_view()),
+    path('impressions', FeedImpressionsAPIView.as_view()),
 
     # discovery
     path('explore/players', ExplorePlayersAPIView.as_view()),

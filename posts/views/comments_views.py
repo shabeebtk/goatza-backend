@@ -12,6 +12,7 @@ from utils.response import response_data
 from connections.models import Follow
 from posts.serializers.comments_serializers import CommentSerializer
 from notifications.services.notification_service import NotificationService
+from feed.services.affinity_services import AffinityService
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,15 @@ class CreateCommentAPIView(BaseAPIView):
 
             with transaction.atomic():
 
+                # author ids are loaded here rather than deferred: the affinity
+                # write below needs them, and a deferred column would cost a
+                # second query inside the transaction.
                 post = Post.objects.select_for_update().filter(
                     id=post_id,
                     is_deleted=False
-                ).only("id", "comments_count").first()
+                ).only(
+                    "id", "comments_count", "author_user_id", "author_org_id"
+                ).first()
 
                 if not post:
                     return response_data(False, "Post not found", status_code=404)
@@ -92,6 +98,15 @@ class CreateCommentAPIView(BaseAPIView):
                     actor_user=actor.user if actor.is_user else None,
                     actor_org=actor.organization if actor.is_org else None,
                     comment=comment
+                )
+
+                # §3.6 — a comment costs more effort than a like, so it says
+                # more about who this person wants in their feed.
+                AffinityService.record_for_actor(
+                    actor,
+                    AffinityService.COMMENT,
+                    author_user_id=post.author_user_id,
+                    author_org_id=post.author_org_id,
                 )
 
             logger.info(

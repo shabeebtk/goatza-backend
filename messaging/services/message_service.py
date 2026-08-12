@@ -33,8 +33,13 @@ from messaging.services.exceptions import (
     NotMessageSenderError,
     NotParticipantError,
 )
+from feed.services.affinity_services import AffinityService
+from notifications.services.deeplink_service import build_conversation_url
 from notifications.services.fcm_service import FCMService
-from notifications.services.notification_service import NotificationService
+from notifications.services.notification_service import (
+    NotificationService,
+    get_org_admin_users,
+)
 from services.storage.factory import get_storage_service
 from services.storage.validators import (
     build_video_thumbnail_url,
@@ -398,8 +403,39 @@ class MessageService:
         # never roll back a persisted message)
         MessageService._trigger_realtime(conversation, message)
         MessageService._trigger_push(conversation, message)
+        MessageService._record_affinity(conversation, message)
 
         return message
+
+    @staticmethod
+    def _record_affinity(conversation, message):
+        """
+        §3.6 — messaging someone is the strongest signal in the model (+5), so
+        their posts float up the sender's feed.
+
+        Only the SENDER's affinity moves: they chose to reach out; the recipient
+        chose nothing. Org senders are skipped — affinity is keyed to a person
+        and ``_create_and_dispatch`` only knows which org sent, not which member.
+        """
+        if not message.sender_user_id:
+            return
+
+        participants = (
+            ConversationParticipant.objects
+            .filter(conversation=conversation)
+            .values_list("user_id", "org_id")
+        )
+
+        for user_id, org_id in participants:
+            # The sender is skipped by AffinityService itself (no self-affinity);
+            # filtering them out in SQL would need an IS NULL guard for the org
+            # participants, which is more fragile than just letting it through.
+            AffinityService.record(
+                message.sender_user,
+                AffinityService.MESSAGE,
+                author_user_id=user_id,
+                author_org_id=org_id,
+            )
 
     # ----------------------------------------
     # DELETE (unsend)
@@ -604,26 +640,43 @@ class MessageService:
 
             # Text/media keep the existing push-only behaviour — no in-app
             # notification row is written for ordinary chat.
+            #
+            # An org has no device of its own, so its push fans out to the
+            # OWNER/ADMIN members the same way a notification row does. Without
+            # this branch an org participant got no push at all for ordinary
+            # chat — only for shares, which go through NotificationService above.
             if participant.user:
-                # Caption if there is one, else a media-type-specific line.
-                if message.content:
-                    body = message.content[:50]
-                elif message.message_type == Message.Type.IMAGE:
-                    body = "📷 Sent you a photo"
-                elif message.message_type == Message.Type.VIDEO:
-                    body = "🎥 Sent you a video"
-                else:
-                    body = ""
+                targets = [participant.user]
+            elif participant.org:
+                targets = get_org_admin_users(participant.org)
+            else:
+                continue
 
-                FCMService.send_to_user(
-                    participant.user,
-                    {
-                        "type": "message",
-                        "title": "New message",
-                        "body": body,
-                        "conversation_id": str(conversation.id),
-                        "sender_name": message.sender_user.profile_name
-                        if message.sender_user else "",
-                        "url": f"/messages/{conversation.id}"
-                    }
-                )
+            if not targets:
+                continue
+
+            # Caption if there is one, else a media-type-specific line.
+            if message.content:
+                body = message.content[:50]
+            elif message.message_type == Message.Type.IMAGE:
+                body = "📷 Sent you a photo"
+            elif message.message_type == Message.Type.VIDEO:
+                body = "🎥 Sent you a video"
+            else:
+                body = ""
+
+            payload = {
+                "type": "message",
+                "title": "New message",
+                "body": body,
+                "conversation_id": str(conversation.id),
+                "sender_name": message.sender_user.profile_name
+                if message.sender_user else "",
+                # Resolved in the RECIPIENT's route space — an org member opening
+                # this must land inside /organization/admin/<id>/… or the client
+                # switches them back to their personal account.
+                "url": build_conversation_url(conversation.id, participant.org_id),
+            }
+
+            for target in targets:
+                FCMService.send_to_user(target, payload)

@@ -11,6 +11,7 @@ from utils.response import response_data
 from connections.models import Follow
 from posts.serializers.like_serializers import LikeListSerializer
 from notifications.services.notification_service import NotificationService
+from feed.services.affinity_services import AffinityService
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,16 @@ class ToggleLikeAPIView(BaseAPIView):
                         actor_user=actor.user if actor.is_user else None,
                         actor_org=actor.organization if actor.is_org else None,
                         post=post
+                    )
+
+                    # §3.6 — a like is the cheapest signal of who this person
+                    # actually wants to see. Only on a NEW like: changing a
+                    # reaction is the same interaction, not a second one.
+                    AffinityService.record_for_actor(
+                        actor,
+                        AffinityService.LIKE,
+                        author_user_id=post.author_user_id,
+                        author_org_id=post.author_org_id,
                     )
 
                 print('-=--4')

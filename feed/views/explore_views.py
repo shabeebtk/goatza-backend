@@ -328,7 +328,7 @@ class ExploreTrendingPostsAPIView(BaseAPIView):
 
             # 3. DIVERSIFY per author (cursor is taken from the score-ordered
             #    page, so this display-only reshuffle can't affect paging).
-            paginated_posts = FeedService.diversify_posts(paginated_posts)
+            paginated_posts = ExploreService.diversify_posts(paginated_posts)
 
             post_ids = [p.id for p in paginated_posts]
 
