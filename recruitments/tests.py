@@ -12,10 +12,10 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from core.actor import Actor
-from accounts.models import User
+from accounts.models import User, UserProfile
 from organization.models import Organization, OrganizationMember
 from connections.models import Follow
-from sports.models import Sport, SportPosition
+from sports.models import Sport, SportPosition, UserSport, UserSportPosition
 from recruitments.models import (
     Recruitment,
     RecruitmentMedia,
@@ -26,8 +26,16 @@ from recruitments.models import (
     RecruitmentQuestion,
     RecruitmentAgeCategory,
     RecruitmentEligibilityCriteria,
+    RecruitmentDiscoverImpression,
 )
 from recruitments.selectors.recruitment_selectors import RecruitmentSelector
+from recruitments.selectors.player_context_selectors import (
+    PlayerContext, PlayerContextSelector,
+)
+from recruitments.services import eligibility_service
+from recruitments.services.match_score_service import (
+    MATCH_WEIGHTS, MatchScoreService,
+)
 from notifications.models import Notification
 
 SIGNATURE_URL = "/user/get/upload/signature"
@@ -1950,3 +1958,961 @@ class RecruitmentEligibilityTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["data"]["age_categories"], [])
         self.assertEqual(resp.data["data"]["eligibility_criteria"], [])
+
+
+# =====================================================================
+# DISCOVERY & RANKING (Goatza_Recruitment_Discovery_Spec §2–§4)
+# =====================================================================
+
+# Thiruvananthapuram — the worked example's player location (§3).
+TVM_LAT = 8.5241
+TVM_LNG = 76.9366
+
+# Degrees of latitude per km, matching the bounding-box helper's constant.
+# Offsetting purely in latitude keeps the fixtures readable and lands within
+# ~0.2% of the target km, which is nowhere near a band boundary.
+DEG_PER_KM = 1 / 111.0
+
+
+class RecruitmentEligibilityEngineTests(APITestCase):
+    """
+    §2 player-fit eligibility. Display + ranking only — nothing here is allowed
+    to reach the apply flow (see RecruitmentApplyFlowIsolationTests).
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(
+            name="Engine FC", username="enginefc",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+
+    def _recruitment(self, **overrides):
+        data = dict(
+            organization=self.org,
+            sport=self.sport,
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            title="Trials",
+            recruitment_type="open_trial",
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _verdict(self, recruitment, **context_kwargs):
+        return eligibility_service.evaluate(
+            recruitment, PlayerContext(**context_kwargs)
+        )
+
+    # ── age: boundaries ──────────────────────────────────────────
+
+    def test_birth_year_boundaries_are_inclusive(self):
+        recruitment = self._recruitment()
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="U15",
+            min_birth_year=2008, max_birth_year=2010,
+        )
+
+        # Both bounds are themselves eligible years.
+        self.assertTrue(self._verdict(recruitment, birth_year=2008).is_eligible)
+        self.assertTrue(self._verdict(recruitment, birth_year=2010).is_eligible)
+        self.assertTrue(self._verdict(recruitment, birth_year=2009).is_eligible)
+
+        # One year outside either end is not.
+        self.assertFalse(self._verdict(recruitment, birth_year=2007).is_eligible)
+        self.assertFalse(self._verdict(recruitment, birth_year=2011).is_eligible)
+
+    def test_open_ended_bands_never_exclude_on_the_null_side(self):
+        min_only = self._recruitment()
+        RecruitmentAgeCategory.objects.create(
+            recruitment=min_only, title="U17",
+            min_birth_year=2010, max_birth_year=None,
+        )
+        # "born 2010 or later" — the null max must not close the band.
+        self.assertTrue(self._verdict(min_only, birth_year=2010).is_eligible)
+        self.assertTrue(self._verdict(min_only, birth_year=2020).is_eligible)
+        self.assertFalse(self._verdict(min_only, birth_year=2009).is_eligible)
+
+        max_only = self._recruitment()
+        RecruitmentAgeCategory.objects.create(
+            recruitment=max_only, title="Veterans",
+            min_birth_year=None, max_birth_year=1991,
+        )
+        # "born 1991 or earlier" — the null min must not close it either.
+        self.assertTrue(self._verdict(max_only, birth_year=1991).is_eligible)
+        self.assertTrue(self._verdict(max_only, birth_year=1960).is_eligible)
+        self.assertFalse(self._verdict(max_only, birth_year=1992).is_eligible)
+
+    def test_bounds_must_be_satisfied_by_the_same_category(self):
+        # A min from one group and a max from another is NOT a match — the same
+        # rule the birth_year SQL filter enforces by putting both conditions in
+        # one .filter() call.
+        recruitment = self._recruitment()
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="U13",
+            min_birth_year=2012, max_birth_year=2014,
+        )
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="Seniors",
+            min_birth_year=1990, max_birth_year=2000,
+        )
+
+        # 2005 clears U13's max and Seniors' min, but satisfies neither row.
+        self.assertFalse(self._verdict(recruitment, birth_year=2005).is_eligible)
+        self.assertTrue(self._verdict(recruitment, birth_year=2013).is_eligible)
+
+        # The SQL birth_year filter has to agree — one interpretation, not two.
+        matched = RecruitmentSelector.build_list_queryset(
+            actor=None, birth_year=2005
+        ).values_list("id", flat=True)
+        self.assertNotIn(recruitment.id, list(matched))
+
+    # ── missing data is never a disqualifier ─────────────────────
+
+    def test_missing_birthdate_is_eligible(self):
+        recruitment = self._recruitment()
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="U15",
+            min_birth_year=2008, max_birth_year=2010,
+        )
+
+        # Young players are exactly the demographic that leaves DOB blank.
+        # Unknown is not ineligible.
+        verdict = self._verdict(recruitment, birth_year=None)
+        self.assertTrue(verdict.is_eligible)
+        self.assertIsNone(verdict.badge)
+
+    def test_missing_gender_is_eligible(self):
+        recruitment = self._recruitment(gender=Recruitment.Gender.FEMALE)
+        self.assertTrue(self._verdict(recruitment, gender="").is_eligible)
+
+    def test_recruitment_with_no_age_categories_is_eligible(self):
+        # An empty list already means "open to all ages".
+        recruitment = self._recruitment()
+        self.assertTrue(self._verdict(recruitment, birth_year=1975).is_eligible)
+
+    def test_blank_and_all_recruitment_gender_are_eligible(self):
+        blank = self._recruitment(gender="")
+        self.assertTrue(self._verdict(blank, gender="female").is_eligible)
+
+        every = self._recruitment(gender=Recruitment.Gender.ALL)
+        self.assertTrue(self._verdict(every, gender="female").is_eligible)
+
+    # ── badges ───────────────────────────────────────────────────
+
+    def test_age_badge_names_the_groups_it_is_open_to(self):
+        recruitment = self._recruitment()
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="U-17",
+            min_birth_year=2010, max_birth_year=2011,
+        )
+
+        verdict = self._verdict(recruitment, birth_year=1990)
+        self.assertFalse(verdict.is_eligible)
+        self.assertEqual(verdict.reasons, ["age"])
+        self.assertEqual(verdict.badge, "U-17 only")
+
+    def test_gender_badge_is_informational_not_prohibitive(self):
+        recruitment = self._recruitment(gender=Recruitment.Gender.FEMALE)
+        verdict = self._verdict(recruitment, gender="male")
+
+        self.assertFalse(verdict.is_eligible)
+        self.assertEqual(verdict.badge, "Open to female only")
+        # Never phrased as a prohibition — Goatza displays, the venue verifies.
+        self.assertNotIn("cannot", verdict.badge.lower())
+
+    def test_deadline_badge_wins_when_several_checks_fail(self):
+        recruitment = self._recruitment(
+            gender=Recruitment.Gender.FEMALE,
+            application_deadline=timezone.now() - timedelta(days=1),
+        )
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="U-17",
+            min_birth_year=2010, max_birth_year=2011,
+        )
+
+        verdict = self._verdict(recruitment, birth_year=1990, gender="male")
+        self.assertEqual(verdict.reasons, ["deadline", "age", "gender"])
+        self.assertEqual(verdict.badge, "Applications closed")
+
+
+class RecruitmentMatchScoreTests(APITestCase):
+    """§3 — the additive score, verified against the spec's worked example."""
+
+    def setUp(self):
+        self.player = User.objects.create_user(
+            email="score_p@example.com", password="pass1234",
+            username="score_player",
+        )
+        today = timezone.now().date()
+        self.profile = UserProfile.objects.create(
+            user=self.player, name="Striker",
+            birthdate=today.replace(year=today.year - 16),
+            gender="male",
+            latitude=TVM_LAT, longitude=TVM_LNG,
+        )
+
+        self.academy = Organization.objects.create(
+            name="Academy X", username="academyx",
+            type=Organization.Type.ACADEMY,
+        )
+        self.district = Organization.objects.create(
+            name="District Board", username="districtboard",
+            type=Organization.Type.CLUB,
+        )
+
+        self.football = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.basketball = Sport.objects.create(
+            name="Basketball", icon_name="mdi:basketball"
+        )
+        self.striker = SportPosition.objects.create(
+            sport=self.football, name="Striker"
+        )
+
+        UserSport.objects.create(
+            user=self.player, sport=self.football, is_primary=True
+        )
+        UserSportPosition.objects.create(
+            user=self.player, sport=self.football,
+            position=self.striker, is_primary=True,
+        )
+
+        # Follows Academy X — worth +10 on its postings.
+        Follow.objects.create(
+            follower_user=self.player, following_org=self.academy
+        )
+
+        self.actor = Actor(actor_type="user", user=self.player)
+        self.now = timezone.now()
+
+    # ── helpers ──────────────────────────────────────────────────
+
+    def _recruitment(self, org=None, sport=None, km=None, **overrides):
+        lat, lng = (
+            (TVM_LAT + km * DEG_PER_KM, TVM_LNG)
+            if km is not None
+            else (None, None)
+        )
+        data = dict(
+            organization=org or self.academy,
+            sport=sport or self.football,
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            title="Trial",
+            recruitment_type="open_trial",
+            latitude=lat,
+            longitude=lng,
+            published_at=self.now,
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _score(self, recruitment):
+        """Score one row the way the endpoint does — distance from SQL."""
+        context = PlayerContextSelector.resolve(self.actor)
+        queryset = Recruitment.objects.filter(id=recruitment.id)
+        if context.center:
+            queryset = RecruitmentSelector.annotate_distance(
+                queryset, context.center
+            )
+        row = queryset.select_related("organization").first()
+        return MatchScoreService.score(row, context, self.now)
+
+    def _eligible_group(self, recruitment):
+        """An age band the fixture player falls inside."""
+        year = self.profile.birthdate.year
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="U-17",
+            min_birth_year=year - 1, max_birth_year=year + 1,
+        )
+
+    # ── §3 worked example ────────────────────────────────────────
+
+    def test_worked_example_row_1_scores_96(self):
+        # Academy X U-17 striker trial, 8 km away, closes in 5 days, posted
+        # yesterday: 40 + 15 + 15 + 8 + 10 + 8.
+        recruitment = self._recruitment(
+            km=8,
+            application_deadline=self.now + timedelta(days=5),
+            published_at=self.now - timedelta(days=1),
+        )
+        RecruitmentPosition.objects.create(
+            recruitment=recruitment, position=self.striker
+        )
+        self._eligible_group(recruitment)
+
+        match = self._score(recruitment)
+
+        self.assertTrue(match.is_eligible)
+        self.assertEqual(match.score, 96)
+        self.assertEqual(match.sport_match, "primary")
+        self.assertTrue(match.position_match)
+        self.assertEqual(match.days_to_deadline, 5)
+
+    def test_worked_example_row_2_scores_60(self):
+        # District football trial, any position, 40 km, closes in 20 days,
+        # posted 5 days ago: 40 + 8 + 8 + 0 + 0 + 4.
+        recruitment = self._recruitment(
+            org=self.district,
+            km=40,
+            application_deadline=self.now + timedelta(days=20),
+            published_at=self.now - timedelta(days=5),
+        )
+
+        match = self._score(recruitment)
+
+        self.assertEqual(match.score, 60)
+        # "Any position" is neutral, not a mismatch.
+        self.assertIsNone(match.position_match)
+
+    def test_worked_example_row_3_scores_31(self):
+        # Basketball scholarship, 5 km, fresh: 0 + 8 + 15 + 0 + 0 + 8.
+        recruitment = self._recruitment(
+            org=self.district,
+            sport=self.basketball,
+            km=5,
+            recruitment_type="scholarship",
+        )
+
+        match = self._score(recruitment)
+
+        self.assertEqual(match.score, 31)
+        self.assertEqual(match.sport_match, "none")
+
+    def test_worked_example_row_4_ineligible_sinks_to_about_3(self):
+        # Senior (age-ineligible) football trial nearby:
+        # (40 + 8 + 15) x 0.05 — bottom of the list, still visible, badged.
+        recruitment = self._recruitment(
+            org=self.district,
+            km=5,
+            published_at=self.now - timedelta(days=30),
+        )
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="Seniors",
+            min_birth_year=1980, max_birth_year=1995,
+        )
+
+        match = self._score(recruitment)
+
+        self.assertEqual(match.raw_score, 63)
+        self.assertAlmostEqual(match.score, 3.15, places=2)
+        self.assertFalse(match.is_eligible)
+        self.assertEqual(match.badge, "Seniors only")
+
+    # ── missing data ─────────────────────────────────────────────
+
+    def test_recruitment_without_coordinates_scores_neutral_five(self):
+        # 40 (sport) + 8 (no positions) + 5 (unknown distance) + 8 (fresh).
+        recruitment = self._recruitment(km=None, org=self.district)
+
+        match = self._score(recruitment)
+
+        self.assertIsNone(match.distance_km)
+        self.assertEqual(match.score, 61)
+
+    def test_player_without_coordinates_scores_neutral_five(self):
+        # The other direction: the recruitment has a venue, the player has no
+        # location on file. Still +5, never 0.
+        self.profile.latitude = None
+        self.profile.longitude = None
+        self.profile.save(update_fields=["latitude", "longitude"])
+
+        recruitment = self._recruitment(km=5, org=self.district)
+
+        self.assertIsNone(PlayerContextSelector.resolve(self.actor).center)
+
+        match = self._score(recruitment)
+        self.assertIsNone(match.distance_km)
+        self.assertEqual(match.score, 61)
+
+    def test_player_without_positions_is_neutral_not_a_mismatch(self):
+        UserSportPosition.objects.filter(user=self.player).delete()
+
+        recruitment = self._recruitment(km=5, org=self.district)
+        RecruitmentPosition.objects.create(
+            recruitment=recruitment, position=self.striker
+        )
+
+        match = self._score(recruitment)
+
+        self.assertIsNone(match.position_match)
+        # 40 + 8 (neutral) + 15 + 8 — the same as an unspecified recruitment.
+        self.assertEqual(match.score, 71)
+
+    def test_distance_bands(self):
+        for km, points in ((5, 15), (20, 12), (40, 8), (80, 4), (300, 0)):
+            with self.subTest(km=km):
+                recruitment = self._recruitment(km=km, org=self.district)
+                # 40 (sport) + 8 (no positions) + 8 (fresh) + distance band.
+                self.assertEqual(self._score(recruitment).score, 56 + points)
+
+    def test_verified_organization_adds_three(self):
+        self.district.is_verified = True
+        self.district.save(update_fields=["is_verified"])
+
+        recruitment = self._recruitment(km=5, org=self.district)
+
+        # 40 + 8 + 15 + 8 + 3.
+        self.assertEqual(self._score(recruitment).score, 74)
+
+    def test_weights_live_in_one_block(self):
+        # §8 retunes these from logged outcomes; that is only possible while
+        # they are data in one place.
+        self.assertEqual(MATCH_WEIGHTS["sport_primary"], 40)
+        self.assertEqual(MATCH_WEIGHTS["distance_unknown"], 5)
+        self.assertEqual(MATCH_WEIGHTS["ineligible_multiplier"], 0.05)
+
+
+class RecruitmentDiscoverAPITests(APITestCase):
+    """§4 — the /discover payload: sections, dedup, and the degraded actors."""
+
+    DISCOVER_URL = "/recruitments/discover"
+
+    def setUp(self):
+        cache.clear()  # the payload is cached per actor for 10 minutes
+
+        self.player = User.objects.create_user(
+            email="disc_api@example.com", password="pass1234",
+            username="disc_api_player",
+        )
+        today = timezone.now().date()
+        self.profile = UserProfile.objects.create(
+            user=self.player, name="Player",
+            birthdate=today.replace(year=today.year - 16),
+            gender="male",
+            latitude=TVM_LAT, longitude=TVM_LNG,
+        )
+
+        self.owner = User.objects.create_user(
+            email="disc_api_o@example.com", password="pass1234",
+            username="disc_api_owner",
+        )
+        self.org = Organization.objects.create(
+            name="Coastal FC", username="coastalfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+
+        self.football = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.basketball = Sport.objects.create(
+            name="Basketball", icon_name="mdi:basketball"
+        )
+        self.striker = SportPosition.objects.create(
+            sport=self.football, name="Striker"
+        )
+        UserSport.objects.create(
+            user=self.player, sport=self.football, is_primary=True
+        )
+        UserSport.objects.create(
+            user=self.player, sport=self.basketball, is_primary=False
+        )
+
+        self.now = timezone.now()
+
+    # ── helpers ──────────────────────────────────────────────────
+
+    def _recruitment(self, km=None, **overrides):
+        lat, lng = (
+            (TVM_LAT + km * DEG_PER_KM, TVM_LNG)
+            if km is not None
+            else (None, None)
+        )
+        data = dict(
+            organization=self.org,
+            sport=self.football,
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            title="Trial",
+            recruitment_type="open_trial",
+            latitude=lat,
+            longitude=lng,
+            published_at=self.now,
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _discover(self, actor_org=None, **params):
+        self.client.force_authenticate(
+            user=self.owner if actor_org else self.player
+        )
+        headers = {}
+        if actor_org is not None:
+            headers = {
+                "HTTP_X_ACTOR_TYPE": "organization",
+                "HTTP_X_ACTOR_ID": str(actor_org.id),
+            }
+        return self.client.get(self.DISCOVER_URL, params, **headers)
+
+    @staticmethod
+    def _ids(data, section):
+        return [str(item["id"]) for item in data[section]]
+
+    # ── sections + dedup ─────────────────────────────────────────
+
+    def test_sections_are_deduplicated_in_priority_order(self):
+        # Two recruitments that each qualify for all four sections: nearby,
+        # closing within a week, published today.
+        star = self._recruitment(
+            km=3, application_deadline=self.now + timedelta(days=2)
+        )
+        other = self._recruitment(
+            km=6, application_deadline=self.now + timedelta(days=3)
+        )
+
+        resp = self._discover()
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data["data"]
+
+        every_id = (
+            self._ids(data, "recommended")
+            + self._ids(data, "closing_soon")
+            + self._ids(data, "near_you")
+            + self._ids(data, "new_this_week")
+        )
+        self.assertEqual(len(every_id), len(set(every_id)))
+        self.assertCountEqual(
+            self._ids(data, "recommended"), [str(star.id), str(other.id)]
+        )
+        # Both were consumed by the highest-priority section they qualified for.
+        self.assertEqual(self._ids(data, "closing_soon"), [])
+        self.assertEqual(self._ids(data, "near_you"), [])
+        self.assertEqual(self._ids(data, "new_this_week"), [])
+
+    def test_near_you_holds_what_recommended_did_not_take(self):
+        # Ten strong matches saturate "recommended" (score 60 each: primary
+        # sport + neutral position + 60 km band + fresh)...
+        for index in range(10):
+            self._recruitment(km=60, title=f"Filler {index}")
+        # ...leaving these two — a weaker secondary-sport pair — to the rails.
+        near = self._recruitment(km=20, sport=self.basketball, title="Near")
+        far = self._recruitment(km=120, sport=self.basketball, title="Far")
+
+        data = self._discover(max_distance_km=50).data["data"]
+
+        self.assertEqual(len(data["recommended"]), 10)
+        self.assertEqual(self._ids(data, "near_you"), [str(near.id)])
+        self.assertNotIn(str(far.id), self._ids(data, "near_you"))
+
+    def test_sections_carry_chip_data_not_a_number_the_card_shows(self):
+        recruitment = self._recruitment(
+            km=8, application_deadline=self.now + timedelta(days=5)
+        )
+        RecruitmentPosition.objects.create(
+            recruitment=recruitment, position=self.striker
+        )
+        UserSportPosition.objects.create(
+            user=self.player, sport=self.football, position=self.striker
+        )
+
+        item = self._discover().data["data"]["recommended"][0]
+
+        self.assertEqual(item["sport_match"], "primary")
+        self.assertTrue(item["position_match"])
+        # The chip names the position that ACTUALLY overlapped, so a posting
+        # listing three roles cannot make the card claim the wrong one.
+        self.assertEqual(item["matched_positions"], ["Striker"])
+        self.assertAlmostEqual(item["distance_km"], 8.0, delta=0.3)
+        self.assertEqual(item["days_to_deadline"], 5)
+        self.assertTrue(item["is_eligible"])
+        self.assertIsNone(item["eligibility_badge"])
+        # published_at / application_deadline are on the DISCOVER serializer.
+        self.assertIn("published_at", item)
+        self.assertIn("application_deadline", item)
+
+    def test_ineligible_rows_rank_last_and_keep_a_badge(self):
+        eligible = self._recruitment(km=40, title="Open to me")
+        ineligible = self._recruitment(km=1, title="Seniors only")
+        RecruitmentAgeCategory.objects.create(
+            recruitment=ineligible, title="Seniors",
+            min_birth_year=1980, max_birth_year=1995,
+        )
+
+        data = self._discover().data["data"]
+        recommended = data["recommended"]
+        ids = [str(item["id"]) for item in recommended]
+
+        # Visible — never filtered out — but below the eligible row it would
+        # otherwise have beaten on distance.
+        self.assertIn(str(ineligible.id), ids)
+        self.assertEqual(ids[-1], str(ineligible.id))
+        self.assertEqual(ids[0], str(eligible.id))
+
+        sunk = recommended[-1]
+        self.assertFalse(sunk["is_eligible"])
+        self.assertEqual(sunk["eligibility_badge"], "Seniors only")
+
+        # And it is not repeated in the eligible-only rails.
+        self.assertNotIn(str(ineligible.id), self._ids(data, "near_you"))
+
+    def test_deadline_passed_rows_are_excluded_from_discover(self):
+        closed = self._recruitment(
+            km=2, application_deadline=self.now - timedelta(days=1)
+        )
+
+        data = self._discover().data["data"]
+
+        for section in (
+            "recommended", "closing_soon", "near_you", "new_this_week"
+        ):
+            self.assertNotIn(str(closed.id), self._ids(data, section))
+
+    # ── degraded actors ──────────────────────────────────────────
+
+    def test_org_actor_gets_a_valid_non_personalized_payload(self):
+        self._recruitment(km=5)
+
+        resp = self._discover(actor_org=self.org)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data["data"]
+        self.assertFalse(data["is_personalized"])
+        self.assertIn("sport", data["missing_profile_fields"])
+        self.assertEqual(len(data["recommended"]), 1)
+        # Nothing personalized to say, so no sport chip.
+        self.assertEqual(data["recommended"][0]["sport_match"], "none")
+
+    def test_player_without_sports_gets_a_valid_payload(self):
+        UserSport.objects.filter(user=self.player).delete()
+        self._recruitment(km=5)
+
+        resp = self._discover()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data["data"]
+        self.assertFalse(data["is_personalized"])
+        self.assertEqual(len(data["recommended"]), 1)
+
+    def test_missing_profile_fields_names_each_gap(self):
+        self.profile.birthdate = None
+        self.profile.latitude = None
+        self.profile.longitude = None
+        self.profile.save()
+
+        data = self._discover().data["data"]
+
+        self.assertTrue(data["is_personalized"])  # sport is on file
+        self.assertCountEqual(
+            data["missing_profile_fields"],
+            ["positions", "birthdate", "location"],
+        )
+
+    # ── cache + metrics ──────────────────────────────────────────
+
+    def test_payload_is_cached_per_actor(self):
+        self._recruitment(km=5)
+        first = self._discover().data["data"]
+
+        # A row published after the first call must not appear until the
+        # 10-minute window rolls over (§4 — freshness tolerates it).
+        self._recruitment(km=6, title="Newer")
+        self.assertEqual(self._discover().data["data"], first)
+
+        cache.clear()
+        self.assertEqual(len(self._discover().data["data"]["recommended"]), 2)
+
+    def test_serving_discover_logs_an_impression_row(self):
+        recruitment = self._recruitment(km=5)
+
+        self._discover()
+
+        impression = RecruitmentDiscoverImpression.objects.get(
+            user=self.player, recruitment=recruitment
+        )
+        self.assertEqual(impression.section, "recommended")
+        self.assertGreater(impression.match_score, 0)
+        self.assertEqual(impression.served_count, 1)
+
+        # A second assembly counts a second serve on the same row, not a
+        # duplicate: the table's size tracks the corpus, not pageviews.
+        cache.clear()
+        self._discover()
+        impression.refresh_from_db()
+        self.assertEqual(impression.served_count, 2)
+        self.assertEqual(
+            RecruitmentDiscoverImpression.objects.filter(
+                user=self.player, recruitment=recruitment
+            ).count(),
+            1,
+        )
+
+
+class RecruitmentAllTabFilterTests(APITestCase):
+    """§4 — the "All" tab: new filters and the ranked default ordering."""
+
+    LIST_URL = "/recruitments/list"
+
+    def setUp(self):
+        cache.clear()
+        self.player = User.objects.create_user(
+            email="all_tab@example.com", password="pass1234",
+            username="all_tab_player",
+        )
+        today = timezone.now().date()
+        self.profile = UserProfile.objects.create(
+            user=self.player, name="Player",
+            birthdate=today.replace(year=today.year - 16),
+            latitude=TVM_LAT, longitude=TVM_LNG,
+        )
+        self.owner = User.objects.create_user(
+            email="all_tab_o@example.com", password="pass1234",
+            username="all_tab_owner",
+        )
+        self.org = Organization.objects.create(
+            name="Harbour FC", username="harbourfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.football = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.striker = SportPosition.objects.create(
+            sport=self.football, name="Striker"
+        )
+        self.keeper = SportPosition.objects.create(
+            sport=self.football, name="Goalkeeper"
+        )
+        UserSport.objects.create(
+            user=self.player, sport=self.football, is_primary=True
+        )
+        self.now = timezone.now()
+
+    def _recruitment(self, km=None, **overrides):
+        lat, lng = (
+            (TVM_LAT + km * DEG_PER_KM, TVM_LNG)
+            if km is not None
+            else (None, None)
+        )
+        data = dict(
+            organization=self.org,
+            sport=self.football,
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            title="Trial",
+            recruitment_type="open_trial",
+            latitude=lat,
+            longitude=lng,
+            published_at=self.now,
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _list(self, user=None, org=None, **params):
+        self.client.force_authenticate(user=user or self.player)
+        headers = {}
+        if org is not None:
+            headers = {
+                "HTTP_X_ACTOR_TYPE": "organization",
+                "HTTP_X_ACTOR_ID": str(org.id),
+            }
+        return self.client.get(self.LIST_URL, params, **headers)
+
+    def _ids(self, resp):
+        return [str(r["id"]) for r in resp.data["data"]["results"]]
+
+    # ── ordering ─────────────────────────────────────────────────
+
+    def test_player_gets_match_ordering_not_newest_first(self):
+        # Older but a much better match (nearby) vs newer and far away.
+        near = self._recruitment(km=2, published_at=self.now - timedelta(days=6))
+        far = self._recruitment(km=300, published_at=self.now)
+
+        self.assertEqual(self._ids(self._list()), [str(near.id), str(far.id)])
+
+    def test_org_scoped_list_keeps_published_ordering(self):
+        # The org admin and public-org-profile mounts pass ``username`` and must
+        # not change behaviour.
+        older = self._recruitment(
+            km=2, published_at=self.now - timedelta(days=6)
+        )
+        newer = self._recruitment(km=300, published_at=self.now)
+
+        resp = self._list(username=self.org.username)
+
+        self.assertEqual(self._ids(resp), [str(newer.id), str(older.id)])
+        # And the unranked payload keeps the plain list shape.
+        self.assertNotIn("match_score", resp.data["data"]["results"][0])
+
+    # ── new filters ──────────────────────────────────────────────
+
+    def test_max_distance_km_filter(self):
+        near = self._recruitment(km=20)
+        far = self._recruitment(km=120)
+        nowhere = self._recruitment(km=None)
+
+        ids = self._ids(self._list(max_distance_km=50))
+
+        self.assertEqual(ids, [str(near.id)])
+        self.assertNotIn(str(far.id), ids)
+        # A venue with no coordinates cannot answer "within 50 km".
+        self.assertNotIn(str(nowhere.id), ids)
+
+    def test_position_id_filter(self):
+        striker_trial = self._recruitment()
+        RecruitmentPosition.objects.create(
+            recruitment=striker_trial, position=self.striker
+        )
+        keeper_trial = self._recruitment()
+        RecruitmentPosition.objects.create(
+            recruitment=keeper_trial, position=self.keeper
+        )
+
+        ids = self._ids(self._list(position_id=str(self.striker.id)))
+        self.assertEqual(ids, [str(striker_trial.id)])
+
+    def test_age_eligible_toggle_filters_only_on_age(self):
+        year = self.profile.birthdate.year
+        mine = self._recruitment(title="Mine")
+        RecruitmentAgeCategory.objects.create(
+            recruitment=mine, title="U-17",
+            min_birth_year=year - 1, max_birth_year=year + 1,
+        )
+        seniors = self._recruitment(title="Seniors")
+        RecruitmentAgeCategory.objects.create(
+            recruitment=seniors, title="Seniors",
+            min_birth_year=1980, max_birth_year=1995,
+        )
+        closed = self._recruitment(
+            title="Closed", application_deadline=self.now - timedelta(days=1)
+        )
+
+        ids = self._ids(self._list(age_eligible="true"))
+
+        self.assertIn(str(mine.id), ids)
+        self.assertNotIn(str(seniors.id), ids)
+        # The toggle is about AGE. A closed posting is still theirs to see and
+        # keeps its badge — "All" is where deadline-passed rows live.
+        self.assertIn(str(closed.id), ids)
+
+    def test_age_eligible_keeps_everything_when_birthdate_is_missing(self):
+        self.profile.birthdate = None
+        self.profile.save(update_fields=["birthdate"])
+
+        seniors = self._recruitment()
+        RecruitmentAgeCategory.objects.create(
+            recruitment=seniors, title="Seniors",
+            min_birth_year=1980, max_birth_year=1995,
+        )
+
+        self.assertIn(
+            str(seniors.id), self._ids(self._list(age_eligible="true"))
+        )
+
+    def test_rail_deep_link_filters(self):
+        # What "Closing soon" / "New this week" mean as a filter, so their
+        # "See all" opens the same rule the rail was built from.
+        closing = self._recruitment(
+            title="Closing", application_deadline=self.now + timedelta(days=3)
+        )
+        later = self._recruitment(
+            title="Later", application_deadline=self.now + timedelta(days=30)
+        )
+        old = self._recruitment(
+            title="Old", published_at=self.now - timedelta(days=30)
+        )
+
+        ids = self._ids(self._list(closing_within_days=7))
+        self.assertEqual(ids, [str(closing.id)])
+        self.assertNotIn(str(later.id), ids)
+
+        ids = self._ids(self._list(published_within_days=7))
+        self.assertNotIn(str(old.id), ids)
+        self.assertIn(str(closing.id), ids)
+
+        # Junk is ignored, not a 400 — same leniency as every other filter.
+        self.assertEqual(
+            len(self._ids(self._list(closing_within_days="abc"))), 3
+        )
+
+    def test_deadline_passed_rows_stay_in_all_with_a_badge(self):
+        closed = self._recruitment(
+            application_deadline=self.now - timedelta(days=2)
+        )
+
+        results = self._list().data["data"]["results"]
+
+        row = next(r for r in results if str(r["id"]) == str(closed.id))
+        self.assertFalse(row["is_eligible"])
+        self.assertEqual(row["eligibility_badge"], "Applications closed")
+
+
+class RecruitmentApplyFlowIsolationTests(APITestCase):
+    """
+    The guard against this feature leaking into the apply flow.
+
+    Eligibility is display + ranking. ``is_accepting_applications`` is the hard
+    gate, and it has to behave exactly as it did before ranking existed.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.player = User.objects.create_user(
+            email="iso_p@example.com", password="pass1234",
+            username="iso_player",
+        )
+        today = timezone.now().date()
+        UserProfile.objects.create(
+            user=self.player, name="Player",
+            birthdate=today.replace(year=today.year - 16),
+            gender="male",
+        )
+        self.org = Organization.objects.create(
+            name="Gate FC", username="gatefc", type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+
+    def test_is_accepting_applications_ignores_player_fit(self):
+        recruitment = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            title="Seniors", recruitment_type="open_trial",
+            gender=Recruitment.Gender.FEMALE,
+            published_at=timezone.now(),
+        )
+        RecruitmentAgeCategory.objects.create(
+            recruitment=recruitment, title="Seniors",
+            min_birth_year=1980, max_birth_year=1995,
+        )
+
+        # Age AND gender both fail for this player...
+        context = PlayerContextSelector.resolve(
+            Actor(actor_type="user", user=self.player)
+        )
+        self.assertFalse(
+            eligibility_service.evaluate(recruitment, context).is_eligible
+        )
+
+        # ...and neither touches the hard gate or the Apply button.
+        self.assertTrue(recruitment.is_accepting_applications)
+
+        self.client.force_authenticate(user=self.player)
+        resp = self.client.get(f"/recruitments/{recruitment.id}/details")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["data"]["is_accepting_applications"])
+        self.assertTrue(resp.data["data"]["can_apply"])
+
+    def test_is_accepting_applications_still_gates_the_hard_states(self):
+        # The unchanged behaviour, restated here so a regression in ranking
+        # cannot quietly widen it.
+        recruitment = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            status=Recruitment.Status.ACTIVE,
+            title="Gate", recruitment_type="open_trial",
+        )
+        self.assertTrue(recruitment.is_accepting_applications)
+
+        recruitment.status = Recruitment.Status.CLOSED
+        self.assertFalse(recruitment.is_accepting_applications)
+
+        recruitment.status = Recruitment.Status.ACTIVE
+        recruitment.max_applications = 1
+        recruitment.applications_count = 1
+        self.assertFalse(recruitment.is_accepting_applications)
+
+        recruitment.applications_count = 0
+        recruitment.application_deadline = timezone.now() - timedelta(days=1)
+        self.assertFalse(recruitment.is_accepting_applications)

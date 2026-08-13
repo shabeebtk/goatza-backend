@@ -1,16 +1,15 @@
 # feed/services/explore_services.py
 
-import math
 from collections import defaultdict, deque
 from datetime import timedelta
 
 from django.db.models import (
-    Case, When, F, Q, Value, FloatField, ExpressionWrapper, FilteredRelation,
+    Case, When, F, Q, Value, FloatField, FilteredRelation,
 )
-from django.db.models.functions import (
-    ACos, Cos, Sin, Radians, Least, Greatest, Coalesce, Ln,
-)
+from django.db.models.functions import Coalesce, Ln
 from django.utils.timezone import now
+
+from services.geo import haversine
 
 from accounts.models import User
 from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
@@ -39,10 +38,10 @@ class ExploreService:
     # (latitude, longitude) index before the trig runs.
     NEARBY_RADIUS_KM = 150.0
 
-    EARTH_RADIUS_KM = 6371.0
-
-    # ~km per degree of latitude (roughly constant across the globe).
-    KM_PER_DEG_LAT = 111.0
+    # Re-exported from services.geo.haversine, which owns the trig now that
+    # recruitment discovery ranks by distance too (see _distance_expr).
+    EARTH_RADIUS_KM = haversine.EARTH_RADIUS_KM
+    KM_PER_DEG_LAT = haversine.KM_PER_DEG_LAT
 
     NEARBY = ExploreCursorPagination.NEARBY
     POPULAR = ExploreCursorPagination.POPULAR
@@ -88,52 +87,13 @@ class ExploreService:
     # ------------------------------------------------------------------ #
     @classmethod
     def _bounding_box(cls, lat, lng, radius):
-        """
-        Lat/lng min/max box of ``radius`` km around (lat, lng). Used as a cheap,
-        index-friendly prefilter before the exact haversine distance.
-        """
-        lat_delta = radius / cls.KM_PER_DEG_LAT
-
-        # Longitude degrees shrink toward the poles; guard cos()→0 so the box
-        # never blows up to an infinite width near ±90°.
-        cos_lat = max(abs(math.cos(math.radians(lat))), 0.01)
-        lng_delta = radius / (cls.KM_PER_DEG_LAT * cos_lat)
-
-        return {
-            "min_lat": max(lat - lat_delta, -90.0),
-            "max_lat": min(lat + lat_delta, 90.0),
-            "min_lng": lng - lng_delta,
-            "max_lng": lng + lng_delta,
-        }
+        """Delegates to services.geo.haversine — see that module for why."""
+        return haversine.bounding_box(lat, lng, radius)
 
     @classmethod
     def _distance_expr(cls, lat, lng, lat_field, lng_field):
-        """
-        Haversine distance (km) from the actor (lat, lng constants) to each row's
-        (lat_field, lng_field) as an ORM expression:
-
-            R * acos( sin(lat1)sin(lat2) + cos(lat1)cos(lat2)cos(lng2 - lng1) )
-
-        The acos input is clamped to [-1, 1] (Least/Greatest) so float rounding
-        at distance ≈ 0 never trips an acos domain error.
-        """
-        lat1 = math.radians(lat)
-        lng1 = math.radians(lng)
-        sin_lat1 = math.sin(lat1)
-        cos_lat1 = math.cos(lat1)
-
-        cos_angle = (
-            Value(sin_lat1) * Sin(Radians(F(lat_field)))
-            + Value(cos_lat1)
-            * Cos(Radians(F(lat_field)))
-            * Cos(Radians(F(lng_field)) - Value(lng1))
-        )
-        clamped = Least(Value(1.0), Greatest(Value(-1.0), cos_angle))
-
-        return ExpressionWrapper(
-            ACos(clamped) * Value(cls.EARTH_RADIUS_KM),
-            output_field=FloatField(),
-        )
+        """Delegates to services.geo.haversine — see that module for why."""
+        return haversine.distance_expr(lat, lng, lat_field, lng_field)
 
     # ------------------------------------------------------------------ #
     # FILTER HELPERS
