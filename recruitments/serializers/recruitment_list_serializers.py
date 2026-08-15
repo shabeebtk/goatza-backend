@@ -120,6 +120,21 @@ class RecruitmentListSerializer(serializers.ModelSerializer):
             "positions",
             "cover_media",
             "age_categories",
+            # The card's deadline countdown and its fee cell. Both are plain
+            # columns on the row the selector already fetches, so neither adds
+            # a query — and a card that cannot say "closes in 3 days" or
+            # "Free vs ₹200" is missing the two facts a player decides on.
+            "application_deadline",
+            "is_paid",
+            "fee_amount",
+            "fee_currency",
+            # Venue beats city: "Corporation Stadium" locates a trial, and
+            # "Kozhikode" only narrows it to a district.
+            "venue_name",
+            # Shipped for the detail page and future filters. The card
+            # deliberately does NOT render it — a third value in the age/fee
+            # cell costs more scannability than the signal is worth.
+            "gender",
         ]
 
     def get_cover_media(self, obj):
@@ -136,6 +151,89 @@ class RecruitmentListSerializer(serializers.ModelSerializer):
         }
     
 
+
+
+class RecruitmentDiscoverItemSerializer(RecruitmentListSerializer):
+    """
+    A ranked card (§4/§5). The list card plus the match context behind its
+    position.
+
+    The score itself IS in the payload but the card never renders it — §5 is
+    explicit that a number invites argument while a reason builds trust, so the
+    client draws chips from ``sport_match`` / ``position_match`` /
+    ``distance_km`` / ``days_to_deadline`` instead. It ships anyway because
+    ordering is only debuggable if the number is visible somewhere.
+
+    ``application_deadline`` used to be declared here on the argument that only
+    a ranked card needed it. That stopped being true once the card grew a
+    deadline countdown: the org public profile renders the SAME card off the
+    plain list serializer, and it had no deadline data to count down from. It
+    now lives on the parent and is inherited.
+
+    ``published_at`` stays here — it is genuinely discover-only ("New this
+    week" sorts on it) and nothing on a card reads it.
+    """
+
+    match_score = serializers.SerializerMethodField()
+    is_eligible = serializers.SerializerMethodField()
+    eligibility_badge = serializers.SerializerMethodField()
+    sport_match = serializers.SerializerMethodField()
+    position_match = serializers.SerializerMethodField()
+    matched_positions = serializers.SerializerMethodField()
+    distance_km = serializers.SerializerMethodField()
+    days_to_deadline = serializers.SerializerMethodField()
+
+    class Meta(RecruitmentListSerializer.Meta):
+        fields = RecruitmentListSerializer.Meta.fields + [
+            "published_at",
+            "match_score",
+            "is_eligible",
+            "eligibility_badge",
+            "sport_match",
+            "position_match",
+            "matched_positions",
+            "distance_km",
+            "days_to_deadline",
+        ]
+
+    # The scorer stamps its MatchResult onto the instance (see
+    # RecruitmentDiscoverService); a row that somehow arrives unscored
+    # serializes as "no match context" rather than blowing up the page.
+    @staticmethod
+    def _match(obj):
+        return getattr(obj, "match", None)
+
+    def get_match_score(self, obj):
+        match = self._match(obj)
+        return match.score if match else None
+
+    def get_is_eligible(self, obj):
+        match = self._match(obj)
+        return match.is_eligible if match else True
+
+    def get_eligibility_badge(self, obj):
+        match = self._match(obj)
+        return match.badge if match else None
+
+    def get_sport_match(self, obj):
+        match = self._match(obj)
+        return match.sport_match if match else None
+
+    def get_position_match(self, obj):
+        match = self._match(obj)
+        return match.position_match if match else None
+
+    def get_matched_positions(self, obj):
+        match = self._match(obj)
+        return list(match.matched_positions) if match else []
+
+    def get_distance_km(self, obj):
+        match = self._match(obj)
+        return match.distance_km if match else None
+
+    def get_days_to_deadline(self, obj):
+        match = self._match(obj)
+        return match.days_to_deadline if match else None
 
 
 class RecruitmentMediaSerializer(serializers.ModelSerializer):

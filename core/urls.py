@@ -24,6 +24,10 @@ urlpatterns = [
     # outside it stays behind IsAuthenticated.
     path('public/', include('core.public_urls')),
 
+    # ABOVE 'user/': accounts.urls owns '<str:username>/details', so a later
+    # include would let a user called "cv" shadow the CV settings endpoint.
+    path('user/cv/', include('cv.urls')),
+
     path('user/', include('accounts.urls')),
     path('sports/', include('sports.urls')),
     path('connections/', include('connections.urls')),

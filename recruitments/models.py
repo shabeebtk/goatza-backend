@@ -613,6 +613,77 @@ class RecruitmentApplication(BaseUUIDModel):
 
 
 
+class RecruitmentDiscoverImpression(BaseUUIDModel):
+    """
+    What discovery served to whom, and what it scored (§8).
+
+    This exists before anything reads it, on purpose. Weight tuning (§8) and the
+    Phase-3 learning-to-rank work both need outcome history, and history cannot
+    be backfilled — a weight change evaluated against a table that started
+    filling the same week is evaluated against nothing.
+
+    ``applied?`` is NOT a column: it is a join to RecruitmentApplication on
+    (user, recruitment). Storing it would need a write-back from the apply path
+    into a metrics table, which is a coupling the apply flow does not deserve.
+
+    One row per (user, recruitment, section) rather than one per serve, so the
+    table's size tracks the recruitment corpus (hundreds to low thousands, §1)
+    instead of pageview volume. ``match_score`` is the score at FIRST serve —
+    re-stamping it would blur the label the moment §8 retunes the weights, which
+    is exactly when it matters.
+    """
+
+    class Section(models.TextChoices):
+        RECOMMENDED = "recommended", "Recommended"
+        CLOSING_SOON = "closing_soon", "Closing Soon"
+        NEAR_YOU = "near_you", "Near You"
+        NEW_THIS_WEEK = "new_this_week", "New This Week"
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="recruitment_impressions"
+    )
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="discover_impressions"
+    )
+    section = models.CharField(max_length=20, choices=Section.choices)
+
+    match_score = models.FloatField()
+    is_eligible = models.BooleanField(default=True)
+
+    served_count = models.PositiveIntegerField(default=1)
+    first_served_at = models.DateTimeField()
+    last_served_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "recruitment_discover_impressions"
+
+        constraints = [
+            # Unconditional (all three columns are NOT NULL), which is also what
+            # lets the write path lean on ON CONFLICT for a race-free upsert.
+            models.UniqueConstraint(
+                fields=["user", "recruitment", "section"],
+                name="unique_discover_impression"
+            ),
+        ]
+
+        indexes = [
+            # The two analysis shapes: "how did this recruitment do" and
+            # "what did we show this player".
+            models.Index(fields=["recruitment", "section"]),
+            models.Index(fields=["user", "last_served_at"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.user_id} saw {self.recruitment_id} "
+            f"in {self.section} @{self.match_score}"
+        )
+
+
 class RecruitmentApplicationStatusHistory(BaseUUIDModel):
 
     application = models.ForeignKey(

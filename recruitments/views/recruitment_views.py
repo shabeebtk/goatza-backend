@@ -14,7 +14,11 @@ from utils.errors import flatten_validation_error
 from core.decorators.actor_required import org_required
 from recruitments.selectors.recruitment_selectors import RecruitmentSelector
 from recruitments.serializers.recruitment_list_serializers import (
-    RecruitmentListSerializer, RecruitmentOwnerDetailSerializer, RecruitmentDetailSerializer
+    RecruitmentListSerializer, RecruitmentOwnerDetailSerializer,
+    RecruitmentDetailSerializer, RecruitmentDiscoverItemSerializer
+)
+from recruitments.services.discover_service import (
+    RecruitmentDiscoverService, SECTION_ORDER
 )
 
 
@@ -283,6 +287,7 @@ class ListRecruitmentsAPIView(BaseAPIView):
                 "experience_level"
             )
             apply_method = request.query_params.get("apply_method")
+            position_id = request.query_params.get("position_id")
 
             # birth_year is a lenient int filter — a non-integer value is simply
             # ignored (dropped to None) instead of 500ing the whole list.
@@ -296,6 +301,38 @@ class ListRecruitmentsAPIView(BaseAPIView):
             except (ValueError, TypeError):
                 birth_year = None
 
+            # max_distance_km — same leniency. None means "no distance filter",
+            # which is NOT the same as discover's 50 km default.
+            max_distance_km = request.query_params.get("max_distance_km")
+            try:
+                max_distance_km = (
+                    int(max_distance_km)
+                    if max_distance_km not in (None, "")
+                    else None
+                )
+            except (ValueError, TypeError):
+                max_distance_km = None
+            if max_distance_km is not None and max_distance_km <= 0:
+                max_distance_km = None
+
+            age_eligible = (
+                request.query_params.get("age_eligible") in ("1", "true", "True")
+            )
+
+            # The two §5 rail deep-links ("Closing soon" / "New this week"),
+            # expressed as filters so "See all" lands on the same rule the rail
+            # was built from. Lenient ints, same as the rest.
+            def _positive_int(name):
+                raw = request.query_params.get(name)
+                try:
+                    value = int(raw) if raw not in (None, "") else None
+                except (ValueError, TypeError):
+                    return None
+                return value if value and value > 0 else None
+
+            closing_within_days = _positive_int("closing_within_days")
+            published_within_days = _positive_int("published_within_days")
+
             limit = min(
                 int(request.query_params.get("limit", 10)),
                 50
@@ -306,29 +343,59 @@ class ListRecruitmentsAPIView(BaseAPIView):
                 0
             )
 
-            # FETCH DATA
-            queryset, total_count = (
-                RecruitmentSelector.list_recruitments(
-                    actor=actor,
-                    username=username,
-                    sport_id=sport_id,
-                    recruitment_type=recruitment_type,
-                    status=status_filter,
-                    city=city,
-                    search=search,
-                    experience_level=experience_level,
-                    apply_method=apply_method,
-                    birth_year=birth_year,
-                    limit=limit,
-                    offset=offset
-                )
+            filters = dict(
+                username=username,
+                sport_id=sport_id,
+                recruitment_type=recruitment_type,
+                status=status_filter,
+                city=city,
+                search=search,
+                experience_level=experience_level,
+                apply_method=apply_method,
+                birth_year=birth_year,
+                position_id=position_id,
+                max_distance_km=max_distance_km,
+                closing_within_days=closing_within_days,
+                published_within_days=published_within_days,
             )
 
-            # SERIALIZE
-            serializer = RecruitmentListSerializer(
-                queryset,
-                many=True
-            )
+            # ORDERING (§4). A player browsing the global list gets
+            # -match_score; every org-scoped mount — the org admin screen and
+            # the public org profile, both of which pass ``username`` — keeps
+            # -published_at, unchanged. An org actor has no match score worth
+            # sorting by either way.
+            ranked = bool(actor and actor.is_user and not username)
+
+            if ranked:
+                rows, total_count = RecruitmentDiscoverService.ranked_list(
+                    actor=actor,
+                    filters=filters,
+                    age_eligible=age_eligible,
+                    limit=limit,
+                    offset=offset,
+                )
+                results = []
+                for recruitment, match in rows:
+                    recruitment.match = match
+                    results.append(recruitment)
+
+                serializer = RecruitmentDiscoverItemSerializer(
+                    results,
+                    many=True
+                )
+            else:
+                queryset, total_count = (
+                    RecruitmentSelector.list_recruitments(
+                        actor=actor,
+                        limit=limit,
+                        offset=offset,
+                        **filters
+                    )
+                )
+                serializer = RecruitmentListSerializer(
+                    queryset,
+                    many=True
+                )
 
             logger.info(
                 f"{TAG} | Success | count={len(serializer.data)}"
@@ -358,6 +425,87 @@ class ListRecruitmentsAPIView(BaseAPIView):
             )
         
 
+
+
+class DiscoverRecruitmentsAPIView(BaseAPIView):
+    """
+    GET /recruitments/discover — the personalized surface (§4).
+
+    Four sections, each capped at 10 and deduplicated in priority order, cached
+    per actor for 10 minutes. Never errors on a thin profile: an org actor or a
+    player with no sports gets the same shape with ``is_personalized: false``,
+    and the client shows the profile-completion prompt instead of an error.
+    """
+
+    def get(self, request):
+
+        TAG = "DiscoverRecruitmentsAPIView"
+
+        try:
+            actor = request.actor
+
+            max_distance_km = RecruitmentDiscoverService.normalize_max_distance(
+                request.query_params.get("max_distance_km")
+            )
+
+            cache_key = RecruitmentDiscoverService.cache_key(
+                actor, max_distance_km
+            )
+            cached = RecruitmentDiscoverService.get_cached(cache_key)
+            if cached is not None:
+                logger.info(f"{TAG} | Cache hit")
+                return response_data(success=True, data=cached)
+
+            payload = RecruitmentDiscoverService.discover(
+                actor=actor,
+                max_distance_km=max_distance_km,
+            )
+
+            data = {"max_distance_km": payload.max_distance_km}
+            for section in SECTION_ORDER:
+                items = []
+                for recruitment, match in payload.sections[section]:
+                    recruitment.match = match
+                    items.append(recruitment)
+                data[section] = RecruitmentDiscoverItemSerializer(
+                    items, many=True
+                ).data
+
+            # Why the payload says so rather than the client inferring it: the
+            # client cannot tell "no sports on file" from "no matching trials".
+            data["is_personalized"] = payload.is_personalized
+            data["missing_profile_fields"] = payload.missing_fields
+
+            RecruitmentDiscoverService.set_cached(cache_key, data)
+
+            # §8 — logged on cache MISS only; the cache window is the serve
+            # window. See record_impressions.
+            RecruitmentDiscoverService.record_impressions(
+                actor, payload.sections
+            )
+
+            logger.info(
+                f"{TAG} | Success | "
+                + " ".join(
+                    f"{section}={len(data[section])}"
+                    for section in SECTION_ORDER
+                )
+            )
+
+            return response_data(success=True, data=data)
+
+        except Exception as e:
+
+            logger.error(
+                f"{TAG} | Error | {str(e)}"
+            )
+
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=str(e)
+            )
 
 
 class RecruitmentDetailAPIView(BaseAPIView):
