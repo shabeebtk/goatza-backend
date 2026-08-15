@@ -19,11 +19,16 @@ from core.views.public_profile_views import (
     PublicUserPostsAPIView,
     PublicUserProfileAPIView,
 )
+from cv.views.public_cv_views import PublicCVAPIView
 
 urlpatterns = [
     # Individual users — all roles (player, coach, scout, org_user).
     path('profile/<str:username>', PublicUserProfileAPIView.as_view()),
     path('profile/<str:username>/posts', PublicUserPostsAPIView.as_view()),
+
+    # Sports CV — players only, and only where the profile is public AND the
+    # CV is enabled. Every other case is the same 404 as an unknown username.
+    path('cv/<str:username>', PublicCVAPIView.as_view()),
 
     # Organizations.
     path(

@@ -52,8 +52,14 @@ class UserPublicProfilePrivacyAPIView(APIView):
 
         # The public bundle is cached by username; a profile that just went
         # private must stop being served from that cache immediately.
+        #
+        # BOTH keys. The Sports CV is gated on is_public_profile as well (see
+        # cv.selectors.cv_selectors.get_cv_user), so clearing only the profile
+        # key would leave a hidden profile's CV serving from cache for up to a
+        # minute — the toggle appearing not to work.
         if user.username:
             cache_delete(CacheKeys.public_user_profile(user.username))
+            cache_delete(CacheKeys.public_cv(user.username))
 
         logger.info(f"{TAG} user={user.id} is_public_profile={value}")
 

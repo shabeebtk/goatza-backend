@@ -29,3 +29,27 @@ class CacheKeys:
     @staticmethod
     def public_org_profile(username):
         return f"public:profile:org:{username}"
+
+    @staticmethod
+    def public_cv(username):
+        """
+        The anonymous rendering of a player's Sports CV.
+
+        A SEPARATE key from public_user_profile even though the two overlap:
+        the CV's contents depend on the CV's own toggles, so one key could not
+        be invalidated correctly by either writer. Both are cleared when
+        is_public_profile goes off — the CV is gated on it (see get_cv_user),
+        and a hidden profile that keeps serving a cached CV for a minute is the
+        toggle silently not working.
+        """
+        return f"public:cv:{username}"
+
+    @staticmethod
+    def cv_view_counted(username, ident):
+        """
+        Marker that this caller has already been counted against a CV's
+        views_count. Short-lived by design — the counter is a rough "how much
+        interest is this getting", not analytics, and a refresh loop must not
+        be able to inflate it.
+        """
+        return f"cv:viewed:{username}:{ident}"
