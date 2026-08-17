@@ -29,6 +29,11 @@ class GetUploadConfigAPIView(BaseAPIView):
         # to users/<id>/achievements — an achievement belongs to a person, so an
         # org actor has nothing to upload here.
         "achievements",
+        # Match diary photo. Same shape and same reasoning as achievements:
+        # user-only, scoped to users/<id>/matches. A match entry belongs to the
+        # player who played it, and there is no org-side match diary to upload
+        # for.
+        "matches",
     }
 
     def get(self, request):
@@ -92,7 +97,12 @@ class GetUploadConfigAPIView(BaseAPIView):
             # -----------------------------------
             # Prevent wrong actor usage
             # -----------------------------------
-            if upload_type in {"profile", "cover", "achievements"} and not actor.is_user:
+            if upload_type in {
+                "profile",
+                "cover",
+                "achievements",
+                "matches",
+            } and not actor.is_user:
                 msg = "Switch to your personal account for this upload"
                 return response_data(
                     success=False,
