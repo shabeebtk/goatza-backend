@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'careers',
     'achievements',
     'cv',
+    'matches',
 
     # buildin apps 
     'django.contrib.admin',

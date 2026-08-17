@@ -165,13 +165,19 @@ class CloudinaryService:
             }
 
         # -----------------------------------------
-        # ACHIEVEMENT PROOF / SHOWCASE IMAGE
+        # ACHIEVEMENT PROOF / SHOWCASE IMAGE · MATCH DIARY PHOTO
         # -----------------------------------------
-        # One image per award, so a random public_id and overwrite="false" —
-        # unlike profile/cover, which each own a single fixed slot per user and
-        # are meant to replace themselves. A user can hold 20 achievements and
-        # replacing one image must never clobber another's.
-        elif upload_type == "achievements":
+        # One image per award (or per match), so a random public_id and
+        # overwrite="false" — unlike profile/cover, which each own a single
+        # fixed slot per user and are meant to replace themselves. A user can
+        # hold 20 achievements and a season of matches; replacing one image
+        # must never clobber another's.
+        #
+        # Both are user-only and land under users/<id>/<type>. The folder is
+        # built from upload_type rather than hardcoded, so the next
+        # person-owned image type is one entry in ALLOWED_TYPES and nothing
+        # here.
+        elif upload_type in {"achievements", "matches"}:
             user = actor.user
 
             for _ in range(count):
@@ -179,7 +185,7 @@ class CloudinaryService:
                     self._build_signed_upload(
                         upload_url=upload_url,
                         timestamp=timestamp,
-                        folder=f"users/{user.id}/achievements",
+                        folder=f"users/{user.id}/{upload_type}",
                         public_id=str(uuid.uuid4()),
                         overwrite="false"
                     )
