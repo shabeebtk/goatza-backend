@@ -27,7 +27,12 @@ from rest_framework.exceptions import ValidationError
 from core.views.base_views import PublicAPIView
 from utils.errors import flatten_validation_error
 from utils.response import response_data
-from waitlist.selectors.signup_selectors import get_by_ref_code, signup_count
+from waitlist.selectors.signup_selectors import (
+    display_count,
+    display_number,
+    get_by_ref_code,
+    is_founding,
+)
 from waitlist.serializers.signup_serializers import (
     PlayerSignupCardSerializer,
     PlayerSignupCreateSerializer,
@@ -48,12 +53,20 @@ MAX_SOURCE_LENGTH = 50
 
 
 def _signup_payload(signup):
-    """The success shape — and the shape decoy_payload has to imitate."""
+    """
+    The success shape — and the shape decoy_payload has to imitate.
+
+    ``signup_number`` is the DISPLAY number. The raw column is not in this
+    payload, is not in the card serializer, and is not in any other response:
+    it exists in the admin and in the notification mail, and nowhere a client
+    can read it.
+    """
     return {
-        "signup_number": signup.signup_number,
+        "signup_number": display_number(signup.signup_number),
         "ref_code": signup.ref_code,
         "name": signup.name,
-        "district": signup.district,
+        "city": signup.city,
+        "is_founding": is_founding(signup.signup_number),
     }
 
 
@@ -115,7 +128,7 @@ class PlayerSignupCreateAPIView(PublicAPIView):
                     success=True,
                     message=(
                         f"You're already on the list — you're "
-                        f"#{signup.signup_number}."
+                        f"#{display_number(signup.signup_number)}."
                     ),
                     status_code=200,
                     data={**_signup_payload(signup), "already_registered": True},
@@ -128,7 +141,10 @@ class PlayerSignupCreateAPIView(PublicAPIView):
 
             return response_data(
                 success=True,
-                message=f"You're in — you're #{signup.signup_number}.",
+                message=(
+                    f"You're in — you're "
+                    f"#{display_number(signup.signup_number)}."
+                ),
                 status_code=201,
                 data={**_signup_payload(signup), "already_registered": False},
             )
@@ -159,7 +175,8 @@ class WaitlistStatsAPIView(PublicAPIView):
     GET /public/waitlist/stats
 
     ``{"count": 412, "goal": 1000}`` — the progress bar on the landing page.
-    Count is cached for a minute by the selector; goal is a setting.
+    Count is the DISPLAY count (real signups plus WAITLIST_DISPLAY_OFFSET),
+    cached for a minute by the selector; goal is a setting.
     """
 
     def get(self, request):
@@ -169,7 +186,7 @@ class WaitlistStatsAPIView(PublicAPIView):
             return response_data(
                 success=True,
                 data={
-                    "count": signup_count(),
+                    "count": display_count(),
                     "goal": getattr(
                         settings,
                         "WAITLIST_GOAL",
@@ -192,9 +209,10 @@ class PlayerSignupCardAPIView(PublicAPIView):
     """
     GET /public/waitlist/players/<ref_code>
 
-    The shareable card, and nothing else: name, number, district, position,
-    sport. Phone, email and Instagram are NOT in the serializer — a ref code is
-    a short public string that appears in screenshots, so anything reachable by
+    The shareable card, and nothing else: name, display number, city, country,
+    position, sport and whether they are a founding player. Phone, email,
+    Instagram and the coordinates are NOT in the serializer — a ref code is a
+    short public string that appears in screenshots, so anything reachable by
     guessing one is, in effect, published.
     """
 

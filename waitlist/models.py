@@ -20,40 +20,25 @@ built around that one fact:
   * ``signup_number`` and ``ref_code`` are public. "You're #413" is the reason
     somebody shares the card, so the number is sequential and visible rather
     than the UUID primary key. The service assigns it — never the caller.
+    What is STORED here is the honest sequence starting at 1; what the API
+    shows is that number plus ``WAITLIST_DISPLAY_OFFSET``
+    (waitlist.selectors.signup_selectors.display_number).
+
+  * THE LOCATION BLOCK MIRRORS ``accounts.models.UserProfile``. Same names,
+    same types, same order, so converting a signup into a real profile at
+    launch is a field copy rather than a mapping. Goatza is not Kerala-only:
+    the FK resolves through the shared LocationService against whatever Mapbox
+    returned, and every part of it is optional — a player who declines the
+    location prompt, or whose geocoding fails, still gets on the list.
 """
 
 from django.db import models
 
-from shared.models import BaseUUIDModel
+from shared.models import BaseUUIDModel, Location
 
 
 class PlayerSignup(BaseUUIDModel):
     """One player on the pre-launch waitlist."""
-
-    class District(models.TextChoices):
-        """
-        Kerala's 14 districts, plus OTHER for everyone outside the state.
-
-        Stored as slugs rather than the display names so a spelling change (or
-        a transliteration argument) is a label edit, not a data migration over
-        every row.
-        """
-
-        THIRUVANANTHAPURAM = "thiruvananthapuram", "Thiruvananthapuram"
-        KOLLAM = "kollam", "Kollam"
-        PATHANAMTHITTA = "pathanamthitta", "Pathanamthitta"
-        ALAPPUZHA = "alappuzha", "Alappuzha"
-        KOTTAYAM = "kottayam", "Kottayam"
-        IDUKKI = "idukki", "Idukki"
-        ERNAKULAM = "ernakulam", "Ernakulam"
-        THRISSUR = "thrissur", "Thrissur"
-        PALAKKAD = "palakkad", "Palakkad"
-        MALAPPURAM = "malappuram", "Malappuram"
-        KOZHIKODE = "kozhikode", "Kozhikode"
-        WAYANAD = "wayanad", "Wayanad"
-        KANNUR = "kannur", "Kannur"
-        KASARAGOD = "kasaragod", "Kasaragod"
-        OTHER = "other", "Other"
 
     class Position(models.TextChoices):
         """
@@ -96,12 +81,29 @@ class PlayerSignup(BaseUUIDModel):
     date_of_birth = models.DateField(null=True, blank=True)
 
     # WHERE
-    district = models.CharField(
-        max_length=50,
-        choices=District.choices,
-        blank=True
+    #
+    # Deliberately identical to UserProfile's location block — see the module
+    # docstring. ``location`` is the shared, deduplicated place row; the five
+    # text/coordinate columns below it are the denormalised copy, written at
+    # the same time by PlayerSignupService.
+    #
+    # SET_NULL rather than CASCADE: a place row being cleaned up must never
+    # take a signup with it. The copy below survives, so a signup that loses
+    # its FK still knows where the player was.
+    location = models.ForeignKey(
+        Location,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="waitlist_signups"
     )
-    state = models.CharField(max_length=50, blank=True, default="Kerala")
+    # Denormalized for better query
+    location_name = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    state = models.CharField(max_length=100, blank=True)
+    country_code = models.CharField(max_length=5, blank=True)
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
 
     # WHAT THEY PLAY
     #
@@ -142,7 +144,8 @@ class PlayerSignup(BaseUUIDModel):
         db_table = "waitlist_player_signups"
         ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=["district"]),
+            models.Index(fields=["city"]),
+            models.Index(fields=["country_code"]),
             models.Index(fields=["position"]),
             models.Index(fields=["created_at"]),
         ]

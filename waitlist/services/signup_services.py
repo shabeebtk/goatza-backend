@@ -21,9 +21,19 @@ this app different from every other write path in the codebase:
     all. The cost is a race between two concurrent inserts, which the unique
     constraint catches and the retry loop below resolves.
 
+    The stored number is the honest one. The number the player is SHOWN is
+    ``display_number(signup_number)`` — see ``build_ref_code`` for the one
+    consequence of that which cannot be undone later.
+
   * MAIL NEVER FAILS THE REQUEST. The signup is the thing that matters; the
     notification is a convenience for me. Every failure path around it is
     swallowed and logged.
+
+  * GEOCODING NEVER FAILS THE REQUEST EITHER. Location is optional at every
+    level: the client may send none, the coordinates may be missing, and
+    LocationService may raise or come back empty. Each of those saves the
+    signup with whatever text was given and ``location=None``. A player lost
+    because Mapbox was slow is a player lost for nothing.
 """
 
 import logging
@@ -33,9 +43,15 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Max
 
+from services.location.location_service import LocationService
 from utils.emails import send_email_async
 from waitlist.models import PlayerSignup
-from waitlist.selectors.signup_selectors import bust_signup_count, signup_count
+from waitlist.selectors.signup_selectors import (
+    bust_signup_count,
+    display_count,
+    display_number,
+    founding_cutoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +62,14 @@ _INSTAGRAM_URL_PREFIX = re.compile(
 )
 
 
+def _as_float(value):
+    """A coordinate as a float, or None. Never raises — see resolve_location."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class PlayerSignupService:
 
     # Retries for the (max + 1) race. Five is far more than the contention this
@@ -54,14 +78,17 @@ class PlayerSignupService:
     # error instead of spinning.
     MAX_NUMBER_ATTEMPTS = 5
 
-    # Zero-padding for the public code: #413 becomes "GZ0413". Four digits
-    # covers the pre-launch list comfortably; number 10000 simply produces
-    # "GZ10000", which still fits ref_code's 12 characters.
+    # Zero-padding for the public code: display #413 becomes "GZ0413". Four
+    # digits covers the pre-launch list comfortably; number 10000 simply
+    # produces "GZ10000", which still fits ref_code's 12 characters.
     REF_CODE_PREFIX = "GZ"
     REF_CODE_DIGITS = 4
 
-    # Default country code. This is a Kerala-first launch — a form that made
-    # every player type "+91" would lose signups to a validation error.
+    # Default country code. India is where the list starts, so a form that made
+    # every player there type "+91" would lose signups to a validation error.
+    # It is only a fallback: anything written with a "+" or a "00" prefix keeps
+    # the country code it came with, which is what makes the list work for a
+    # player signing up from anywhere else.
     DEFAULT_COUNTRY_CODE = "91"
 
     # The columns ``create`` will accept. An allow-list, not **kwargs straight
@@ -73,7 +100,6 @@ class PlayerSignupService:
         "email",
         "instagram",
         "date_of_birth",
-        "district",
         "state",
         "sport",
         "position",
@@ -91,7 +117,8 @@ class PlayerSignupService:
         """
         Whatever somebody typed, turned into E.164.
 
-        Handles the shapes a Kerala player actually enters::
+        Handles the shapes a player in India actually enters, and leaves a
+        number from anywhere else alone::
 
             9847012345        ->  +919847012345   (bare 10-digit mobile)
             098470 12345      ->  +919847012345   (trunk prefix, spaces)
@@ -167,8 +194,101 @@ class PlayerSignupService:
 
     @classmethod
     def build_ref_code(cls, number: int) -> str:
-        """413 becomes "GZ0413" — the public, shareable form of the number."""
+        """
+        413 becomes "GZ0413" — the public, shareable form of the number.
+
+        The number handed in is the DISPLAY number, not the stored one: the
+        code appears next to "#37" on the card, and "GZ0001" beside "#37" is a
+        card that looks broken.
+
+        THE OFFSET MUST BE FIXED BEFORE GO-LIVE. Unlike the number, which is
+        derived on every read and so follows the setting, ref_code is computed
+        once and PERSISTED. Change ``WAITLIST_DISPLAY_OFFSET`` after real
+        signups exist and every code written before the change keeps pointing
+        at a number nobody will ever be shown again — and those codes are in
+        screenshots, stories and the URLs of shared cards, where they cannot be
+        corrected.
+        """
         return f"{cls.REF_CODE_PREFIX}{number:0{cls.REF_CODE_DIGITS}d}"
+
+    # =================================================================
+    # LOCATION
+    # =================================================================
+
+    @classmethod
+    def resolve_location(cls, raw) -> dict:
+        """
+        Turn the Mapbox result the client sent into model fields.
+
+        Returns the ``location`` FK plus the denormalised copy, ready to be
+        merged into the create payload. The dict is always usable — there is no
+        failure return, because there is no failure that is allowed to matter::
+
+            no location sent        ->  {} (nothing written)
+            coordinates missing     ->  text fields, location=None
+            LocationService raises  ->  text fields, location=None
+            LocationService resolves->  FK + the copy taken from the FK row
+
+        The FK is resolved by the SHARED ``LocationService.get_or_create_location``
+        — the same rows accounts and posts write against — so a place named on a
+        signup and the same place named on a profile are one row, and converting
+        a signup at launch does not create a duplicate.
+
+        When the geocoder resolved, its values win over the raw payload: the
+        Location row is deduplicated and edited centrally, and the point of
+        having it is that it, not a stale client, is the authority on what the
+        place is called.
+        """
+        if not raw or not isinstance(raw, dict):
+            # The serializer already guarantees a dict or None; this is for the
+            # management command or shell caller that does not go through it.
+            return {}
+
+        # The text copy, from the payload alone. This is what survives when the
+        # FK cannot be resolved — a player who typed a city is still a player
+        # in a city, and the admin can still work the list by it.
+        fields = {
+            "location": None,
+            "location_name": str(raw.get("name") or "").strip()[:255],
+            "city": str(raw.get("city") or "").strip()[:100],
+            "country_code": str(raw.get("country_code") or "").strip().upper()[:5],
+            "latitude": _as_float(raw.get("latitude")),
+            "longitude": _as_float(raw.get("longitude")),
+        }
+
+        # ``state`` is a plain form field too, so it is only overwritten when
+        # the location actually carries one — a client that geocodes without a
+        # region must not blank out what the player typed.
+        state = str(raw.get("state") or "").strip()[:100]
+        if state:
+            fields["state"] = state
+
+        try:
+            location = LocationService.get_or_create_location(raw)
+        except Exception as e:
+            # ValueError for missing or out-of-range coordinates, anything else
+            # for a database problem underneath. Same answer either way.
+            logger.warning(
+                f"PlayerSignupService | Location not resolved | "
+                f"name={fields['location_name'] or '-'} | {str(e)}"
+            )
+            return fields
+
+        if location is None:
+            # get_or_create_location's own race fallback can come back empty.
+            logger.warning(
+                f"PlayerSignupService | Location resolved to nothing | "
+                f"name={fields['location_name'] or '-'}"
+            )
+            return fields
+
+        denormalized = LocationService.build_denormalized(location)
+        fields.update(denormalized)
+
+        if location.state:
+            fields["state"] = location.state[:100]
+
+        return fields
 
     # =================================================================
     # CREATE
@@ -182,6 +302,10 @@ class PlayerSignupService:
         Returns ``(signup, created)``. ``created=False`` means the phone was
         already registered and the row is untouched — the caller should tell
         them they are already in and which number they are, not raise.
+
+        ``location`` is read out of the payload separately from the allow-list:
+        it arrives as the Mapbox object the client picked, not as columns, and
+        ``resolve_location`` is what turns it into columns.
         """
         payload = {
             key: value
@@ -193,6 +317,13 @@ class PlayerSignupService:
         payload["phone"] = cls.normalise_phone(payload.get("phone"))
         payload["instagram"] = cls.normalise_instagram(payload.get("instagram"))
         payload["email"] = str(payload.get("email") or "").strip().lower()
+
+        # Resolved BEFORE the duplicate check, so the work is thrown away for a
+        # repeat submission — but the alternative is resolving inside the retry
+        # loop, where a slow geocoder would sit inside a transaction. A repeat
+        # signup is rare; a transaction held open on a network call is not the
+        # trade to make.
+        payload.update(cls.resolve_location(data.get("location")))
 
         existing = (
             PlayerSignup.objects
@@ -263,7 +394,10 @@ class PlayerSignupService:
 
                     return PlayerSignup.objects.create(
                         signup_number=next_number,
-                        ref_code=cls.build_ref_code(next_number),
+                        # The CODE is built from the display number so it reads
+                        # the same as the number printed beside it; the COLUMN
+                        # keeps the honest one.
+                        ref_code=cls.build_ref_code(display_number(next_number)),
                         **payload,
                     )
 
@@ -296,14 +430,19 @@ class PlayerSignupService:
 
         Lives next to ``create`` so the two shapes cannot drift apart: a decoy
         missing a key is a decoy that works exactly once.
+
+        The number is the DISPLAY number, like every other number the API
+        returns — a decoy that answered "#1" while the counter on the page said
+        "#412" would label itself.
         """
-        next_number = signup_count() + 1
+        next_number = display_count() + 1
 
         return {
             "signup_number": next_number,
             "ref_code": cls.build_ref_code(next_number),
             "name": str(data.get("name") or "").strip(),
-            "district": data.get("district") or "",
+            "city": str((data.get("location") or {}).get("city") or "").strip(),
+            "is_founding": next_number <= founding_cutoff(),
         }
 
     # =================================================================
@@ -331,10 +470,13 @@ class PlayerSignupService:
                 )
                 return
 
-            district = signup.get_district_display() or "No district"
+            place = signup.location_name or signup.city or "No location"
 
             send_email_async(
-                subject=f"New Goatza signup #{signup.signup_number} — {district}",
+                subject=(
+                    f"New Goatza signup "
+                    f"#{display_number(signup.signup_number)} — {place}"
+                ),
                 message=cls._notification_body(signup),
                 to_email=recipient,
             )
@@ -347,19 +489,36 @@ class PlayerSignupService:
 
     @staticmethod
     def _notification_body(signup) -> str:
-        """Every field, plain text, in the order I would read them."""
+        """
+        Every field, plain text, in the order I would read them.
+
+        This is the ONE place both numbers appear together. The display number
+        is what the player was told; the real one is the row in the database,
+        and the two only line up again in the admin. Without both here, working
+        out which row a player is talking about means doing the arithmetic in
+        my head against a setting.
+        """
         instagram = f"@{signup.instagram}" if signup.instagram else "-"
 
+        if signup.latitude is not None and signup.longitude is not None:
+            coordinates = f"{signup.latitude}, {signup.longitude}"
+        else:
+            coordinates = "-"
+
         lines = [
-            f"Signup #{signup.signup_number}  ({signup.ref_code})",
+            f"Signup #{display_number(signup.signup_number)}  ({signup.ref_code})",
+            f"Real number     : {signup.signup_number}",
             "",
             f"Name            : {signup.name}",
             f"Phone           : {signup.phone}",
             f"Email           : {signup.email or '-'}",
             f"Instagram       : {instagram}",
             f"Date of birth   : {signup.date_of_birth or '-'}",
-            f"District        : {signup.get_district_display() or '-'}",
+            f"Location        : {signup.location_name or '-'}",
+            f"Coordinates     : {coordinates}",
+            f"City            : {signup.city or '-'}",
             f"State           : {signup.state or '-'}",
+            f"Country         : {signup.country_code or '-'}",
             f"Sport           : {signup.sport or '-'}",
             f"Position        : {signup.get_position_display() or '-'}",
             f"Level           : {signup.get_level_display() or '-'}",
