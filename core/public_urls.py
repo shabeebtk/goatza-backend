@@ -20,6 +20,11 @@ from core.views.public_profile_views import (
     PublicUserProfileAPIView,
 )
 from cv.views.public_cv_views import PublicCVAPIView
+from waitlist.views.signup_views import (
+    PlayerSignupCardAPIView,
+    PlayerSignupCreateAPIView,
+    WaitlistStatsAPIView,
+)
 
 urlpatterns = [
     # Individual users — all roles (player, coach, scout, org_user).
@@ -39,4 +44,17 @@ urlpatterns = [
         'organization/<str:username>/posts',
         PublicOrganizationPostsAPIView.as_view(),
     ),
+
+    # Pre-launch waitlist. The ONLY write on this surface — the point of the
+    # thing is that nobody has an account yet — so the create view carries its
+    # own throttle instead of PublicAPIView's read budget
+    # (waitlist.throttles.WaitlistSignupThrottle, 5/hour per IP).
+    #
+    # The card endpoint is an allow-list of five fields and nothing else: a ref
+    # code is short, public and screenshotted, so anything reachable by
+    # guessing one is effectively published. Phone, email and Instagram are
+    # never in that payload.
+    path('waitlist/players', PlayerSignupCreateAPIView.as_view()),
+    path('waitlist/stats', WaitlistStatsAPIView.as_view()),
+    path('waitlist/players/<str:ref_code>', PlayerSignupCardAPIView.as_view()),
 ]

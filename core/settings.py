@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'achievements',
     'cv',
     'matches',
+    'waitlist',
 
     # buildin apps 
     'django.contrib.admin',
@@ -181,6 +182,10 @@ REST_FRAMEWORK = {
         # and generous on purpose: one shared link opening in a group chat
         # produces a burst of crawler + human hits from a handful of addresses.
         'public_profile': '60/min',
+        # Joining the pre-launch waitlist — the one anonymous WRITE on
+        # the public surface, so per IP and deliberately tight (see
+        # waitlist.throttles.WaitlistSignupThrottle).
+        'waitlist_signup': '5/hour',
     }
 }
 
@@ -350,3 +355,16 @@ else:
 # ------ CACHE END ------/
 
 AUTH_COOKIE_DOMAIN = os.getenv("AUTH_COOKIE_DOMAIN")  # None = host-only
+
+# ------ WAITLIST (pre-launch player registration) ------/
+
+# Where the "somebody just signed up" mail goes. No default: an address in
+# source control is an address that keeps receiving mail from every fork,
+# staging box and local run. Unset simply means the notification is skipped
+# (waitlist.services.signup_services logs it) — the signup itself still lands.
+WAITLIST_NOTIFY_EMAIL = os.getenv("WAITLIST_NOTIFY_EMAIL")
+
+# The number the landing page counts towards. A setting because it is a
+# marketing target that moves the moment it is hit.
+WAITLIST_GOAL = int(os.getenv("WAITLIST_GOAL", "1000"))
+# ------ WAITLIST END ------/
