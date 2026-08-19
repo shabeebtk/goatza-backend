@@ -53,3 +53,18 @@ class CacheKeys:
         be able to inflate it.
         """
         return f"cv:viewed:{username}:{ident}"
+
+    # ── Pre-launch waitlist ──────────────────────────────────────
+
+    @staticmethod
+    def waitlist_signup_count():
+        """
+        How many players have joined the waitlist.
+
+        One global key, not per-anything: the counter is the same number for
+        every visitor, and it is the headline on the landing page, so it is
+        read on every hit and written once a signup. The selector busts it on
+        create rather than relying on the TTL — "you're #413" on the success
+        screen followed by "412 joined" on the same page reads as broken.
+        """
+        return "waitlist:signup:count"

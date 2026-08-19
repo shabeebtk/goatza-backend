@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'achievements',
     'cv',
     'matches',
+    'waitlist',
 
     # buildin apps 
     'django.contrib.admin',
@@ -181,6 +182,10 @@ REST_FRAMEWORK = {
         # and generous on purpose: one shared link opening in a group chat
         # produces a burst of crawler + human hits from a handful of addresses.
         'public_profile': '60/min',
+        # Joining the pre-launch waitlist — the one anonymous WRITE on
+        # the public surface, so per IP and deliberately tight (see
+        # waitlist.throttles.WaitlistSignupThrottle).
+        'waitlist_signup': '5/hour',
     }
 }
 
@@ -350,3 +355,30 @@ else:
 # ------ CACHE END ------/
 
 AUTH_COOKIE_DOMAIN = os.getenv("AUTH_COOKIE_DOMAIN")  # None = host-only
+
+# ------ WAITLIST (pre-launch player registration) ------/
+
+# Where the "somebody just signed up" mail goes. No default: an address in
+# source control is an address that keeps receiving mail from every fork,
+# staging box and local run. Unset simply means the notification is skipped
+# (waitlist.services.signup_services logs it) — the signup itself still lands.
+WAITLIST_NOTIFY_EMAIL = os.getenv("WAITLIST_NOTIFY_EMAIL")
+
+# The number the landing page counts towards. A setting because it is a
+# marketing target that moves the moment it is hit.
+WAITLIST_GOAL = int(os.getenv("WAITLIST_GOAL", "1000"))
+
+# Presentation-only head start on the public numbers.
+#
+# The first real signup should read as #37 rather than #1: a counter that says
+# "0 players joined" is a page that tells its first visitor to come back later.
+# The DATABASE stays honest — signup_number is a dense sequence from 1 — and
+# the offset is added in exactly one place (waitlist.selectors.display_number),
+# so the counter, the number on the success screen and the number on the share
+# card can never disagree with each other.
+#
+# FIX THIS BEFORE GO-LIVE. ref_code is derived from the DISPLAY number and then
+# PERSISTED, so raising the offset after real signups exist leaves old codes
+# pointing at numbers nobody will be shown again.
+WAITLIST_DISPLAY_OFFSET = int(os.environ.get("WAITLIST_DISPLAY_OFFSET", 36))
+# ------ WAITLIST END ------/
