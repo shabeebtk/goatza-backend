@@ -16,7 +16,7 @@ from rest_framework_simplejwt.token_blacklist.models import (
     OutstandingToken, BlacklistedToken,
 )
 from accounts.serializers.user_serializers import UserSerializer
-from accounts.services.user_services import generate_unique_username
+from usernames.services.username_service import UsernameService
 from utils.response import response_data
 from utils.validations import is_valid_email, is_valid_password
 from utils.otp_validation import generate_otp, verify_otp
@@ -59,19 +59,20 @@ class UserSignupAPIView(APIView):
         if not name:
             name = email.split("@")[0]
 
-        base_username = name
-        username = base_username
-        username = generate_unique_username(base=name)
-
         try:
             with transaction.atomic():
+                # Created WITHOUT a handle, then claimed: the handle only
+                # exists once UsernameRegistry says it does, and the registry
+                # needs the user row to point at. Same transaction, so a
+                # failure leaves neither behind.
                 user = User.objects.create_user(
                     email=email,
-                    username=username,
                     password=password,
                     role=role,
                     is_active=False
                 )
+
+                UsernameService.generate_and_claim(name, user=user)
 
                 UserProfile.objects.create(user=user, name=name)
 

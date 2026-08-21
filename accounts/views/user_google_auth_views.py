@@ -15,7 +15,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from accounts.serializers.user_serializers import UserSerializer
 from utils.response import response_data
-from accounts.services.user_services import generate_unique_username
+from usernames.services.username_service import UsernameService
 from utils.passwords import generate_random_password
 from utils.cookies import set_refresh_key_cookie
 
@@ -117,8 +117,12 @@ class GoogleAuthCallbackView(APIView):
                 )
 
                 if created:
-                    username = generate_unique_username(email.split("@")[0])
-                    user.username = username
+                    # Claimed through the registry, not written straight onto
+                    # the column — the handle has to be reserved against the
+                    # shared namespace, orgs included.
+                    UsernameService.generate_and_claim(
+                        email.split("@")[0], user=user
+                    )
                     user.set_password(generate_random_password())
                     # New OAuth users haven't picked a role yet — route them through
                     # the one-time role-selection step before they reach the app.

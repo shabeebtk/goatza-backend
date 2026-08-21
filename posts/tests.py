@@ -1303,9 +1303,11 @@ class PostMentionTests(APITestCase):
             extract_mention_usernames,
         )
 
-        # Case-insensitive uniqueness, original case preserved for lookup.
+        # Matched case-insensitively and LOWERCASED on capture: handles are
+        # stored lowercase now that users and organizations share one
+        # namespace, so "@Rahul10" and "@rahul10" are one person and one row.
         self.assertEqual(
-            extract_mention_usernames("@Rahul10 hi @rahul10"), ["Rahul10"]
+            extract_mention_usernames("@Rahul10 hi @rahul10"), ["rahul10"]
         )
 
         many = " ".join(f"@user{i}" for i in range(30))
@@ -1313,8 +1315,9 @@ class PostMentionTests(APITestCase):
             len(extract_mention_usernames(many)), MAX_MENTIONS_PER_POST
         )
 
-        # Dots are legal inside an ORG handle but never terminate one.
-        self.assertEqual(extract_mention_usernames("@kochi.fc."), ["kochi.fc"])
+        # The dot is no longer a handle character for EITHER actor type, so
+        # "@kochi.fc." is the handle "kochi" followed by prose.
+        self.assertEqual(extract_mention_usernames("@kochi.fc."), ["kochi"])
         self.assertEqual(extract_mention_usernames("email me@ x"), [])
 
 

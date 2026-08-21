@@ -17,6 +17,8 @@ from services.storage.factory import get_storage_service
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
 from organization.services.organization_member_service import OrganizationMemberService
 from connections.services.follow_services import FollowService
+from usernames.exceptions import UsernameTaken
+from usernames.services.username_service import UsernameService
 from core.constant import TYPE_ORGANIZATION
 
 logger = logging.getLogger(__name__)
@@ -389,11 +391,12 @@ class UpdateOrganizationAPIView(BaseAPIView):
                 org.name = data["name"]
                 org_fields.append("name")
 
-            if "username" in data:
-                old_username = org.username
-                org.username = data["username"]
-                org_fields.append("username")
-                logger.info(f"{TAG} Username changed: {old_username} -> {data['username']}")
+            # Handles are NOT a plain field write — they live in the shared
+            # UsernameRegistry, so the claim happens inside the atomic save
+            # below (it writes the display column itself and busts the old AND
+            # new lookup caches). Tracked separately from org_fields for the
+            # same reason: nothing else should re-save the column.
+            claims_username = "username" in data
 
             if "type" in data:
                 org.type = data["type"]
@@ -412,13 +415,21 @@ class UpdateOrganizationAPIView(BaseAPIView):
 
             # ATOMIC SAVE
             with transaction.atomic():
+                if claims_username:
+                    # Raises UsernameTaken (caught below) — deliberately NOT
+                    # returned from in here, or the rollback would never run
+                    # and a half-applied org edit would commit.
+                    UsernameService.claim(data["username"], organization=org)
+
                 if org_fields:
                     org.save(update_fields=org_fields + ["updated_at"])
 
                 if profile_fields:
                     profile.save(update_fields=profile_fields + ["updated_at"])
 
-            updated_fields = org_fields + profile_fields
+            updated_fields = (
+                (["username"] if claims_username else []) + org_fields + profile_fields
+            )
             logger.info(f"{TAG} Success org={org.id}, fields={updated_fields}")
 
             # Return full updated org
@@ -429,6 +440,18 @@ class UpdateOrganizationAPIView(BaseAPIView):
                 success=True,
                 message="Organization updated successfully",
                 data=response_serializer.data
+            )
+
+        except UsernameTaken:
+            # Lost the race between the serializer's pre-check and the insert.
+            # The unique constraint is the arbiter, and this is what it said.
+            logger.info(f"{TAG} Username taken org={org_id}")
+
+            return response_data(
+                success=False,
+                message="Validation failed",
+                data={"username": ["Username already taken"]},
+                status_code=400
             )
 
         except serializers.ValidationError as e:

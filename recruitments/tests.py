@@ -15,6 +15,7 @@ from core.actor import Actor
 from accounts.models import User, UserProfile
 from organization.models import Organization, OrganizationMember
 from connections.models import Follow
+from usernames.services.username_service import UsernameService
 from sports.models import Sport, SportPosition, UserSport, UserSportPosition
 from recruitments.models import (
     Recruitment,
@@ -330,6 +331,9 @@ class RecruitmentValidationTests(APITestCase):
             username="kitefc",
             type=Organization.Type.CLUB,
         )
+        # These tests list recruitments BY the org's handle, and a handle only
+        # resolves once UsernameRegistry holds it (usernames.UsernameService).
+        UsernameService.claim(self.org.username, organization=self.org)
         OrganizationMember.objects.create(
             organization=self.org,
             user=self.user,
@@ -2664,6 +2668,8 @@ class RecruitmentAllTabFilterTests(APITestCase):
             name="Harbour FC", username="harbourfc",
             type=Organization.Type.CLUB,
         )
+        # The org-scoped list resolves this handle through UsernameRegistry.
+        UsernameService.claim(self.org.username, organization=self.org)
         OrganizationMember.objects.create(
             organization=self.org, user=self.owner,
             role=OrganizationMember.Role.OWNER,

@@ -1,6 +1,12 @@
-import logging, re, random
-from django.db import transaction
+import logging
+from django.db import IntegrityError, transaction
+from core.constant import TYPE_ORGANIZATION
 from sports.models import Sport
+from usernames.exceptions import UsernameTaken
+from usernames.services.username_service import (
+    GENERATE_CLAIM_ATTEMPTS,
+    UsernameService,
+)
 from organization.models import (
     Organization,
     OrganizationProfile,
@@ -21,28 +27,45 @@ class OrganizationService:
         return count < OrganizationService.MAX_ORG_PER_USER
     
 
-    def generate_unique_org_username(name: str) -> str:
+    @staticmethod
+    def _create_with_handle(user, data):
         """
-        Generate unique organization username from name.
-        Example:
-        Real Madrid CF -> realmadridcf17
+        The Organization row plus its UsernameRegistry row, or None if the
+        namespace refused every candidate.
+
+        The handle is generated FIRST because ``Organization.username`` is a
+        non-null unique column — an org cannot exist without one, so it cannot
+        be created and then named. That leaves a gap between generating and
+        inserting, which two simultaneous creates from the same org name can
+        both land in; the savepoint below is what lets the loser re-roll
+        instead of poisoning ``create_organization``'s transaction.
+
+        The registry is still the arbiter across actor types: generate() looks
+        at it (not at Organization alone), and claim()'s unique constraint has
+        the final say.
         """
-        # lowercase + keep only a-z0-9
-        base = re.sub(r"[^a-z0-9]", "", name.lower())
+        for _ in range(GENERATE_CLAIM_ATTEMPTS):
+            username = UsernameService.generate(
+                data["name"], owner_type=TYPE_ORGANIZATION
+            )
 
-        # fallback safety
-        if not base:
-            base = "org"
+            try:
+                with transaction.atomic():
+                    org = Organization.objects.create(
+                        name=data["name"],
+                        username=username,
+                        type=data["type"],
+                        created_by=user
+                    )
+                    UsernameService.claim(username, organization=org)
+                return org
+            except (IntegrityError, UsernameTaken):
+                logger.info(
+                    f"[ORG CREATE] handle {username} taken, re-rolling"
+                )
+                continue
 
-        # keep max base length safe
-        base = base[:20]
-
-        username = f"{base}{random.randint(10,99)}"
-
-        while Organization.objects.filter(username=username).exists():
-            username = f"{base}{random.randint(1000,9999)}"
-
-        return username
+        return None
 
     @staticmethod
     @transaction.atomic
@@ -60,22 +83,11 @@ class OrganizationService:
             if not OrganizationService.can_create_organization(user):
                 return False, "You can create up to 3 organizations only"
 
-            username = OrganizationService.generate_unique_org_username(data['name'])
+            # CREATE ORGANIZATION (+ its handle)
+            org = OrganizationService._create_with_handle(user, data)
 
-            if not username:
-                return False, "Username is required"
-
-            # UNIQUE CHECK
-            if Organization.objects.filter(username=username).exists():
-                return False, "Username already taken"
-
-            # CREATE ORGANIZATION
-            org = Organization.objects.create(
-                name=data["name"],
-                username=username,
-                type=data["type"],
-                created_by=user
-            )
+            if org is None:
+                return False, "Could not allocate a username, please try again"
 
             # PROFILE
             profile = OrganizationProfile.objects.create(

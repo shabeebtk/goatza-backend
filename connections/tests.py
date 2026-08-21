@@ -9,6 +9,7 @@ from organization.models import (
     OrganizationMember,
 )
 from connections.models import Follow
+from usernames.services.username_service import UsernameService
 
 LIST_URL = "/connections/user/follow/list"
 
@@ -43,8 +44,11 @@ class FollowListAPITests(APITestCase):
         user = User.objects.create_user(
             email=f"{username}@example.com",
             password="pass1234",
-            username=username,
         )
+        # Through the service, not straight onto the column: the handle only
+        # resolves once UsernameRegistry holds it, and these tests fetch lists
+        # BY username.
+        UsernameService.claim(username, user=user)
         UserProfile.objects.create(
             user=user,
             name=name,
@@ -60,6 +64,7 @@ class FollowListAPITests(APITestCase):
             type=Organization.Type.CLUB,
             is_verified=verified,
         )
+        UsernameService.claim(username, organization=org)
         OrganizationProfile.objects.create(
             organization=org,
             logo=f"https://cdn.example.com/{username}.png",

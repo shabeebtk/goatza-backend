@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.utils import timezone
-from accounts.models import User, UserProfile
+from accounts.models import UserProfile
+from usernames.services.username_service import UsernameService
 from utils.validations import validate_username_format
 
 
@@ -35,19 +36,30 @@ class UpdateUserProfileSerializer(serializers.Serializer):
     # VALIDATIONS
 
     def validate_username(self, value):
-        user = self.context["request"].user
-        value = value.strip().lower()
+        """
+        Format + availability against the SHARED namespace.
 
-        # format validation (your function)
+        Checking User alone was half the problem: it let a player take a handle
+        an organization already held, and vice versa. This is still only a
+        friendly pre-check — the arbiter is the unique constraint that
+        UsernameService.claim writes against, so the view handles UsernameTaken
+        as well.
+        """
+        user = self.context["request"].user
+
         try:
-            value = validate_username_format(value)
+            available = UsernameService.is_available(value, exclude_user=user)
         except ValueError as e:
+            # Malformed / reserved — a different answer from "taken", and the
+            # message is the one the UI shows.
             raise serializers.ValidationError(str(e))
 
-        # uniqueness check
-        if User.objects.exclude(id=user.id).filter(username__iexact=value).exists():
+        if not available:
             raise serializers.ValidationError("Username already taken")
-        return value
+
+        # The NORMALIZED value, not the input: what gets claimed has to be what
+        # was checked.
+        return validate_username_format(value)
      
 
     def validate_name(self, value):
