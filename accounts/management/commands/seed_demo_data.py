@@ -37,6 +37,9 @@ from organization.models import (
     OrganizationSport,
 )
 from connections.models import Follow
+from usernames.models import UsernameRegistry
+from usernames.services.username_service import UsernameService
+from utils.validations import USERNAME_MAX_LENGTH
 
 
 SEED_PASSWORD = "strong#password"
@@ -168,11 +171,23 @@ def _org_logo(name: str, i: int) -> str:
     )
 
 
-def _slug(name: str) -> str:
+def _slug(name: str, max_length: int = USERNAME_MAX_LENGTH) -> str:
+    """
+    Deterministic handle from a display name.
+
+    CAPPED at the validator's bound, and re-stripped after the cut so the
+    truncation cannot leave a trailing underscore. Seeded rows go through
+    UsernameService.claim like real ones, so "Green Valley Higher Secondary
+    School" has to come out the other side as something the validator accepts
+    — uncapped, it produced a 36-character handle that claim() rejected.
+
+    Determinism matters beyond the create path: --wipe rebuilds the same list
+    to find what it seeded last time, so both callers must slug identically.
+    """
     s = "".join(c if c.isalnum() else "_" for c in name.lower())
     while "__" in s:
         s = s.replace("__", "_")
-    return s.strip("_")
+    return s.strip("_")[:max_length].strip("_")
 
 
 def _jitter(value: float, spread: float = 0.05) -> float:
@@ -262,8 +277,10 @@ class Command(BaseCommand):
         ).prefetch_related("options").first()
 
         users = []
+        # Read from the shared namespace, not from User alone — a seeded player
+        # must not be handed a handle one of the seeded orgs already holds.
         used_usernames = set(
-            User.objects.values_list("username", flat=True).exclude(username__isnull=True)
+            UsernameRegistry.objects.values_list("username_lower", flat=True)
         )
 
         for i, (name, gender) in enumerate(PLAYER_NAMES[:50], start=1):
@@ -274,8 +291,10 @@ class Command(BaseCommand):
                 users.append(existing)
                 continue
 
-            # unique username from name
-            base = _slug(name)
+            # unique username from name. Three characters short of the bound:
+            # the de-dupe below appends a counter, and the result still has to
+            # pass validate_username_format.
+            base = _slug(name, USERNAME_MAX_LENGTH - 3)
             username = base
             n = 1
             while username in used_usernames:
@@ -285,13 +304,17 @@ class Command(BaseCommand):
 
             user = User(
                 email=email,
-                username=username,
                 role=User.Role.PLAYER,
                 is_email_verified=True,
                 is_active=True,
                 password=hashed_password,
             )
             user.save()
+
+            # Registers the handle AND writes the display column. Seeded rows
+            # go through the same door as real ones, or /[username] would not
+            # resolve any of them.
+            UsernameService.claim(username, user=user)
 
             # --- location: 80% Kerala, 20% elsewhere -------------------
             if random.random() < 0.8:
@@ -387,6 +410,8 @@ class Command(BaseCommand):
                 is_verified=verified,
                 is_active=True,
             )
+
+            UsernameService.claim(username, organization=org)
 
             OrganizationProfile.objects.create(
                 organization=org,

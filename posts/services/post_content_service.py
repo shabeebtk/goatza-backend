@@ -10,21 +10,26 @@ which is what lets the same code serve create, update and the backfill command.
 
 import re
 
+from utils.validations import USERNAME_MAX_LENGTH
+
 # Deliberately narrow: letters, digits and underscore only, so a trailing "."
 # or "," in prose never becomes part of the tag. Mirrored byte-for-byte by the
 # frontend's linkifier in PostCard.tsx — change one, change the other.
 HASHTAG_RE = re.compile(r"#([A-Za-z0-9_]{1,50})")
 MAX_HASHTAGS_PER_POST = 30
 
-# Handles differ by actor type: users are [A-Za-z0-9_] (utils.validations
-# .validate_username_format), organizations also allow "." (the RegexValidator
-# on Organization.username). So the union charset is letters/digits/_/. — but
-# a dot may only sit BETWEEN segments, never at the end, or "Great game
-# @kochifc." in ordinary prose would capture the full stop and resolve to
-# nothing. Both models cap username at 50 chars, so the token cap matches that
-# rather than a shorter guess. Mirrored by PostCard.tsx.
-MENTION_RE = re.compile(r"@([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)")
-MAX_MENTION_LENGTH = 50
+# ONE charset for both actor types now that users and organizations share a
+# namespace (utils.validations.USERNAME_CHARSET_RE): letters, digits and
+# underscore. The old dot exception — organizations only — is gone, which also
+# removes the "a dot may sit only BETWEEN segments" special case it forced:
+# "Great game @kochifc." tokenizes to "@kochifc" because the charset stops at
+# the full stop, not because the pattern works around it.
+#
+# Matched case-insensitively and lowercased on capture: handles are stored
+# lowercase, but prose spells them however it likes. The cap is the validator's
+# bound, imported rather than repeated. Mirrored byte-for-byte by PostCard.tsx.
+MENTION_RE = re.compile(r"@([a-z0-9_]+)", re.IGNORECASE)
+MAX_MENTION_LENGTH = USERNAME_MAX_LENGTH
 MAX_MENTIONS_PER_POST = 20
 
 
@@ -73,18 +78,17 @@ def extract_mention_usernames(content: str) -> list[str]:
     """
     Unique handles in first-appearance order, capped.
 
-    Case is PRESERVED — the lookup is case-insensitive but the stored username
-    is whatever the account actually has, so uniqueness is folded here to stop
-    "@Rahul10" and "@rahul10" costing two queries for one person.
+    LOWERCASED on capture: handles are stored lowercase (the namespace folds
+    case at the validator), so "@Rahul10" and "@rahul10" are the same person
+    and must not cost two queries or two rows.
     """
     seen, out = set(), []
     for m in MENTION_RE.finditer(content or ""):
-        username = m.group(1)
+        username = m.group(1).lower()
         if len(username) > MAX_MENTION_LENGTH:
             continue
-        key = username.lower()
-        if key not in seen:
-            seen.add(key)
+        if username not in seen:
+            seen.add(username)
             out.append(username)
         if len(out) >= MAX_MENTIONS_PER_POST:
             break
@@ -94,9 +98,12 @@ def extract_mention_usernames(content: str) -> list[str]:
 def resolve_mention_target(username: str):
     """
     Returns ("user", User) | ("org", Organization) | None.
-    Users and organizations have SEPARATE username tables, so the same
-    handle can exist in both. Policy: the USER wins; org resolves only when
-    no user matches. (Documented product decision — leave this comment.)
+
+    Users and organizations now share ONE namespace (usernames.UsernameRegistry),
+    so at most one of these two queries can match and the ordering no longer
+    decides a winner. The org query stays because the registry is not consulted
+    here: mentions need the is_active flag and the full row, and the two-filter
+    lookup is what already gives that.
     """
     from accounts.models import User
     from organization.models import Organization

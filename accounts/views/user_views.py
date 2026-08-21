@@ -16,6 +16,8 @@ from services.storage.factory import get_storage_service
 from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
 from accounts.serializers.user_update_serilizer import UpdateUserProfileSerializer
 from services.location.location_service import LocationService
+from usernames.exceptions import UsernameTaken
+from usernames.services.username_service import UsernameService
 from utils.validations import validate_username_format
 from core.constant import TYPE_USER
 from core.actor import Actor
@@ -126,34 +128,38 @@ class CheckUsernameAvailabilityAPIView(APIView):
                     status_code=400
                 )
 
-            username = str(username).strip().lower()
+            user = request.user
 
+            # INVALID and TAKEN are different answers and the UI says different
+            # things about them, so they get different shapes: a 400 with the
+            # reason for a handle that could never be allowed, a 200 with
+            # available=false for one that is merely spoken for.
             try:
-                username = validate_username_format(username)
+                available = UsernameService.is_available(
+                    username, exclude_user=user
+                )
             except ValueError as ve:
                 return response_data(
                     False,
                     message=str(ve),
+                    data={"username": str(username).strip().lower(), "valid": False},
                     status_code=400
                 )
 
-            user = request.user
-
-            # check
-            exists = User.objects.filter(
-                username__iexact=username
-            ).exclude(id=user.id).exists()
+            username = validate_username_format(username)
 
             logger.debug(
-                f"[USERNAME CHECK] user={user.id}, username={username}, exists={exists}"
+                f"[USERNAME CHECK] user={user.id}, username={username}, "
+                f"available={available}"
             )
 
             return response_data(
                 True,
-                message="Username available" if not exists else "Username already taken",
+                message="Username available" if available else "Username already taken",
                 data={
                     "username": username,
-                    "available": not exists
+                    "valid": True,
+                    "available": available
                 }
             )
 
@@ -292,16 +298,12 @@ class UpdateUserProfileAPIView(APIView):
 
             logger.debug(f"{TAG} Payload={data}")
 
-            # USER FIELDS
-            if "username" in data:
-                old_username = user.username
-                user.username = data["username"]
-                user_fields.append("username")
-
-                logger.info(
-                    f"{TAG} Username changed: {old_username} → {data['username']}"
-                )
-
+            # Handles are NOT a plain field write — they live in the shared
+            # UsernameRegistry, so the claim happens inside the atomic save
+            # below (it writes the display column itself and busts the old AND
+            # new lookup caches). Tracked separately from user_fields for the
+            # same reason: nothing else should re-save the column.
+            claims_username = "username" in data
 
             # LOCATION UPDATE
             if "location" in data:
@@ -370,13 +372,21 @@ class UpdateUserProfileAPIView(APIView):
 
             # ATOMIC SAVE
             with transaction.atomic():
+                if claims_username:
+                    # Raises UsernameTaken (caught below) — deliberately NOT
+                    # returned from in here, or the rollback would never run
+                    # and a half-applied profile edit would commit.
+                    UsernameService.claim(data["username"], user=user)
+
                 if user_fields:
                     user.save(update_fields=user_fields + ["updated_at"])
 
                 if profile_fields:
                     profile.save(update_fields=profile_fields + ["updated_at"])
 
-            updated_fields = user_fields + profile_fields
+            updated_fields = (
+                (["username"] if claims_username else []) + user_fields + profile_fields
+            )
 
             logger.info(
                 f"{TAG} Success user={user.id}, fields={updated_fields}"
@@ -402,6 +412,18 @@ class UpdateUserProfileAPIView(APIView):
                 success=True,
                 message="Profile updated successfully",
                 data=response_serializer.data
+            )
+
+        except UsernameTaken:
+            # Lost the race between the serializer's pre-check and the insert.
+            # The unique constraint is the arbiter, and this is what it said.
+            logger.info(f"{TAG} Username taken user={user.id}")
+
+            return response_data(
+                success=False,
+                message="Validation failed",
+                data={"username": ["Username already taken"]},
+                status_code=400
             )
 
         except serializers.ValidationError as e:

@@ -43,6 +43,9 @@ INSTALLED_APPS = [
     'accounts',
     'sports',
     'organization',
+    # Owns the ONE username namespace users and organizations share. Kept out
+    # of both so neither app owns the other's handles.
+    'usernames',
     'connections',
     'posts',
     'feed',

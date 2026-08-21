@@ -17,15 +17,24 @@ class Organization(BaseUUIDModel):
 
     name = models.CharField(max_length=255)
 
-    # Public unique identifier (used in URL)
+    # Public unique identifier (used in URL).
+    #
+    # unique=True here is only unique WITHIN this table — the cross-table lock
+    # that stops an org taking a handle a user already holds lives in
+    # usernames.UsernameRegistry, and every write goes through
+    # UsernameService.claim. This column stays the display/read path.
+    #
+    # The dot is gone: it was the one charset difference between orgs and
+    # users, and dropping it is what lets the two share one namespace. The
+    # bound is utils.validations.USERNAME_MAX_LENGTH, not this max_length.
     username = models.CharField(
         max_length=50,
         unique=True,
         db_index=True,
         validators=[
             RegexValidator(
-                regex=r"^[a-z0-9_.]+$",
-                message="Only lowercase letters, numbers, underscore and dot allowed"
+                regex=r"^[a-z0-9_]+$",
+                message="Only lowercase letters, numbers and underscore allowed"
             )
         ]
     )

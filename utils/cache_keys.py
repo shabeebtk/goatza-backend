@@ -16,6 +16,22 @@ class CacheKeys:
     def sports_list():
         return f"sports:list"
 
+    # ── Handle resolution ────────────────────────────────────────
+
+    @staticmethod
+    def profile_lookup(username):
+        """
+        Handle -> {"type", "id"}, the hot path behind /[username] and every
+        by-handle endpoint (UsernameService.resolve).
+
+        UNLIKE the public bundles below, this one is NOT allowed to go stale:
+        it is an identity mapping, and a freed handle that keeps resolving to
+        its old owner for five minutes sends the next visitor to the wrong
+        profile. UsernameService.claim/release delete it for the old AND the
+        new handle on every rename.
+        """
+        return f"profile_lookup:{username}"
+
     # ── Public (logged-out) profile bundles ──────────────────────
     # Keyed by username, not id: that is what the URL carries, and it is the
     # only thing the anonymous request knows. A rename therefore leaves a stale
