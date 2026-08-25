@@ -8,6 +8,10 @@ import cloudinary.api
 import cloudinary.uploader
 from django.conf import settings
 
+# Folder/public_id construction is shared with R2Service so the two providers
+# can never drift onto different media paths — see services/storage/paths.py.
+from .paths import build_folder, build_object_name, new_temp_id
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------
@@ -58,8 +62,8 @@ class CloudinaryService:
         if upload_type in {"profile", "cover"}:
             user = actor.user
 
-            folder = f"users/{user.id}/{upload_type}"
-            public_id = upload_type
+            folder = build_folder(actor, upload_type)
+            public_id = build_object_name(upload_type)
 
             uploads.append(
                 self._build_signed_upload(
@@ -80,15 +84,8 @@ class CloudinaryService:
         # USER POSTS
         # -----------------------------------------
         elif upload_type == "posts":
-            temp_post_id = str(uuid.uuid4())
-
-            if actor.is_user:
-                user = actor.user
-                folder = f"users/{user.id}/posts/{temp_post_id}"
-
-            elif actor.is_org:
-                org = actor.organization
-                folder = f"organizations/{org.id}/posts/{temp_post_id}"
+            temp_post_id = new_temp_id()
+            folder = build_folder(actor, upload_type, temp_post_id)
 
         
             for _ in range(count):
@@ -97,7 +94,7 @@ class CloudinaryService:
                         upload_url=upload_url,
                         timestamp=timestamp,
                         folder=folder,
-                        public_id=str(uuid.uuid4()),
+                        public_id=build_object_name(upload_type),
                         overwrite="false"
                     )
                 )
@@ -113,8 +110,8 @@ class CloudinaryService:
         # -----------------------------------------
         elif upload_type == "recruitments":
             org = actor.organization
-            temp_id = str(uuid.uuid4())
-            folder = f"organizations/{org.id}/recruitments/{temp_id}"
+            temp_id = new_temp_id()
+            folder = build_folder(actor, upload_type, temp_id)
 
             for _ in range(count):
                 uploads.append(
@@ -122,7 +119,7 @@ class CloudinaryService:
                         upload_url=upload_url,
                         timestamp=timestamp,
                         folder=folder,
-                        public_id=str(uuid.uuid4()),
+                        public_id=build_object_name(upload_type),
                         overwrite="false"
                     )
                 )
@@ -141,12 +138,7 @@ class CloudinaryService:
         # URL was uploaded by the SENDER (not replayed from someone else's
         # folder) before it trusts it — see MessageService._validate_chat_image.
         elif upload_type == "chat":
-            if actor.is_user:
-                folder = f"chat/users/{actor.user.id}"
-            elif actor.is_org:
-                folder = f"chat/organizations/{actor.organization.id}"
-            else:
-                raise ValueError("Invalid actor for chat upload")
+            folder = build_folder(actor, upload_type)
 
             for _ in range(count):
                 uploads.append(
@@ -154,7 +146,7 @@ class CloudinaryService:
                         upload_url=upload_url,
                         timestamp=timestamp,
                         folder=folder,
-                        public_id=str(uuid.uuid4()),
+                        public_id=build_object_name(upload_type),
                         overwrite="false"
                     )
                 )
@@ -185,8 +177,8 @@ class CloudinaryService:
                     self._build_signed_upload(
                         upload_url=upload_url,
                         timestamp=timestamp,
-                        folder=f"users/{user.id}/{upload_type}",
-                        public_id=str(uuid.uuid4()),
+                        folder=build_folder(actor, upload_type),
+                        public_id=build_object_name(upload_type),
                         overwrite="false"
                     )
                 )
@@ -206,8 +198,8 @@ class CloudinaryService:
                 self._build_signed_upload(
                     upload_url=upload_url,
                     timestamp=timestamp,
-                    folder=f"organizations/{org.id}/logo",
-                    public_id="logo",
+                    folder=build_folder(actor, upload_type),
+                    public_id=build_object_name(upload_type),
                     overwrite="true"
                 )
             )
@@ -227,8 +219,8 @@ class CloudinaryService:
                 self._build_signed_upload(
                     upload_url=upload_url,
                     timestamp=timestamp,
-                    folder=f"organizations/{org.id}/cover",
-                    public_id="cover",
+                    folder=build_folder(actor, upload_type),
+                    public_id=build_object_name(upload_type),
                     overwrite="true"
                 )
             )

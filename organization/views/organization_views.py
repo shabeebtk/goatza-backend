@@ -14,7 +14,11 @@ from organization.serializers.update_organization_serializer import UpdateOrgani
 from utils.response import response_data
 from utils.validations import is_valid_uuid
 from services.storage.factory import get_storage_service
-from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
+from services.storage.validators import (
+    allowed_image_extensions,
+    validate_media,
+    with_cache_buster,
+)
 from organization.services.organization_member_service import OrganizationMemberService
 from connections.services.follow_services import FollowService
 from usernames.exceptions import UsernameTaken
@@ -273,16 +277,20 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
 
             # UPDATE LOGO
                         # UPDATE LOGO
+            # logo/cover each own ONE key per org and are overwritten in place,
+            # so the URL never changes and the CDN keeps serving the old image.
+            # with_cache_buster stamps ?v=<ts> on the stored URL; the public_id
+            # column keeps the bare key, which is what delete_file needs.
             if "logo" in data:
                 validate_media(
                     user=request.user,
                     org=request.actor.organization,   # NEW
                     url=data["logo"],
                     public_id=data["logo_public_id"],
-                    allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
+                    allowed_extensions=allowed_image_extensions()
                 )
 
-                profile.logo = data["logo"]
+                profile.logo = with_cache_buster(data["logo"])
                 profile.logo_public_id = data["logo_public_id"]
 
                 update_fields += ["logo", "logo_public_id"]
@@ -295,10 +303,10 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
                     org=request.actor.organization,   # NEW
                     url=data["cover_image"],
                     public_id=data["cover_image_public_id"],
-                    allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
+                    allowed_extensions=allowed_image_extensions()
                 )
 
-                profile.cover_image = data["cover_image"]
+                profile.cover_image = with_cache_buster(data["cover_image"])
                 profile.cover_image_public_id = data["cover_image_public_id"]
 
                 update_fields += ["cover_image", "cover_image_public_id"]

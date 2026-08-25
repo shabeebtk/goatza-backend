@@ -12,6 +12,7 @@ fan-out and push happen in exactly one place.
 '''
 
 
+from django.conf import settings
 from django.utils import timezone
 from django.db import transaction
 from asgiref.sync import async_to_sync
@@ -40,21 +41,26 @@ from notifications.services.notification_service import (
     NotificationService,
     get_org_admin_users,
 )
-from services.storage.factory import get_storage_service
+from services.storage.metadata import MAX_DIMENSION, clamp_int
 from services.storage.validators import (
-    build_video_thumbnail_url,
-    extract_public_id_from_url,
+    extract_storage_key,
     get_file_extension,
-    is_valid_cloudinary_url,
+    is_valid_media_source,
+    same_storage_folder,
 )
 
-# Chat images: matches the signature preset. HEIC is allowed on upload;
-# Cloudinary serves a jpg/webp derivative to browsers via transformation.
-CHAT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "heic"}
+# Chat images. HEIC and mov only survive on the Cloudinary path, which
+# transcoded them on delivery; on R2 the stored file is the exact bytes the
+# browser uploaded, so a .heic bubble would simply not render. The active
+# allowlist is chosen by _chat_extensions() below.
+# TODO(cleanup-stage): drop the CLOUDINARY_* sets with the provider.
+CLOUDINARY_CHAT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "heic"}
+CHAT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 
 # Chat videos.
-CHAT_VIDEO_EXTENSIONS = {"mp4", "mov", "webm"}
+CLOUDINARY_CHAT_VIDEO_EXTENSIONS = {"mp4", "mov", "webm"}
+CHAT_VIDEO_EXTENSIONS = {"mp4", "webm"}
 CHAT_VIDEO_MAX_BYTES = 100 * 1024 * 1024  # 100 MB
 CHAT_VIDEO_MAX_DURATION_MS = 90 * 1000    # 90 seconds
 
@@ -210,6 +216,7 @@ class MessageService:
         sender_org=None,
         media_url: str = "",
         media_public_id: str = "",
+        thumbnail_url: str = "",
         width=None,
         height=None,
         size_bytes=None,
@@ -217,14 +224,26 @@ class MessageService:
     ):
         """
         Send a photo message. The media has already been uploaded straight to
-        Cloudinary by the client (signed upload) — we get the URL back, so we
+        storage by the client (presigned upload) — we get the URL back, so we
         must re-validate it belongs to us before trusting it (see
-        _validate_chat_image). width/height/size are client-reported and only
-        drive layout, so they are stored as-is.
+        _validate_chat_image). width/height are client-reported and only drive
+        layout, so they are range-checked and otherwise stored as sent.
+
+        ``thumbnail_url`` is optional for an image (a cheap preview for the
+        list); absent, the column stays blank as it always has.
         """
         MessageService._validate_chat_image(
             sender_user, sender_org, media_url, media_public_id, size_bytes
         )
+
+        thumbnail_url = (thumbnail_url or "").strip()
+        if thumbnail_url:
+            MessageService._validate_chat_thumbnail(
+                sender_user, sender_org, thumbnail_url, media_public_id
+            )
+
+        width = clamp_int(width, maximum=MAX_DIMENSION)
+        height = clamp_int(height, maximum=MAX_DIMENSION)
 
         return MessageService._create_and_dispatch(
             conversation,
@@ -234,6 +253,7 @@ class MessageService:
             content=caption or "",
             media_url=media_url,
             media_public_id=media_public_id,
+            media_thumbnail_url=thumbnail_url,
             media_width=width,
             media_height=height,
             media_size_bytes=size_bytes,
@@ -247,6 +267,7 @@ class MessageService:
         sender_org=None,
         media_url: str = "",
         media_public_id: str = "",
+        thumbnail_url: str = "",
         width=None,
         height=None,
         duration_ms=None,
@@ -255,15 +276,30 @@ class MessageService:
     ):
         """
         Send a video message. Like send_image_message, but validates the video
-        constraints (format/size/duration) and derives the poster thumbnail
-        server-side from the public_id (never trusts a client thumbnail).
+        constraints (format/size/duration).
+
+        The poster frame now comes from the CLIENT: nothing derives one
+        server-side any more, so ``thumbnail_url`` is required and is put
+        through the same checks as the clip itself, plus a same-folder rule
+        (see _validate_chat_thumbnail).
         """
         MessageService._validate_chat_video(
             sender_user, sender_org, media_url, media_public_id,
             size_bytes, duration_ms,
         )
 
-        message = MessageService._create_and_dispatch(
+        thumbnail_url = (thumbnail_url or "").strip()
+        if not thumbnail_url:
+            raise InvalidMediaError("Video thumbnail is required")
+
+        MessageService._validate_chat_thumbnail(
+            sender_user, sender_org, thumbnail_url, media_public_id
+        )
+
+        width = clamp_int(width, maximum=MAX_DIMENSION)
+        height = clamp_int(height, maximum=MAX_DIMENSION)
+
+        return MessageService._create_and_dispatch(
             conversation,
             sender_user,
             sender_org,
@@ -271,35 +307,11 @@ class MessageService:
             content=caption or "",
             media_url=media_url,
             media_public_id=media_public_id,
-            media_thumbnail_url=build_video_thumbnail_url(media_public_id),
+            media_thumbnail_url=thumbnail_url,
             media_width=width,
             media_height=height,
             media_duration_ms=duration_ms,
             media_size_bytes=size_bytes,
-        )
-
-        # Pre-generate the transcoded video the chat player asks for, so the
-        # recipient doesn't open the bubble into a cold-start transcode. Uses the
-        # VALIDATED public_id (never the raw client value) and runs on_commit —
-        # same rule as realtime/push: a provider hiccup must not roll back or
-        # fail a message that is already persisted.
-        MessageService._schedule_video_derivatives(media_public_id)
-
-        return message
-
-    @staticmethod
-    def _schedule_video_derivatives(media_public_id: str) -> None:
-        """Best-effort eager transcode, queued for after the commit."""
-        if not media_public_id:
-            return
-
-        try:
-            storage = get_storage_service()
-        except Exception:
-            return
-
-        transaction.on_commit(
-            lambda: storage.ensure_video_derivatives(media_public_id)
         )
 
     @staticmethod
@@ -312,16 +324,43 @@ class MessageService:
         raise InvalidSenderError("Invalid sender")
 
     @staticmethod
+    def _chat_extensions(kind: str):
+        """
+        The extension allowlist for the ACTIVE provider.
+
+        Cloudinary transcoded on delivery, so a .heic photo or a .mov clip still
+        rendered in the browser. On R2 the object is served byte-for-byte, so
+        those two would arrive as a file no browser will paint — the R2 sets
+        drop them.
+        """
+        if settings.FILE_STORAGE_PROVIDER == "r2":
+            return (
+                CHAT_IMAGE_EXTENSIONS if kind == "image"
+                else CHAT_VIDEO_EXTENSIONS
+            )
+
+        # TODO(cleanup-stage): drop this branch with the Cloudinary provider.
+        return (
+            CLOUDINARY_CHAT_IMAGE_EXTENSIONS if kind == "image"
+            else CLOUDINARY_CHAT_VIDEO_EXTENSIONS
+        )
+
+    @staticmethod
     def _validate_chat_media_url(
         sender_user, sender_org, media_url, media_public_id, allowed_extensions
     ):
         """
         Shared "never trust the client URL" checks for image + video. Accepted
-        only when it points at OUR cloud, has an allowed extension, lives under
+        only when it points at OUR storage, has an allowed extension, lives under
         the SENDER's own chat folder (so another actor's URL can't be replayed),
-        and the public_id embedded in the URL matches the one sent.
+        and the key embedded in the URL matches the one sent.
+
+        The replay protection is the prefix check, and it is unchanged: a URL is
+        only ever accepted under chat/users/<sender>/ or
+        chat/organizations/<sender>/. Only the source test and the key
+        extraction became provider-aware.
         """
-        if not media_url or not is_valid_cloudinary_url(media_url):
+        if not media_url or not is_valid_media_source(media_url):
             raise InvalidMediaError("Invalid media source")
 
         if get_file_extension(media_url) not in allowed_extensions:
@@ -331,8 +370,36 @@ class MessageService:
         if not media_public_id or not media_public_id.startswith(prefix):
             raise InvalidMediaError("Invalid media path")
 
-        if extract_public_id_from_url(media_url) != media_public_id:
+        if extract_storage_key(media_url) != media_public_id:
             raise InvalidMediaError("Media URL and public_id mismatch")
+
+    @staticmethod
+    def _validate_chat_thumbnail(
+        sender_user, sender_org, thumbnail_url, media_public_id
+    ):
+        """
+        A client-supplied poster frame, held to the same bar as the media it
+        belongs to — nothing derives one server-side any more.
+
+        On top of the shared checks (our storage, image extension, the SENDER's
+        own chat prefix, URL↔key match) the thumbnail must live in the SAME
+        FOLDER as the video. Without that, a sender could pair a clip with a
+        poster lifted from any other message they ever sent.
+        """
+        MessageService._validate_chat_media_url(
+            sender_user,
+            sender_org,
+            thumbnail_url,
+            extract_storage_key(thumbnail_url),
+            MessageService._chat_extensions("image"),
+        )
+
+        if not same_storage_folder(
+            extract_storage_key(thumbnail_url), media_public_id
+        ):
+            raise InvalidMediaError("Invalid media path")
+
+        return thumbnail_url
 
     @staticmethod
     def _validate_chat_image(
@@ -340,7 +407,7 @@ class MessageService:
     ):
         MessageService._validate_chat_media_url(
             sender_user, sender_org, media_url, media_public_id,
-            CHAT_IMAGE_EXTENSIONS,
+            MessageService._chat_extensions("image"),
         )
         if size_bytes is not None and size_bytes > CHAT_IMAGE_MAX_BYTES:
             raise InvalidMediaError("Image exceeds the 10MB limit")
@@ -352,7 +419,7 @@ class MessageService:
     ):
         MessageService._validate_chat_media_url(
             sender_user, sender_org, media_url, media_public_id,
-            CHAT_VIDEO_EXTENSIONS,
+            MessageService._chat_extensions("video"),
         )
         if size_bytes is not None and size_bytes > CHAT_VIDEO_MAX_BYTES:
             raise InvalidMediaError("Video exceeds the 100MB limit")

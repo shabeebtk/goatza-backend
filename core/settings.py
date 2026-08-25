@@ -298,6 +298,34 @@ CLOUDINARY_STORAGE = {
 DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
 
+# ------ MEDIA STORAGE PROVIDER ------ /
+# Which backend services/storage/factory.py hands out. "r2" is the default;
+# "cloudinary" is the rollback and stays wired until the cleanup stage removes
+# it. Every CLOUDINARY_* setting above is still live either way.
+#
+# `or` instead of getenv's default argument throughout this block: the keys
+# ship in .env with empty values, and getenv would hand back "" — an empty
+# provider raises, and an empty base URL would make is_valid_media_url()
+# accept literally any URL.
+FILE_STORAGE_PROVIDER = os.getenv("FILE_STORAGE_PROVIDER") or "r2"
+
+
+# ------ CLOUDFLARE R2 (media) ------ /
+# S3-compatible. The browser uploads straight to the bucket with a presigned
+# PUT, so these credentials never leave the server and files never touch the app.
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
+R2_BUCKET = os.getenv("R2_BUCKET") or "goatza-media"
+
+# Public delivery origin, NO trailing slash: a stored URL is this + "/" + key.
+# Production is the CDN domain in front of the bucket; local dev points at the
+# bucket's r2.dev URL.
+MEDIA_PUBLIC_BASE_URL = (
+    os.getenv("MEDIA_PUBLIC_BASE_URL") or "https://media.goatza.com"
+).rstrip("/")
+
+
 
 # -------- EMAIL CONFIG ----------
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

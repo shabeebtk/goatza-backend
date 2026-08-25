@@ -34,7 +34,12 @@ from accounts.models import User
 from highlights.models import Highlight, HighlightView
 from highlights.selectors.highlight_selectors import is_recruiter
 from posts.models import Post, PostMedia
-from services.storage.factory import get_storage_service
+from services.storage.metadata import MAX_HIGHLIGHT_DURATION, clamp_duration
+from services.storage.validators import (
+    allowed_video_extensions,
+    validate_media,
+    validate_thumbnail,
+)
 from utils.validations import is_valid_uuid
 
 
@@ -142,7 +147,7 @@ class HighlightService:
 
     @staticmethod
     def _clean_optional_int(value, label: str):
-        """Cloudinary metadata (duration/width/height) — absent is fine, junk is not."""
+        """Client metadata (duration/width/height) — absent is fine, junk is not."""
         if value is None or value == "":
             return None
 
@@ -161,10 +166,11 @@ class HighlightService:
     # =================================================================
 
     @staticmethod
-    def _direct_fields(payload: dict) -> dict:
-        """Media fields for a direct upload — straight from the Cloudinary result."""
+    def _direct_fields(user, payload: dict) -> dict:
+        """Media fields for a direct upload — straight from the client's upload."""
         file_url = (payload.get("file_url") or "").strip()
         public_id = (payload.get("public_id") or "").strip()
+        thumbnail_url = (payload.get("thumbnail_url") or "").strip()
 
         if not file_url:
             raise ValidationError("The uploaded video URL (file_url) is required.")
@@ -179,12 +185,44 @@ class HighlightService:
                 f"{max_public_id} characters."
             )
 
+        # A poster frame is no longer derived server-side, so the client sends
+        # one — and it is required, because the rail is a grid of posters and a
+        # clip without one renders as a black tile.
+        if not thumbnail_url:
+            raise ValidationError(
+                "The video thumbnail (thumbnail_url) is required."
+            )
+
+        # Prove both files are ours, under THIS player's own prefix, and that
+        # the poster came out of the same upload as the clip.
+        try:
+            validate_media(
+                user,
+                file_url,
+                public_id,
+                allowed_extensions=allowed_video_extensions(),
+            )
+            validate_thumbnail(
+                user,
+                thumbnail_url,
+                parent_key=public_id,
+            )
+        except ValueError as exc:
+            raise ValidationError(f"Highlight video: {exc}")
+
         return {
             "file_url": file_url,
             "public_id": public_id,
-            "thumbnail_url": (payload.get("thumbnail_url") or "").strip(),
-            "duration": HighlightService._clean_optional_int(
-                payload.get("duration"), "Duration"
+            "thumbnail_url": thumbnail_url,
+            # Client-reported and cosmetic (the duration badge), so an
+            # out-of-range value is dropped to NULL rather than rejected. The
+            # 90s cap is still hard on the PROMOTE path, where the duration is
+            # one we stored ourselves — see create_highlight.
+            "duration": clamp_duration(
+                HighlightService._clean_optional_int(
+                    payload.get("duration"), "Duration"
+                ),
+                MAX_HIGHLIGHT_DURATION,
             ),
             "width": HighlightService._clean_optional_int(
                 payload.get("width"), "Width"
@@ -255,7 +293,7 @@ class HighlightService:
           * promote — ``{"source_media_id": ..., "title"?, "visibility"?}``
             copies a video off one of the player's own posts.
           * direct  — ``{"file_url", "public_id", "thumbnail_url"?, "duration"?,
-            "width"?, "height"?, "title"?, "visibility"?}`` from a Cloudinary
+            "width"?, "height"?, "title"?, "visibility"?}`` from a client
             direct upload.
 
         The new clip lands last in the rail (``max(order) + 1``).
@@ -278,17 +316,21 @@ class HighlightService:
                 user,
                 source_media_id
             )
-        else:
-            media_fields = HighlightService._direct_fields(payload)
-            source_post = None
 
-        duration = media_fields.get("duration")
-        if duration is not None and duration > HighlightService.MAX_DURATION_SECONDS:
-            raise ValidationError(
-                f"Highlights can be at most "
-                f"{HighlightService.MAX_DURATION_SECONDS} seconds long. This "
-                f"clip is {duration} seconds."
-            )
+            # A promoted clip's duration is one WE stored on the post, not a
+            # number the client just sent, so the cap stays a hard rule here:
+            # a 4-minute post video must not become a highlight. The direct
+            # path clamps instead — see _direct_fields.
+            duration = media_fields.get("duration")
+            if duration is not None and duration > HighlightService.MAX_DURATION_SECONDS:
+                raise ValidationError(
+                    f"Highlights can be at most "
+                    f"{HighlightService.MAX_DURATION_SECONDS} seconds long. This "
+                    f"clip is {duration} seconds."
+                )
+        else:
+            media_fields = HighlightService._direct_fields(user, payload)
+            source_post = None
 
         with transaction.atomic():
             # Serialize this player's concurrent creates. Locking only the
@@ -321,37 +363,11 @@ class HighlightService:
                 **media_fields,
             )
 
-        # Pre-generate the transcoded clip the viewer plays. The highlights
-        # viewer is where the cold-start black screen was actually reported, so
-        # this is the path that matters most.
-        #
-        # on_commit, never inline: this is a network call, and the block above
-        # holds a row lock on the owner. Deferring it also means a clip that
-        # loses the "10 highlights" race never triggers a pointless transcode.
-        # Both modes go through here — a promoted clip usually already has the
-        # derivative from its post, and asking twice is harmless.
-        HighlightService._schedule_video_derivatives(media_fields.get("public_id"))
+        # No derivative to pre-generate any more: the stored object IS the clip
+        # the viewer plays (encoded client-side before upload), so there is no
+        # transcode to race and nothing to schedule on_commit.
 
         return highlight
-
-    @staticmethod
-    def _schedule_video_derivatives(public_id) -> None:
-        """
-        Queue eager-derivative generation for after the current transaction
-        commits. Best-effort throughout: resolving the storage service must not
-        be able to break a create either.
-        """
-        if not public_id:
-            return
-
-        try:
-            storage = get_storage_service()
-        except Exception:
-            return
-
-        transaction.on_commit(
-            lambda: storage.ensure_video_derivatives(public_id)
-        )
 
     # =================================================================
     # UPDATE / REORDER / DELETE

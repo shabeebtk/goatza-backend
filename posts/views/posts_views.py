@@ -16,8 +16,20 @@ from notifications.services.notification_service import NotificationService
 from posts.serializers.posts_serializers import (
     PostListSerializer, POST_MENTIONS_PREFETCH,
 )
-from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS, DEFAULT_VIDEO_EXTENSIONS
-from services.storage.factory import get_storage_service
+from services.storage.validators import (
+    allowed_image_extensions,
+    allowed_video_extensions,
+    validate_media,
+    validate_thumbnail,
+)
+from services.storage.metadata import (
+    MAX_IMAGE_BYTES,
+    MAX_POST_VIDEO_DURATION,
+    MAX_VIDEO_BYTES,
+    clamp_dimensions,
+    clamp_duration,
+    clamp_size_bytes,
+)
 from services.location.location_service import LocationService
 from posts.selectors.post_visibility_selectors import profile_visibility_filter
 from posts.services.post_service import PostService
@@ -185,9 +197,6 @@ class CreatePostAPIView(BaseAPIView):
             image_count = 0
             video_count = 0
 
-            # Storage provider — used to read intrinsic dimensions server-side.
-            storage = get_storage_service()
-
             for idx, media in enumerate(media_list):
 
                 if not isinstance(media, dict):
@@ -211,8 +220,14 @@ class CreatePostAPIView(BaseAPIView):
                     return response_data(False, f"Invalid media_type at index {idx}", status_code=400)
 
                 # -------------------------
-                # CLOUDINARY VALIDATION
+                # MEDIA URL VALIDATION
                 # -------------------------
+                # Provider-aware (see services/storage/validators.py): the URL
+                # must come from our storage, carry an allowed extension, sit
+                # under this actor's own prefix, and its key must match the
+                # public_id sent alongside it.
+                thumbnail_url = (media.get("thumbnail_url") or "").strip()
+
                 try:
                     org = actor.organization if actor.is_org else None
 
@@ -222,8 +237,17 @@ class CreatePostAPIView(BaseAPIView):
                             file_url,
                             public_id,
                             org=org,
-                            allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
+                            allowed_extensions=allowed_image_extensions()
                         )
+
+                        # Optional for an image — a cheap preview for the feed.
+                        if thumbnail_url:
+                            validate_thumbnail(
+                                user,
+                                thumbnail_url,
+                                parent_key=public_id,
+                                org=org,
+                            )
 
                     elif media_type == PostMedia.MediaType.VIDEO:
                         validate_media(
@@ -231,15 +255,25 @@ class CreatePostAPIView(BaseAPIView):
                             file_url,
                             public_id,
                             org=org,
-                            allowed_extensions=DEFAULT_VIDEO_EXTENSIONS
+                            allowed_extensions=allowed_video_extensions()
                         )
 
-                        duration = media.get("duration")
-                        if duration is None:
-                            return response_data(False, f"duration required at index {idx}", status_code=400)
+                        # REQUIRED for a video. Nothing derives a poster frame
+                        # server-side any more, so without one the feed has a
+                        # black tile until the clip buffers.
+                        if not thumbnail_url:
+                            return response_data(
+                                False,
+                                f"thumbnail_url required at index {idx}",
+                                status_code=400
+                            )
 
-                        if duration > 300:
-                            return response_data(False, "Video cannot exceed 5 minutes", status_code=400)
+                        validate_thumbnail(
+                            user,
+                            thumbnail_url,
+                            parent_key=public_id,
+                            org=org,
+                        )
 
                 except ValueError as ve:
                     return response_data(False, error=str(ve), status_code=400)
@@ -250,27 +284,32 @@ class CreatePostAPIView(BaseAPIView):
                     return response_data(False, "Invalid media order", status_code=400)
 
                 # -------------------------
-                # SERVER-SIDE DIMENSIONS
+                # CLIENT-REPORTED METADATA
                 # -------------------------
-                # Read width/height (and, for video, an authoritative duration)
-                # straight from the storage provider — client values are never
-                # trusted. Failures degrade to NULL and never block the post.
-                meta = storage.get_media_metadata(public_id, media_type)
-                media["width"] = meta.get("width")
-                media["height"] = meta.get("height")
-                if meta.get("duration") is not None:
-                    media["duration"] = meta["duration"]
+                # There is nobody left to ask: the object is the exact bytes the
+                # browser uploaded, so width/height/duration/size arrive with the
+                # attach request. They are cosmetic (layout and a duration
+                # badge), so anything out of range becomes NULL rather than a
+                # 400 — the client already renders older rows that have none.
+                media["width"], media["height"] = clamp_dimensions(
+                    media.get("width"), media.get("height")
+                )
+                media["thumbnail_url"] = thumbnail_url
 
-                # -------------------------
-                # EAGER VIDEO DERIVATIVE
-                # -------------------------
-                # Kick off the transcode the player will ask for, before the row
-                # even exists — by the time anyone opens the post, the derivative
-                # is ready instead of cold-starting under them. Best-effort, and
-                # deliberately here rather than after the write: no transaction is
-                # open at this point, so a slow Cloudinary call can't hold one.
                 if media_type == PostMedia.MediaType.VIDEO:
-                    storage.ensure_video_derivatives(public_id)
+                    media["duration"] = clamp_duration(
+                        media.get("duration"), MAX_POST_VIDEO_DURATION
+                    )
+                    media["size_bytes"] = clamp_size_bytes(
+                        media.get("size_bytes"), MAX_VIDEO_BYTES
+                    )
+                else:
+                    # An image has no duration; a client that sends one is
+                    # confused, and storing it would print a badge on a photo.
+                    media["duration"] = None
+                    media["size_bytes"] = clamp_size_bytes(
+                        media.get("size_bytes"), MAX_IMAGE_BYTES
+                    )
 
             # -------------------------
             # MEDIA RULES
@@ -325,6 +364,7 @@ class CreatePostAPIView(BaseAPIView):
                             duration=media.get("duration"),
                             width=media.get("width"),
                             height=media.get("height"),
+                            size_bytes=media.get("size_bytes"),
                             order=media.get("order", idx),
                         )
                     )
