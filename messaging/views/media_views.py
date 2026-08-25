@@ -17,14 +17,15 @@ class SendMediaMessageAPIView(BaseAPIView):
     """
     POST /conversations/<conversation_id>/messages/media
 
-    Send a photo or video into a conversation. The media is already on
-    Cloudinary (signed direct upload); the body carries the resulting URL +
-    metadata, which the service re-validates before trusting.
+    Send a photo or video into a conversation. The media is already in storage
+    (presigned direct upload); the body carries the resulting URL + metadata,
+    which the service re-validates before trusting.
 
         {
           "media_type": "image" | "video",     # defaults to "image"
-          "media_url": "https://res.cloudinary.com/<cloud>/.../chat/users/<id>/<uuid>.jpg",
-          "media_public_id": "chat/users/<id>/<uuid>",
+          "media_url": "https://media.goatza.com/chat/users/<id>/<uuid>.jpg",
+          "media_public_id": "chat/users/<id>/<uuid>.jpg",
+          "thumbnail_url": "...",               # required for video, optional for image
           "width": 1080, "height": 1350, "size_bytes": 834221,
           "duration_ms": 8200,                  # video only
           "caption": "optional"
@@ -70,6 +71,7 @@ class SendMediaMessageAPIView(BaseAPIView):
                         sender_org=sender_org,
                         media_url=payload["media_url"],
                         media_public_id=payload["media_public_id"],
+                        thumbnail_url=payload.get("thumbnail_url", ""),
                         width=payload.get("width"),
                         height=payload.get("height"),
                         duration_ms=payload.get("duration_ms"),
@@ -83,6 +85,7 @@ class SendMediaMessageAPIView(BaseAPIView):
                         sender_org=sender_org,
                         media_url=payload["media_url"],
                         media_public_id=payload["media_public_id"],
+                        thumbnail_url=payload.get("thumbnail_url", ""),
                         width=payload.get("width"),
                         height=payload.get("height"),
                         size_bytes=payload.get("size_bytes"),

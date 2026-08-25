@@ -480,7 +480,7 @@ class RecruitmentMedia(BaseUUIDModel):
         choices=MediaType.choices
     )
 
-    # Cloudinary URLs carry a deep nested folder path
+    # Media URLs carry a deep nested folder path
     # (organizations/<uuid>/recruitments/<uuid>/<uuid>.jpg) that overflows the
     # 200-char URLField default, so give these headroom.
     file_url = models.URLField(max_length=500)

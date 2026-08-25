@@ -1,15 +1,20 @@
 from django.conf import settings
-from .cloudinary import CloudinaryService
+from .r2 import R2Service
 
 
 def get_storage_service():
-    provider = getattr(settings, "FILE_STORAGE_PROVIDER", "cloudinary")
+    """
+    The one storage backend.
 
-    if provider == "cloudinary":
-        return CloudinaryService()
+    FILE_STORAGE_PROVIDER survives the removal of the second provider on
+    purpose: a deployment still carrying the old value in its environment should
+    fail loudly here rather than silently uploading somewhere unexpected.
+    """
+    provider = getattr(settings, "FILE_STORAGE_PROVIDER", "r2")
 
-    # future
-    # if provider == "s3":
-    #     return S3Service()
+    if provider == "r2":
+        return R2Service()
 
-    raise ValueError("Invalid storage provider")
+    raise ValueError(
+        f"Invalid storage provider: {provider!r} (expected 'r2')"
+    )

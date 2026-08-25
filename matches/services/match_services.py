@@ -49,7 +49,7 @@ from matches.models import (
 )
 from services.storage.factory import get_storage_service
 from services.storage.validators import (
-    DEFAULT_IMAGE_EXTENSIONS,
+    allowed_image_extensions,
     validate_media,
 )
 from sports.models import Sport, SportPosition
@@ -343,7 +343,7 @@ class MatchService:
         never be cleaned up, and a public_id with no URL renders nothing — so
         one without the other is rejected rather than half-stored. The asset is
         then run through the shared ``validate_media``, which proves it is a
-        Cloudinary file under this user's own ``users/<id>/`` prefix: without
+        stored file under this user's own ``users/<id>/`` prefix: without
         that, a player could attach anybody's uploaded image by pasting its URL.
         """
         if "photo_url" not in payload and "photo_public_id" not in payload:
@@ -378,7 +378,7 @@ class MatchService:
                 user=user,
                 url=url,
                 public_id=public_id,
-                allowed_extensions=DEFAULT_IMAGE_EXTENSIONS,
+                allowed_extensions=allowed_image_extensions(),
             )
         except ValueError as exc:
             raise ValidationError(f"Match photo: {exc}")
@@ -842,7 +842,7 @@ class MatchService:
                 MatchService.recompute_streak(user)
 
         # The old image is now unreferenced. Deferred and best-effort, so a
-        # Cloudinary outage cannot fail an edit that has already committed.
+        # storage outage cannot fail an edit that has already committed.
         if (
             previous_public_id
             and previous_public_id != entry.photo_public_id
@@ -863,7 +863,7 @@ class MatchService:
         Soft delete one match, consistent with posts, messages and highlights.
 
         The row survives with ``is_deleted``; the photo does not. There is no
-        undelete, so the asset would otherwise sit in Cloudinary forever — the
+        undelete, so the object would otherwise sit in the bucket forever — the
         consequence is that a soft-deleted row keeps a ``photo_url`` pointing
         at nothing, which is correct exactly as long as nothing ever reads a
         deleted entry back.

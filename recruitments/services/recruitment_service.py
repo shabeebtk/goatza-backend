@@ -17,8 +17,10 @@ from recruitments.models import (
 from sports.models import Sport
 from services.storage.factory import get_storage_service
 from services.storage.validators import (
+    allowed_image_extensions,
+    allowed_video_extensions,
     validate_media,
-    is_valid_cloudinary_url
+    validate_thumbnail,
 )
 
 
@@ -28,10 +30,16 @@ logger = logging.getLogger(__name__)
 class RecruitmentService:
 
     # Per-media-type upload whitelist (server-side, mirrors the frontend picker).
-    MEDIA_ALLOWED_EXTENSIONS = {
-        "image": {"jpg", "jpeg", "png", "webp"},
-        "video": {"mp4", "mov", "webm"},
-    }
+    # Chosen per provider: the R2 path serves the exact uploaded bytes, so it
+    # cannot accept a .mov nothing will transcode. See
+    # services/storage/validators.allowed_video_extensions.
+    @staticmethod
+    def _media_extensions(media_type):
+        if media_type == "image":
+            return allowed_image_extensions()
+        if media_type == "video":
+            return allowed_video_extensions()
+        return set()
 
     # Status state machine — the single source of truth on the server.
     # cancelled is terminal (no transitions out). Anything not listed here
@@ -311,9 +319,10 @@ class RecruitmentService:
     @staticmethod
     def _validate_media(actor, media_data):
         """
-        Verify every media item is a Cloudinary asset owned by this org:
-        source host + extension whitelist + public_id path-ownership +
-        URL↔public_id match. Thumbnails, when present, must be Cloudinary URLs.
+        Verify every media item is a stored asset owned by this org:
+        source + extension whitelist + public_id path-ownership + URL↔public_id
+        match. Thumbnails, when present, get the same checks plus a same-folder
+        rule.
         Raises a DRF ValidationError (→ 400) with a per-item message on the
         first failure — never a raw 500.
         """
@@ -323,9 +332,8 @@ class RecruitmentService:
         user = actor.user
 
         for idx, item in enumerate(media_data):
-            allowed_extensions = RecruitmentService.MEDIA_ALLOWED_EXTENSIONS.get(
-                item.get("media_type"),
-                set()
+            allowed_extensions = RecruitmentService._media_extensions(
+                item.get("media_type")
             )
 
             try:
@@ -339,16 +347,28 @@ class RecruitmentService:
             except ValueError as exc:
                 raise RecruitmentService._media_error(idx, str(exc))
 
+            # A poster frame is client-supplied now (nothing derives one
+            # server-side), so it gets the same treatment as the file it belongs
+            # to — our storage, an image extension, this org's own prefix, and
+            # the same folder as the media it posters.
             thumbnail_url = item.get("thumbnail_url")
-            if thumbnail_url and not is_valid_cloudinary_url(thumbnail_url):
-                raise ValidationError(
-                    f"media[{idx}]: invalid thumbnail source"
-                )
+            if thumbnail_url:
+                try:
+                    validate_thumbnail(
+                        user,
+                        thumbnail_url,
+                        parent_key=item["public_id"],
+                        org=org,
+                    )
+                except ValueError:
+                    raise ValidationError(
+                        f"media[{idx}]: invalid thumbnail source"
+                    )
 
     @staticmethod
     def _delete_orphaned_assets(public_ids):
         """
-        Best-effort deletion of Cloudinary assets no longer referenced by the
+        Best-effort deletion of stored objects no longer referenced by the
         recruitment. Never raises — a failed cleanup must not break the request.
         Scheduled via transaction.on_commit so nothing is destroyed on rollback.
         """
@@ -444,7 +464,7 @@ class RecruitmentService:
     @staticmethod
     def _sync_media(recruitment, media_data):
         # Diff existing vs incoming BEFORE deleting rows so we can clean up the
-        # Cloudinary assets that are no longer referenced (orphans). On create
+        # stored objects that are no longer referenced (orphans). On create
         # there are no existing rows, so this set is empty.
         existing_public_ids = set(
             recruitment.media.values_list("public_id", flat=True)

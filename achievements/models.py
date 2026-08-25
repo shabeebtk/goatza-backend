@@ -108,7 +108,7 @@ class Achievement(BaseUUIDModel):
     # Single proof/showcase image — the certificate scan or the trophy photo.
     #
     # 500, not URLField's default 200, for the reason Highlight.file_url carries:
-    # a Cloudinary public_id is an actor-scoped path of UUIDs (~120 chars) and
+    # a public_id is an actor-scoped object key of UUIDs (~120 chars) and
     # the secure_url wraps it in the delivery prefix, which lands close enough to
     # 200 that the default used to fail the insert in production only.
     image = models.URLField(max_length=500, blank=True)

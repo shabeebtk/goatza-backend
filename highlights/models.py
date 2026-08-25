@@ -29,9 +29,9 @@ class Highlight(BaseUUIDModel):
 
     title = models.CharField(max_length=80, blank=True)
 
-    # MEDIA (Cloudinary — copied from PostMedia when promoted)
+    # MEDIA (copied from PostMedia when promoted)
     #
-    # 500, not URLField's default 200: a Cloudinary public_id is an actor-scoped
+    # 500, not URLField's default 200: a public_id is an actor-scoped
     # path of UUIDs (~120 chars), and the poster URL adds the
     # so_0,f_jpg,q_auto,c_fill,w_360,h_640 transform on top — that lands at ~215
     # and used to fail the insert outright.

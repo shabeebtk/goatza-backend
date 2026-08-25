@@ -13,7 +13,11 @@ from utils.cache import cache_set, cache_get, cache_delete
 from utils.cache_keys import CacheKeys
 from connections.services.follow_services import FollowService
 from services.storage.factory import get_storage_service
-from services.storage.validators import validate_media, DEFAULT_IMAGE_EXTENSIONS
+from services.storage.validators import (
+    allowed_image_extensions,
+    validate_media,
+    with_cache_buster,
+)
 from accounts.serializers.user_update_serilizer import UpdateUserProfileSerializer
 from services.location.location_service import LocationService
 from usernames.exceptions import UsernameTaken
@@ -178,10 +182,10 @@ class UpdateUserMediaAPIView(APIView):
     '''
     upload
     {
-        "profile_photo": "https://res.cloudinary.com/.../profile.jpg",
+        "profile_photo": "https://media.goatza.com/users/<id>/profile.webp",
         "profile_photo_public_id": "users/123/profile",
 
-        "cover_photo": "https://res.cloudinary.com/.../cover.jpg",
+        "cover_photo": "https://media.goatza.com/users/<id>/cover.webp",
         "cover_photo_public_id": "users/123/cover"
     }
 
@@ -227,14 +231,20 @@ class UpdateUserMediaAPIView(APIView):
                 update_fields += ["cover_photo", "cover_photo_public_id"]
 
             # UPDATE PROFILE PHOTO
+            #
+            # profile/cover each own ONE key per user and are overwritten in
+            # place, so the URL never changes and the CDN keeps serving the old
+            # image. with_cache_buster stamps ?v=<ts> on the stored URL; the
+            # public_id column keeps the bare key, which is what a later
+            # delete_file needs.
             if "profile_photo" in data:
                 validate_media(
                     request.user,
                     data["profile_photo"],
                     data["profile_photo_public_id"],
-                    allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
+                    allowed_extensions=allowed_image_extensions()
                 )
-                profile.profile_photo = data["profile_photo"]
+                profile.profile_photo = with_cache_buster(data["profile_photo"])
                 profile.profile_photo_public_id = data["profile_photo_public_id"]
 
                 update_fields += ["profile_photo", "profile_photo_public_id"]
@@ -245,10 +255,10 @@ class UpdateUserMediaAPIView(APIView):
                     request.user,
                     data["cover_photo"],
                     data["cover_photo_public_id"],
-                    allowed_extensions=DEFAULT_IMAGE_EXTENSIONS
+                    allowed_extensions=allowed_image_extensions()
                 )
 
-                profile.cover_photo = data["cover_photo"]
+                profile.cover_photo = with_cache_buster(data["cover_photo"])
                 profile.cover_photo_public_id = data["cover_photo_public_id"]
 
                 update_fields += ["cover_photo", "cover_photo_public_id"]

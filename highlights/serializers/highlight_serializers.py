@@ -49,7 +49,7 @@ class HighlightCreateSerializer(serializers.Serializer):
     Create input, in either mode:
 
       * promote — ``source_media_id`` (a PostMedia of the player's own video post)
-      * direct  — ``file_url`` + ``public_id`` from the Cloudinary direct upload
+      * direct  — ``file_url`` + ``public_id`` from the presigned direct upload
 
     Shape only. Ownership, the 10-clip cap, the 90s cap and the media checks
     all belong to HighlightService and run there.

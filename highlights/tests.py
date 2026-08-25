@@ -96,7 +96,7 @@ class HighlightAPITestCase(APITestCase):
             title=kwargs.pop("title", f"clip {order}"),
             file_url=kwargs.pop(
                 "file_url",
-                f"https://res.cloudinary.com/demo/video/upload/v1/{order}.mp4",
+                f"https://media.goatza.test/{order}.mp4",
             ),
             public_id=kwargs.pop("public_id", f"goatza/highlights/{user.username}-{order}"),
             visibility=visibility or Highlight.Visibility.FOLLOWERS_AND_RECRUITERS,
@@ -112,13 +112,13 @@ class HighlightAPITestCase(APITestCase):
             post=post,
             file_url=media_kwargs.pop(
                 "file_url",
-                "https://res.cloudinary.com/demo/video/upload/v1/goal.mp4",
+                "https://media.goatza.test/goal.mp4",
             ),
             public_id=media_kwargs.pop("public_id", "goatza/posts/goal"),
             media_type=media_kwargs.pop("media_type", PostMedia.MediaType.VIDEO),
             thumbnail_url=media_kwargs.pop(
                 "thumbnail_url",
-                "https://res.cloudinary.com/demo/video/upload/so_0,f_jpg/goal.jpg",
+                "https://media.goatza.test/goal.jpg",
             ),
             duration=media_kwargs.pop("duration", 25),
             width=media_kwargs.pop("width", 1080),
@@ -161,7 +161,7 @@ class HighlightAPITestCase(APITestCase):
     def _create(self, actor_user, payload=None, org=None):
         headers = self._auth(actor_user, org)
         body = {
-            "file_url": "https://res.cloudinary.com/demo/video/upload/v1/new.mp4",
+            "file_url": "https://media.goatza.test/new.mp4",
             "public_id": "goatza/highlights/new",
         }
         body.update(payload or {})
@@ -480,7 +480,7 @@ class HighlightPromoteTests(HighlightAPITestCase):
     def test_cannot_promote_an_image(self):
         _, media = self._video_post(
             media_type=PostMedia.MediaType.IMAGE,
-            file_url="https://res.cloudinary.com/demo/image/upload/v1/team.jpg",
+            file_url="https://media.goatza.test/team.jpg",
             duration=None,
             width=None,
             height=None,
@@ -720,81 +720,13 @@ class HighlightListQueryCountTests(HighlightAPITestCase):
             self.client.get(list_url(self.owner.username))
 
 
-class HighlightEagerDerivativeTests(HighlightAPITestCase):
-    """
-    Creating a clip pre-generates the transcoded video the viewer plays, so the
-    first watch doesn't cold-start a transcode (the black screen this feature
-    was reported against). Fired on_commit — never inside the create's
-    transaction, which holds a lock on the owner row.
-    """
-
-    def test_direct_upload_schedules_the_derivative(self):
-        with patch(
-            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
-        ) as mock_eager:
-            with self.captureOnCommitCallbacks(execute=True):
-                resp = self._create(
-                    self.owner,
-                    {
-                        "file_url": (
-                            "https://res.cloudinary.com/demo/video/upload/v1/new.mp4"
-                        ),
-                        "public_id": "goatza/highlights/new",
-                    },
-                )
-
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-        mock_eager.assert_called_once_with("goatza/highlights/new")
-
-    def test_promote_schedules_the_derivative_with_the_source_public_id(self):
-        _post, media = self._video_post(author=self.owner)
-
-        with patch(
-            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
-        ) as mock_eager:
-            with self.captureOnCommitCallbacks(execute=True):
-                resp = self._create(
-                    self.owner, {"source_media_id": str(media.id)}
-                )
-
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-        # A promoted clip copies the post's public_id — same asset, same
-        # derivative. Asking again is harmless.
-        mock_eager.assert_called_once_with(media.public_id)
-
-    def test_nothing_is_scheduled_when_the_create_is_rejected(self):
-        # Cap reached → ValidationError before any row exists, so the callback
-        # must never have been registered.
-        for i in range(10):
-            self._highlight(order=i)
-
-        with patch(
-            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
-        ) as mock_eager:
-            with self.captureOnCommitCallbacks(execute=True):
-                resp = self._create(self.owner)
-
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        mock_eager.assert_not_called()
-
-    @override_settings(
-        CLOUDINARY_CLOUD_NAME="democloud",
-        CLOUDINARY_API_KEY="key",
-        CLOUDINARY_API_SECRET="secret",
-    )
-    def test_provider_failure_never_blocks_the_highlight(self):
-        with patch("cloudinary.uploader.explicit", side_effect=Exception("boom")):
-            with self.captureOnCommitCallbacks(execute=True):
-                resp = self._create(self.owner)
-
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-        self.assertEqual(
-            Highlight.objects.filter(user=self.owner, is_deleted=False).count(), 1
-        )
-
-
-STATS_URL = f"{BASE_URL}/stats"
-
+# =====================================================================
+# REMOVED: eager video-derivative coverage.
+#
+# It asserted that creating a clip scheduled a server-side transcode. The
+# stored object IS the clip that plays now (encoded client-side before
+# upload), so there is no derivative to schedule and nothing to assert.
+# =====================================================================
 
 class HighlightViewAnalyticsTests(HighlightAPITestCase):
     """

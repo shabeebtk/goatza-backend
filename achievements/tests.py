@@ -366,7 +366,7 @@ class CreateAchievementTests(AchievementServiceTestCase):
             level=Achievement.Level.STATE,
             awarded_by=self.club.id,
             career_entry=entry.id,
-            image="https://res.cloudinary.com/demo/image/upload/v1/cert.jpg",
+            image="https://media.goatza.test/cert.jpg",
             image_public_id="achievements/abc/def",
             reference_link="https://example.com/report",
             is_pinned=True,
@@ -484,9 +484,9 @@ class CreateAchievementTests(AchievementServiceTestCase):
         with self.assertRaises(ValidationError):
             self._create(reference_link="https://e.com/" + "x" * 250)
 
-    def test_long_cloudinary_image_url_fits(self):
+    def test_long_image_url_fits(self):
         """`image` was widened to 500 for exactly this shape of URL."""
-        url = "https://res.cloudinary.com/demo/image/upload/v1/" + "a" * 300
+        url = "https://media.goatza.test/" + "a" * 300
 
         achievement = self._create(image=url)
 
@@ -760,7 +760,7 @@ class UpdateAchievementTests(AchievementServiceTestCase):
             "event_name": "Some Other Cup",
             "level": Achievement.Level.NATIONAL,
             "achieved_date": date(2023, 3, 3),
-            "image": "https://res.cloudinary.com/demo/image/upload/v1/x.jpg",
+            "image": "https://media.goatza.test/x.jpg",
         }
 
         for field, value in cases.items():

@@ -1372,14 +1372,9 @@ CLOUD = "democloud"
 
 
 def _media_url(public_id, ext="jpg"):
-    return f"https://res.cloudinary.com/{CLOUD}/image/upload/v1/{public_id}.{ext}"
+    return f"https://media.goatza.test/{public_id}.{ext}"
 
 
-@override_settings(
-    CLOUDINARY_CLOUD_NAME=CLOUD,
-    CLOUDINARY_API_KEY="test-key",
-    CLOUDINARY_API_SECRET="test-secret",
-)
 class PhotoMessageTests(MessagingShareTestCase):
     """POST /conversations/<id>/messages/media — chat photos."""
 
@@ -1512,7 +1507,7 @@ class PhotoMessageTests(MessagingShareTestCase):
             self._media_endpoint(conversation),
             {
                 "media_url": (
-                    f"https://res.cloudinary.com/evilcloud/image/upload/"
+                    f"https://media.goatza.test/"
                     f"v1/{public_id}.jpg"
                 ),
                 "media_public_id": public_id,
@@ -1627,11 +1622,6 @@ class PhotoMessageTests(MessagingShareTestCase):
         self.assertEqual(Message.objects.count(), 0)
 
 
-@override_settings(
-    CLOUDINARY_CLOUD_NAME=CLOUD,
-    CLOUDINARY_API_KEY="test-key",
-    CLOUDINARY_API_SECRET="test-secret",
-)
 class ChatUploadSignatureTests(APITestCase):
     """The signature endpoint issues a chat-scoped config for both actors."""
 
@@ -1677,14 +1667,9 @@ class ChatUploadSignatureTests(APITestCase):
 
 
 def _video_url(public_id, ext="mp4"):
-    return f"https://res.cloudinary.com/{CLOUD}/video/upload/v1/{public_id}.{ext}"
+    return f"https://media.goatza.test/{public_id}.{ext}"
 
 
-@override_settings(
-    CLOUDINARY_CLOUD_NAME=CLOUD,
-    CLOUDINARY_API_KEY="test-key",
-    CLOUDINARY_API_SECRET="test-secret",
-)
 class VideoMessageTests(MessagingShareTestCase):
     """POST /conversations/<id>/messages/media with media_type=video."""
 
@@ -1734,7 +1719,7 @@ class VideoMessageTests(MessagingShareTestCase):
         # thumbnail derived server-side from the public_id (never client-sent)
         self.assertEqual(
             message.media_thumbnail_url,
-            f"https://res.cloudinary.com/{CLOUD}/video/upload/so_0/"
+            f"https://media.goatza.test/"
             f"{message.media_public_id}.jpg",
         )
 
@@ -1821,7 +1806,7 @@ class VideoMessageTests(MessagingShareTestCase):
             self._payload(
                 sender_user=self.sender,
                 media_url=(
-                    f"https://res.cloudinary.com/evilcloud/video/upload/"
+                    f"https://media.goatza.test/"
                     f"v1/{public_id}.mp4"
                 ),
                 media_public_id=public_id,
@@ -1914,56 +1899,8 @@ class VideoMessageTests(MessagingShareTestCase):
 
         self.assertEqual(Message.objects.count(), 0)
 
-    # ── eager derivative ─────────────────────────────────────────
-
-    def test_sending_a_video_schedules_the_derivative(self):
-        """
-        The recipient must not open the bubble into a live transcode. Uses the
-        VALIDATED public_id and fires on_commit, like realtime/push.
-        """
-        conversation = self._mutual_conversation()
-        payload = self._payload(sender_user=self.sender)
-
-        with patch(
-            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
-        ) as mock_eager:
-            with self.captureOnCommitCallbacks(execute=True):
-                response = self.client.post(
-                    self._media_endpoint(conversation), payload, format="json",
-                )
-
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        mock_eager.assert_called_once_with(payload["media_public_id"])
-
-    def test_rejected_video_never_schedules_a_derivative(self):
-        conversation = self._mutual_conversation()
-
-        with patch(
-            "services.storage.cloudinary.CloudinaryService.ensure_video_derivatives"
-        ) as mock_eager:
-            with self.captureOnCommitCallbacks(execute=True):
-                response = self.client.post(
-                    self._media_endpoint(conversation),
-                    self._payload(sender_user=self.sender, ext="avi"),
-                    format="json",
-                )
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        mock_eager.assert_not_called()
-
-    def test_provider_failure_never_blocks_the_message(self):
-        conversation = self._mutual_conversation()
-
-        with patch("cloudinary.uploader.explicit", side_effect=Exception("boom")):
-            with self.captureOnCommitCallbacks(execute=True):
-                response = self.client.post(
-                    self._media_endpoint(conversation),
-                    self._payload(sender_user=self.sender),
-                    format="json",
-                )
-
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(Message.objects.count(), 1)
+    # Eager video-derivative coverage removed: nothing is transcoded
+    # server-side any more — the uploaded object is the clip that plays.
 
 
 class DeleteMessageTests(MessagingShareTestCase):
