@@ -11,11 +11,62 @@ DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 # frontend's VIDEO_EXTENSIONS.
 DEFAULT_VIDEO_EXTENSIONS = {"mp4", "mov", "webm"}
 
+# 🔹 R2 sets (doc §5.2) — narrower than the Cloudinary ones above.
+# "mov" is deliberately gone: after the client-side encode (doc §4 G1) the
+# browser always produces mp4/webm, so a stored .mov can only be something that
+# bypassed the pipeline.
+MEDIA_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+MEDIA_VIDEO_EXTENSIONS = {"mp4", "webm"}
 
+
+# TODO(stage-6): remove — only the cloudinary provider still calls this.
 def is_valid_cloudinary_url(url: str) -> bool:
     return settings.CLOUDINARY_CLOUD_NAME in url
 
 
+def is_valid_media_url(url: str) -> bool:
+    """
+    Domain pinning (doc §8.3): a client-submitted media URL is only trusted if
+    it is served from OUR delivery domain. Anything else — another bucket, an
+    attacker's host, a Cloudinary leftover — is rejected before the key inside
+    it is ever compared against the actor's prefix.
+    """
+    if not url:
+        return False
+
+    base = (settings.MEDIA_PUBLIC_BASE_URL or "").rstrip("/")
+
+    if not base:
+        return False
+
+    return url.startswith(f"{base}/")
+
+
+def extract_key_from_media_url(url: str) -> str:
+    """
+    https://media.goatza.com/users/1/profile.webp?v=1724500000 → users/1/profile.webp
+
+    The `?v=` suffix is the fixed-key cache-buster (doc §4 G6) — it is part of
+    the STORED url but never part of the key, so it has to come off before the
+    key is compared with the submitted public_id.
+
+    Returns "" for anything not on our domain, so a caller that skips
+    is_valid_media_url still can't extract a key from a foreign URL.
+    """
+    if not is_valid_media_url(url):
+        return ""
+
+    base = settings.MEDIA_PUBLIC_BASE_URL.rstrip("/")
+    key = url[len(base):].lstrip("/")
+
+    # Drop any query string (`?v=<ts>` today) and fragment.
+    key = key.split("?", 1)[0].split("#", 1)[0]
+
+    return key
+
+
+# TODO(stage-2): delete — doc §4 G2 replaces it with a client-uploaded poster
+# object. Kept until Stage 2 removes its callers (messaging, posts).
 def build_video_thumbnail_url(public_id: str) -> str:
     """
     Cloudinary auto-generates a poster frame for any uploaded video: the same
@@ -32,6 +83,7 @@ def build_video_thumbnail_url(public_id: str) -> str:
     )
 
 
+# TODO(stage-6): remove — the R2 path uses extract_key_from_media_url below.
 def extract_public_id_from_url(url: str) -> str:
     """
     Example:

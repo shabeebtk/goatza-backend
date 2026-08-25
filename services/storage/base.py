@@ -1,5 +1,15 @@
 class BaseStorageService:
-    def get_upload_config(self, user, upload_type: str):
+    def get_upload_config(self, actor, upload_type: str, **kwargs):
+        """
+        Return everything the client needs to upload directly to the provider.
+
+        The kwargs differ per provider because the handshakes differ:
+        R2Service takes `files` — the client encodes first and declares
+        {content_type, size_bytes, kind} per object, so each presigned PUT can
+        bind an exact Content-Type. CloudinaryService takes `count` and signs
+        that many open-ended POSTs; it goes away in Stage 6 along with this
+        split.
+        """
         raise NotImplementedError
 
     def delete_file(self, public_id: str):

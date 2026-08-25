@@ -278,7 +278,29 @@ CORS_ALLOW_METHODS = [
 
 
 
+# ------ MEDIA STORAGE (Cloudflare R2) ------ /
+# Which BaseStorageService implementation get_storage_service() hands out.
+# "r2" is the real provider; "cloudinary" is kept selectable ONLY as an instant
+# rollback while the migration lands, and goes away in Stage 6.
+FILE_STORAGE_PROVIDER = os.getenv("FILE_STORAGE_PROVIDER", "r2")
+
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
+R2_BUCKET = os.getenv("R2_BUCKET", "goatza-media")
+
+# The custom domain in front of the bucket. Every stored media URL is
+# MEDIA_PUBLIC_BASE_URL + "/" + key, and every client-submitted URL must start
+# with it (services/storage/validators.is_valid_media_url) — so this value is a
+# security boundary, not just a convenience.
+MEDIA_PUBLIC_BASE_URL = os.getenv(
+    "MEDIA_PUBLIC_BASE_URL", "https://media.goatza.com"
+)
+# ------ MEDIA STORAGE END ------ /
+
+
 # ------ CLOUDINARY (media) ------ /
+# TODO(stage-6): remove this whole block with the cloudinary packages.
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
