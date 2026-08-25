@@ -842,7 +842,7 @@ class MatchService:
                 MatchService.recompute_streak(user)
 
         # The old image is now unreferenced. Deferred and best-effort, so a
-        # Cloudinary outage cannot fail an edit that has already committed.
+        # storage outage cannot fail an edit that has already committed.
         if (
             previous_public_id
             and previous_public_id != entry.photo_public_id
@@ -863,7 +863,7 @@ class MatchService:
         Soft delete one match, consistent with posts, messages and highlights.
 
         The row survives with ``is_deleted``; the photo does not. There is no
-        undelete, so the asset would otherwise sit in Cloudinary forever — the
+        undelete, so the object would otherwise sit in the bucket forever — the
         consequence is that a soft-deleted row keeps a ``photo_url`` pointing
         at nothing, which is correct exactly as long as nothing ever reads a
         deleted entry back.

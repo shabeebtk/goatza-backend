@@ -1,6 +1,5 @@
 from core.views.base_views import BaseAPIView
 from rest_framework.permissions import IsAuthenticated
-from django.conf import settings
 from utils.response import response_data
 from utils.errors import error_body
 from services.storage.factory import get_storage_service
@@ -24,15 +23,14 @@ from organization.services.organization_member_service import OrganizationMember
 MB = 1024 * 1024
 
 # Everything is normalised client-side before upload, so the accepted set is
-# narrow on purpose. No image/gif, no video/quicktime: the encoder emits webp/
-# jpeg/png and mp4/webm, and R2 stores exactly what it is handed (unlike
-# Cloudinary, which transcoded whatever arrived).
+# narrow on purpose. No image/gif, no video/quicktime: the client emits webp/
+# jpeg/png and mp4/webm, and storage keeps exactly what it is handed — nothing
+# transcodes on the way in or out.
 IMAGE_CONTENT_TYPES = {"image/webp", "image/jpeg", "image/png"}
 VIDEO_CONTENT_TYPES = {"video/mp4", "video/webm"}
 
-# A thumb is a poster frame / preview — an image, and a small one. It is what
-# replaces Cloudinary's server-side so_0 poster generation now that videos are
-# encoded on the client.
+# A thumb is a poster frame / preview — an image, and a small one. Nothing
+# derives one server-side; the client captures it while encoding the video.
 THUMB_MAX_BYTES = 1 * MB
 
 # Belt-and-braces ceiling on the request itself, independent of type: 10 images
@@ -134,160 +132,9 @@ class GetUploadConfigAPIView(BaseAPIView):
     X-Actor-Type: user | organization
     X-Actor-Id: <org_id>   (required when organization)
 
-    GET  → Cloudinary signed-upload params (legacy, removed in the cleanup stage)
-    POST → R2 presigned PUTs, one per declared file
+    POST → presigned PUTs, one per declared file
     """
 
-    ALLOWED_TYPES = {
-        "profile",
-        "cover",
-        "posts",
-        "organization_logo",
-        "organization_cover",
-        "recruitments",
-        # Chat media — works for both user and org actors (no actor-type guard
-        # below), scoped server-side to chat/<actor path>.
-        "chat",
-        # Achievement proof/showcase image. User-only (guarded below) and scoped
-        # to users/<id>/achievements — an achievement belongs to a person, so an
-        # org actor has nothing to upload here.
-        "achievements",
-        # Match diary photo. Same shape and same reasoning as achievements:
-        # user-only, scoped to users/<id>/matches. A match entry belongs to the
-        # player who played it, and there is no org-side match diary to upload
-        # for.
-        "matches",
-    }
-
-    # TODO(cleanup-stage): delete this handler, ALLOWED_TYPES, and the
-    # Cloudinary provider along with it. It is byte-for-byte the pre-R2 GET and
-    # stays only so a rollback to FILE_STORAGE_PROVIDER=cloudinary keeps every
-    # existing (not-yet-migrated) client working. Do not add types or fix
-    # anything here — the POST handler below is where new work goes.
-    def get(self, request):
-        try:
-            upload_type = request.query_params.get("type")
-            org_id = request.query_params.get("org_id")
-
-            try:
-                count = int(request.query_params.get("count", 1))
-            except (TypeError, ValueError):
-                count = 0
-
-            if upload_type not in self.ALLOWED_TYPES:
-                msg = "Invalid upload type"
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=400,
-                    data=error_body(msg, "type")
-                )
-
-            if count < 1 or count > 10:
-                msg = "Invalid count (1-10 allowed)"
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=400,
-                    data=error_body(msg, "count")
-                )
-
-            actor = self.actor
-            user = request.user
-            if org_id: # for user want to access org directly
-                try:
-                    org = Organization.objects.select_related("profile").get(id=org_id)
-                    if not OrganizationMemberService.is_organization_member(org, user):
-                        msg = "You are not a member of this organization"
-                        return response_data(
-                            success=False,
-                            message=msg,
-                            error=msg,
-                            status_code=400,
-                            data=error_body(msg, "org_id")
-                        )
-
-                    actor.organization = org
-                    actor.actor_type = "organization"
-
-                except Organization.DoesNotExist:
-                    msg = "Organization not found"
-                    return response_data(
-                        success=False,
-                        message=msg,
-                        error=msg,
-                        status_code=404,
-                        data=error_body(msg, "org_id")
-                    )
-
-            # -----------------------------------
-            # Prevent wrong actor usage
-            # -----------------------------------
-            if upload_type in {
-                "profile",
-                "cover",
-                "achievements",
-                "matches",
-            } and not actor.is_user:
-                msg = "Switch to your personal account for this upload"
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=403,
-                    data=error_body(msg, "type")
-                )
-
-            if upload_type in {
-                "organization_logo",
-                "organization_cover",
-                "recruitments"
-            } and not actor.is_org:
-                msg = "Switch to your organization account for this upload"
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=403,
-                    data=error_body(msg, "type")
-                )
-
-            storage = get_storage_service()
-
-            config = storage.get_upload_config(
-                actor=actor,
-                upload_type=upload_type,
-                count=count
-            )
-
-            return response_data(
-                success=True,
-                data=config
-            )
-
-        except ValueError as ve:
-            msg = str(ve) or "Invalid upload request"
-            return response_data(
-                success=False,
-                message=msg,
-                error=msg,
-                status_code=400,
-                data=error_body(msg)
-            )
-
-        except Exception as e:
-            return response_data(
-                success=False,
-                message="Failed to generate upload config",
-                status_code=500,
-                error=str(e)
-            )
-
-    # -----------------------------------------------------------
-    # POST — upload config v2 (R2 presigned PUTs)
-    # -----------------------------------------------------------
     def post(self, request):
         """
         Body:
@@ -304,19 +151,6 @@ class GetUploadConfigAPIView(BaseAPIView):
         position.
         """
         try:
-            # The GET handler is the Cloudinary path and stays the only one that
-            # works while the flag is flipped back; signing a PUT against a
-            # bucket we are not using would hand the client a dead URL.
-            if settings.FILE_STORAGE_PROVIDER != "r2":
-                msg = "upload config v2 requires the r2 provider"
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=400,
-                    data=error_body(msg, "provider")
-                )
-
             body = request.data if isinstance(request.data, dict) else {}
 
             upload_type = body.get("type")

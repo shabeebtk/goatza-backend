@@ -1,23 +1,20 @@
 """
 Object-path scheme, shared by every storage provider.
 
-Extracted out of CloudinaryService so the R2 keys and the Cloudinary
-folder/public_id pairs are built from ONE place. The two providers run side by
-side until the cleanup stage, and a media path that drifts between them is
-unrecoverable: it silently orphans everything already uploaded under the old
-shape, and it breaks the ownership prefix checks in
+Every object key in the bucket is built here, and nowhere else. A media path
+that drifts is unrecoverable: it silently orphans everything already uploaded
+under the old shape, and it breaks the ownership prefix checks in
 services/storage/validators.py (validate_public_id) that assume
 ``users/<id>/`` / ``organizations/<id>/``.
 
-Cloudinary consumes (folder, public_id) as two separate upload params; R2 joins
-them into a single object key. Both start here.
+R2Service joins the folder and the object name into a single key.
 """
 
 import uuid
 
 # Types that own exactly ONE slot per actor and replace themselves on re-upload
-# (Cloudinary: overwrite="true"). Their folder already ends with the slot name,
-# so there is no random component — re-uploading lands on the same path.
+# Their folder already ends with the slot name, so there is no random
+# component — re-uploading lands on the same path and overwrites in place.
 FIXED_SLOT_TYPES = {
     "profile",
     "cover",
@@ -43,8 +40,7 @@ def build_folder(actor, upload_type: str, temp_id: str = None) -> str:
     """
     The folder an upload of `upload_type` lands in for `actor`.
 
-    `temp_id` is required for TEMP_BATCH_TYPES and ignored otherwise. Byte-for-
-    byte the same strings CloudinaryService has always produced.
+    `temp_id` is required for TEMP_BATCH_TYPES and ignored otherwise.
     """
 
     # -----------------------------------------

@@ -1,83 +1,31 @@
-import re
 import time
 from urllib.parse import urlparse
 from django.conf import settings
 from typing import Iterable, Optional
 
-# 🔹 Default sets (reusable anywhere)
+# 🔹 The accepted formats, everywhere.
+#
+# Images: what browsers render and what the client-side compressor emits.
 DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
-# No "avi": no browser can play it in a <video> element, so accepting one only
-# bought the user a full upload followed by an unplayable post. Matches
-# CHAT_VIDEO_EXTENSIONS (messaging), the recruitments allowlist, and the
-# frontend's VIDEO_EXTENSIONS.
-DEFAULT_VIDEO_EXTENSIONS = {"mp4", "mov", "webm"}
 
-# R2 path only. Narrower than DEFAULT_VIDEO_EXTENSIONS on purpose: no "mov".
-# Videos are now encoded client-side before upload, so the only two containers
-# that can reach the bucket are the two the encoder emits — and the presigned
-# PUT is signed against exactly those content types (video/mp4, video/webm).
-# The Cloudinary set keeps "mov" because Cloudinary transcoded it for us.
-R2_VIDEO_EXTENSIONS = {"mp4", "webm"}
+# Videos: exactly the two containers the client-side encoder produces.
+#
+# No "mov" and no "avi". A stored object is the byte-for-byte file the browser
+# uploaded and nothing transcodes it, so anything outside this set would store
+# successfully and then fail to play. The presigned PUT is signed against these
+# content types (video/mp4, video/webm), which is what actually enforces the
+# rule — this set is its readable half.
+DEFAULT_VIDEO_EXTENSIONS = {"mp4", "webm"}
 
-# The image counterpart. Same members as DEFAULT_IMAGE_EXTENSIONS — no format
-# was dropped — spelled out separately so the two providers' allowlists can
-# move independently.
-R2_IMAGE_EXTENSIONS = {"webp", "jpg", "jpeg", "png"}
-
-
-def is_valid_cloudinary_url(url: str) -> bool:
-    return settings.CLOUDINARY_CLOUD_NAME in url
-
-
-# ---------------------------------------------------------------
-# PROVIDER-AWARE ENTRY POINTS
-# ---------------------------------------------------------------
-# Every media-attaching call site (posts, highlights, chat, recruitments,
-# matches, profile/org photos) goes through these rather than naming a provider
-# directly, so the whole backend follows settings.FILE_STORAGE_PROVIDER and a
-# rollback to Cloudinary stays one env var instead of a revert.
-
-
-def is_valid_media_source(url: str) -> bool:
-    """Is this URL served from the storage we actually uploaded to?"""
-    if settings.FILE_STORAGE_PROVIDER == "r2":
-        return is_valid_media_url(url)
-
-    # TODO(cleanup-stage): drop this branch with the Cloudinary provider.
-    return bool(url) and is_valid_cloudinary_url(url)
-
-
-def extract_storage_key(url: str) -> str:
-    """
-    The stored identifier (R2 object key / Cloudinary public_id) back out of a
-    delivery URL, so it can be compared against the one the client submitted.
-    """
-    if settings.FILE_STORAGE_PROVIDER == "r2":
-        return extract_key_from_url(url)
-
-    # TODO(cleanup-stage): drop this branch with the Cloudinary provider.
-    return extract_public_id_from_url(url)
 
 
 def allowed_image_extensions():
-    """Image extensions accepted on the ACTIVE provider."""
-    if settings.FILE_STORAGE_PROVIDER == "r2":
-        return R2_IMAGE_EXTENSIONS
-
-    # TODO(cleanup-stage): drop this branch with the Cloudinary provider.
+    """Image extensions accepted on an upload."""
     return DEFAULT_IMAGE_EXTENSIONS
 
 
 def allowed_video_extensions():
-    """
-    Video extensions accepted on the ACTIVE provider. Never "mov" on the R2
-    path: a stored file is now the exact bytes the client uploaded, and nothing
-    transcodes a .mov into something a browser can play.
-    """
-    if settings.FILE_STORAGE_PROVIDER == "r2":
-        return R2_VIDEO_EXTENSIONS
-
-    # TODO(cleanup-stage): drop this branch with the Cloudinary provider.
+    """Video extensions accepted on an upload."""
     return DEFAULT_VIDEO_EXTENSIONS
 
 
@@ -117,28 +65,32 @@ def with_cache_buster(url: str) -> str:
 
 def is_valid_media_url(url: str) -> bool:
     """
-    R2 counterpart of is_valid_cloudinary_url: a media URL is ours only if it is
-    served from our public delivery origin. Everything we store is written as
-    settings.MEDIA_PUBLIC_BASE_URL + "/" + key, so a prefix check is the whole
-    test — and it is what stops a client handing us a URL pointing at somebody
-    else's host.
+    A media URL is ours only if it is served from our public delivery origin.
+    Everything we store is written as MEDIA_PUBLIC_BASE_URL + "/" + key, so a
+    prefix check is the whole test — and it is what stops a client handing us a
+    URL that points at somebody else's host.
     """
     if not url:
         return False
     return url.startswith(settings.MEDIA_PUBLIC_BASE_URL)
 
 
+# The name every attach path calls. It was the provider switch during the
+# migration; with one provider left it is a plain alias, kept so the call sites
+# keep reading in terms of "is this media ours" rather than naming a host.
+is_valid_media_source = is_valid_media_url
+
+
 def extract_key_from_url(url: str) -> str:
     """
-    R2 counterpart of extract_public_id_from_url — the object key back out of a
-    delivery URL.
+    The object key back out of a delivery URL.
 
     https://media.goatza.com/users/1/profile.webp?v=3 -> users/1/profile.webp
 
-    The "?v=" suffix is a cache-buster the client appends to fixed-slot media
-    (profile, cover, logo), which overwrite in place and would otherwise stay
-    stale in the CDN. It is never part of the key. Unlike the Cloudinary
-    extractor the extension IS kept: on R2 the extension is part of the key.
+    The "?v=" suffix is a cache-buster stamped onto fixed-slot media (profile,
+    cover, logo), which overwrite in place and would otherwise stay stale in the
+    CDN. It is never part of the key. The extension IS part of the key and is
+    kept.
     """
     if not url:
         return ""
@@ -152,29 +104,9 @@ def extract_key_from_url(url: str) -> str:
     return key.split("?v=")[0]
 
 
-def build_video_thumbnail_url(public_id: str) -> str:
-    """
-    Cloudinary auto-generates a poster frame for any uploaded video: the same
-    delivery URL with resource_type=video and an ``so_0`` (still, second 0)
-    transformation, served as .jpg. Derived server-side from the public_id (the
-    same shape the posts upload flow builds client-side) so the client can't
-    supply an arbitrary thumbnail.
-    """
-    if not public_id:
-        return ""
-    return (
-        f"https://res.cloudinary.com/{settings.CLOUDINARY_CLOUD_NAME}"
-        f"/video/upload/so_0/{public_id}.jpg"
-    )
-
-
-def extract_public_id_from_url(url: str) -> str:
-    """
-    Example:
-    /upload/v123/users/1/profile.jpg → users/1/profile
-    """
-    match = re.search(r"/upload/(?:v\d+/)?(.+)\.", url)
-    return match.group(1) if match else ""
+# Same story as is_valid_media_source: the call sites say "give me the stored
+# key for this URL" and no longer care which provider shape it came from.
+extract_storage_key = extract_key_from_url
 
 
 def get_file_extension(url: str) -> str:
@@ -281,9 +213,9 @@ def validate_thumbnail(
     it to its video: our source, an image extension, the caller's own ownership
     prefix, and the SAME FOLDER as the video it belongs to.
 
-    Nothing generates poster frames server-side any more (Cloudinary's so_0
-    transform is gone with the provider), so this is the only thing standing
-    between a video row and an arbitrary image URL.
+    Nothing generates poster frames server-side — the client captures one while
+    it encodes the video — so this is the only thing standing between a video row
+    and an arbitrary image URL.
 
     Returns the thumbnail's key. Raises ValueError like validate_media, so
     callers keep the error handling they already have.

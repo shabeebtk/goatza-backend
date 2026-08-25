@@ -1,11 +1,10 @@
 """
 Cloudflare R2 storage provider (S3-compatible).
 
-The upload model is the inverse of Cloudinary's. Cloudinary is handed a signed
-POST and decides the final path itself; R2 has no opinion — the backend picks
-the object key, signs a PUT bound to that exact key and content type, and the
-browser streams the bytes straight to the bucket. Nothing about the path is
-client-supplied, which is what keeps the ownership prefix checks in
+R2 has no opinion about where a file goes: the backend picks the object key,
+signs a PUT bound to that exact key and content type, and the browser streams
+the bytes straight to the bucket. Nothing about the path is client-supplied,
+which is what keeps the ownership prefix checks in
 services/storage/validators.py meaningful.
 
 Delivery is a plain public CDN URL (settings.MEDIA_PUBLIC_BASE_URL + "/" + key),
@@ -88,7 +87,7 @@ class R2Service(BaseStorageService):
 
         # posts/recruitments upload into a batch folder named for a row that
         # does not exist yet; the client posts this id back with the create
-        # request. Same generation and same response key as Cloudinary.
+        # request.
         temp_id = None
         if upload_type in {"posts", "recruitments"}:
             temp_id = new_temp_id()
@@ -107,8 +106,8 @@ class R2Service(BaseStorageService):
             if upload_type in FIXED_SLOT_TYPES:
                 # The folder already ends with the slot name
                 # (users/<id>/profile, organizations/<id>/logo), so the key is
-                # just that plus an extension — a re-upload overwrites in place,
-                # which is what overwrite="true" buys on the Cloudinary side.
+                # just that plus an extension, so a re-upload overwrites in
+                # place and the URL never changes.
                 key = f"{folder}{extension}"
             else:
                 key = f"{folder}/{build_object_name(upload_type)}{extension}"

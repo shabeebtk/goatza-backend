@@ -201,7 +201,7 @@ class MatchEntry(BaseUUIDModel):
     )
 
     # 500, not URLField's default 200 — same reason as highlights.Highlight:
-    # an actor-scoped Cloudinary public_id path of UUIDs runs ~120 chars and
+    # an actor-scoped object key of UUIDs runs ~120 chars and
     # the transform on top lands the URL around 215, which the default rejects
     # at insert time.
     photo_url = models.URLField(max_length=500, blank=True)

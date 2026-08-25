@@ -313,7 +313,7 @@ class AchievementService:
         Trim any of the short free-text columns and hold it to its own width.
 
         Worth doing for ``image`` and ``reference_link`` in particular: a
-        Cloudinary URL carrying an actor-scoped public_id runs long, and the
+        media URL carrying an actor-scoped object key runs long, and the
         difference between catching it here and not is a clean 400 versus an
         insert that fails in production only.
         """

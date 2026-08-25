@@ -1,10 +1,10 @@
 """
 Client-supplied media metadata: width, height, duration, size.
 
-These used to be read back from Cloudinary (``get_media_metadata``), which made
-them trustworthy. On R2 there is nothing to ask — the object is the exact bytes
-the browser uploaded — so the client reports them and the server only sanity-
-checks the numbers.
+These used to be read back from the storage provider, which made them
+trustworthy. There is nothing to ask now — the object is the exact bytes the
+browser uploaded — so the client reports them and the server only sanity-checks
+the numbers.
 
 That changes what they are FOR. They are cosmetic: width/height stop the feed
 reflowing while an image loads, duration prints "0:42" on a video tile. Nothing

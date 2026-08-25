@@ -196,10 +196,10 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
     """
     upload:
     {
-        "logo": "https://res.cloudinary.com/....webp",
+        "logo": "https://media.goatza.com/organizations/<id>/logo.webp",
         "logo_public_id": "users/{user_id}/organizations/{org_id}/organization_logo/logo",
 
-        "cover_image": "https://res.cloudinary.com/....webp",
+        "cover_image": "https://media.goatza.com/organizations/<id>/cover.webp",
         "cover_image_public_id": "users/{user_id}/organizations/{org_id}/organization_cover/cover"
     }
 

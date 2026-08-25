@@ -368,7 +368,7 @@ class RecruitmentService:
     @staticmethod
     def _delete_orphaned_assets(public_ids):
         """
-        Best-effort deletion of Cloudinary assets no longer referenced by the
+        Best-effort deletion of stored objects no longer referenced by the
         recruitment. Never raises — a failed cleanup must not break the request.
         Scheduled via transaction.on_commit so nothing is destroyed on rollback.
         """
@@ -464,7 +464,7 @@ class RecruitmentService:
     @staticmethod
     def _sync_media(recruitment, media_data):
         # Diff existing vs incoming BEFORE deleting rows so we can clean up the
-        # Cloudinary assets that are no longer referenced (orphans). On create
+        # stored objects that are no longer referenced (orphans). On create
         # there are no existing rows, so this set is empty.
         existing_public_ids = set(
             recruitment.media.values_list("public_id", flat=True)

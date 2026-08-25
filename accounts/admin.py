@@ -2,44 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django import forms
 from accounts.models import User, UserProfile
-import cloudinary.uploader
 
-
-class UserProfileAdminForm(forms.ModelForm):
-    upload_profile_photo = forms.ImageField(required=False)
-    upload_cover_photo = forms.ImageField(required=False)
-
-    class Meta:
-        model = UserProfile
-        fields = "__all__"
-
-    def save(self, commit=True):
-        instance = super().save(commit=False)
-
-        profile_photo = self.cleaned_data.get("upload_profile_photo")
-        cover_photo = self.cleaned_data.get("upload_cover_photo")
-
-        # Upload profile photo
-        if profile_photo:
-            result = cloudinary.uploader.upload(
-                profile_photo,
-                folder=f"goatza/users/{instance.user_id}/profile"
-            )
-            instance.profile_photo = result.get("secure_url")
-
-        # Upload cover photo
-        if cover_photo:
-            result = cloudinary.uploader.upload(
-                cover_photo,
-                folder=f"goatza/users/{instance.user_id}/cover"
-            )
-            instance.cover_photo = result.get("secure_url")
-
-        if commit:
-            instance.save()
-
-        return instance
-    
 
 # -----------------------------
 # Custom User Creation Form
@@ -152,8 +115,15 @@ class UserAdmin(BaseUserAdmin):
 # -----------------------------
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
-    form = UserProfileAdminForm
-    
+    # No upload widgets here any more.
+    #
+    # They wrote straight to the old provider from the admin process, into a
+    # `goatza/users/<id>/...` folder that never matched the app's own scheme,
+    # and never set the paired *_public_id — so anything uploaded this way was
+    # unreferenced and undeletable from day one. Media now goes through the
+    # presigned-PUT flow in the app, which is the only path that produces a
+    # matching URL/key pair. `profile_photo` and `cover_photo` remain editable
+    # as plain URL fields.
     list_display = ("id", "user", "name", "gender", "created_at")
     search_fields = ("user__email", "name")
     list_filter = ("gender",)

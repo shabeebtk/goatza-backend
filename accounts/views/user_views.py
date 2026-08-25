@@ -182,10 +182,10 @@ class UpdateUserMediaAPIView(APIView):
     '''
     upload
     {
-        "profile_photo": "https://res.cloudinary.com/.../profile.jpg",
+        "profile_photo": "https://media.goatza.com/users/<id>/profile.webp",
         "profile_photo_public_id": "users/123/profile",
 
-        "cover_photo": "https://res.cloudinary.com/.../cover.jpg",
+        "cover_photo": "https://media.goatza.com/users/<id>/cover.webp",
         "cover_photo_public_id": "users/123/cover"
     }
 

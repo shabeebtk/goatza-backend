@@ -35,8 +35,6 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist', 
-    'cloudinary',
-    'cloudinary_storage', 
     'channels', 
 
     # my apps 
@@ -278,35 +276,15 @@ CORS_ALLOW_METHODS = [
 
 
 
-# ------ CLOUDINARY (media) ------ /
-CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
-CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
-CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
-
-# Generate the HLS adaptive-streaming ladder alongside the mp4 derivative.
-# Off by default: streaming profiles cost meaningfully more transformation
-# credits than the single mp4, which burns through the free tier during
-# development. The frontend has a matching flag, NEXT_PUBLIC_ENABLE_HLS.
-CLOUDINARY_ENABLE_HLS = os.getenv("CLOUDINARY_ENABLE_HLS", "False") == "True"
-
-CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': CLOUDINARY_CLOUD_NAME,
-    'API_KEY': CLOUDINARY_API_KEY,
-    'API_SECRET': CLOUDINARY_API_SECRET,
-}
-
-DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
-
-
-# ------ MEDIA STORAGE PROVIDER ------ /
-# Which backend services/storage/factory.py hands out. "r2" is the default;
-# "cloudinary" is the rollback and stays wired until the cleanup stage removes
-# it. Every CLOUDINARY_* setting above is still live either way.
+# ------ MEDIA STORAGE ------ /
+# The only backend services/storage/factory.py knows how to hand out. Kept as a
+# setting rather than dropped so an environment still carrying an old value
+# fails loudly in the factory instead of uploading somewhere unexpected.
 #
-# `or` instead of getenv's default argument throughout this block: the keys
-# ship in .env with empty values, and getenv would hand back "" — an empty
-# provider raises, and an empty base URL would make is_valid_media_url()
-# accept literally any URL.
+# `or` instead of getenv's default argument throughout this block: the keys ship
+# in .env with empty values, and getenv would hand back "" — an empty provider
+# raises, and an empty base URL would make is_valid_media_url() accept literally
+# any URL.
 FILE_STORAGE_PROVIDER = os.getenv("FILE_STORAGE_PROVIDER") or "r2"
 
 

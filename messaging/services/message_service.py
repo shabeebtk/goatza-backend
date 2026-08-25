@@ -12,7 +12,6 @@ fan-out and push happen in exactly one place.
 '''
 
 
-from django.conf import settings
 from django.utils import timezone
 from django.db import transaction
 from asgiref.sync import async_to_sync
@@ -49,17 +48,14 @@ from services.storage.validators import (
     same_storage_folder,
 )
 
-# Chat images. HEIC and mov only survive on the Cloudinary path, which
-# transcoded them on delivery; on R2 the stored file is the exact bytes the
-# browser uploaded, so a .heic bubble would simply not render. The active
-# allowlist is chosen by _chat_extensions() below.
-# TODO(cleanup-stage): drop the CLOUDINARY_* sets with the provider.
-CLOUDINARY_CHAT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "heic"}
+# Chat images. No "heic": the stored object is the byte-for-byte file the
+# browser uploaded and nothing transcodes it on delivery, so a .heic bubble
+# would store fine and then render as nothing.
 CHAT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 
-# Chat videos.
-CLOUDINARY_CHAT_VIDEO_EXTENSIONS = {"mp4", "mov", "webm"}
+# Chat videos — the two containers the client-side encoder emits. No "mov", for
+# the same reason.
 CHAT_VIDEO_EXTENSIONS = {"mp4", "webm"}
 CHAT_VIDEO_MAX_BYTES = 100 * 1024 * 1024  # 100 MB
 CHAT_VIDEO_MAX_DURATION_MS = 90 * 1000    # 90 seconds
@@ -325,24 +321,10 @@ class MessageService:
 
     @staticmethod
     def _chat_extensions(kind: str):
-        """
-        The extension allowlist for the ACTIVE provider.
-
-        Cloudinary transcoded on delivery, so a .heic photo or a .mov clip still
-        rendered in the browser. On R2 the object is served byte-for-byte, so
-        those two would arrive as a file no browser will paint — the R2 sets
-        drop them.
-        """
-        if settings.FILE_STORAGE_PROVIDER == "r2":
-            return (
-                CHAT_IMAGE_EXTENSIONS if kind == "image"
-                else CHAT_VIDEO_EXTENSIONS
-            )
-
-        # TODO(cleanup-stage): drop this branch with the Cloudinary provider.
+        """The extension allowlist for a chat image or video."""
         return (
-            CLOUDINARY_CHAT_IMAGE_EXTENSIONS if kind == "image"
-            else CLOUDINARY_CHAT_VIDEO_EXTENSIONS
+            CHAT_IMAGE_EXTENSIONS if kind == "image"
+            else CHAT_VIDEO_EXTENSIONS
         )
 
     @staticmethod
@@ -355,10 +337,8 @@ class MessageService:
         the SENDER's own chat folder (so another actor's URL can't be replayed),
         and the key embedded in the URL matches the one sent.
 
-        The replay protection is the prefix check, and it is unchanged: a URL is
-        only ever accepted under chat/users/<sender>/ or
-        chat/organizations/<sender>/. Only the source test and the key
-        extraction became provider-aware.
+        The prefix check is the replay protection: a URL is only ever accepted
+        under chat/users/<sender>/ or chat/organizations/<sender>/.
         """
         if not media_url or not is_valid_media_source(media_url):
             raise InvalidMediaError("Invalid media source")

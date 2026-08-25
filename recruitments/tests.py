@@ -42,15 +42,10 @@ from notifications.models import Notification
 SIGNATURE_URL = "/user/get/upload/signature"
 CREATE_URL = "/recruitments/create"
 
-# Deterministic Cloudinary config so URL/signature validation is env-independent.
+# Deterministic media host so URL validation is env-independent.
 CLOUD = "democloud"
 
 
-@override_settings(
-    CLOUDINARY_CLOUD_NAME=CLOUD,
-    CLOUDINARY_API_KEY="test-key",
-    CLOUDINARY_API_SECRET="test-secret",
-)
 class RecruitmentMediaPipelineTests(APITestCase):
 
     def setUp(self):
@@ -104,7 +99,7 @@ class RecruitmentMediaPipelineTests(APITestCase):
 
     def _cloud_url(self, public_id, ext="jpg"):
         return (
-            f"https://res.cloudinary.com/{CLOUD}/image/upload/"
+            f"https://media.goatza.test/"
             f"v1/{public_id}.{ext}"
         )
 
@@ -139,13 +134,13 @@ class RecruitmentMediaPipelineTests(APITestCase):
 
     # ── long URL regression ──────────────────────────────────────
 
-    def test_create_accepts_long_cloudinary_url(self):
-        # Real Cloudinary URLs (full version segment + deep recruitment folder
+    def test_create_accepts_long_url(self):
+        # Real stored URLs (deep recruitment folder
         # path) exceed the old 200-char URLField default. Regression for
         # "value too long for type character varying(200)".
         public_id = self._public_id()
         long_url = (
-            f"https://res.cloudinary.com/{CLOUD}/image/upload/"
+            f"https://media.goatza.test/"
             f"v1783015360/{public_id}.jpg"
         )
         self.assertGreater(len(long_url), 200)
@@ -175,7 +170,7 @@ class RecruitmentMediaPipelineTests(APITestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         data = resp.data["data"]
-        self.assertEqual(data["provider"], "cloudinary")
+        self.assertEqual(data["provider"], "r2")
         self.assertIn("temp_post_id", data)
         self.assertEqual(len(data["uploads"]), 2)
         self.assertTrue(
@@ -221,7 +216,7 @@ class RecruitmentMediaPipelineTests(APITestCase):
         self.assertIn("does not belong to this organization", resp.data["error"])
         self.assertFalse(Recruitment.objects.exists())
 
-    def test_create_rejects_non_cloudinary_url(self):
+    def test_create_rejects_foreign_url(self):
         public_id = self._public_id()
         media = {
             "file_url": f"https://evil.example.com/upload/v1/{public_id}.jpg",
@@ -259,7 +254,7 @@ class RecruitmentMediaPipelineTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("unsupported", resp.data["error"])
 
-    # ── update: orphaned Cloudinary cleanup ──────────────────────
+    # ── update: orphaned object cleanup ─────────────────────────
 
     def test_update_deletes_orphaned_assets(self):
         recruitment = Recruitment.objects.create(
