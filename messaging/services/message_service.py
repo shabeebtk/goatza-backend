@@ -25,6 +25,7 @@ from messaging.selectors.share_selectors import (
     is_user_profile_shareable,
 )
 from messaging.services.exceptions import (
+    BlockedParticipantError,
     ContentUnavailableError,
     EmptyMessageError,
     InvalidMediaError,
@@ -34,6 +35,7 @@ from messaging.services.exceptions import (
     NotParticipantError,
 )
 from feed.services.affinity_services import AffinityService
+from moderation.services.block_guard import require_not_blocked
 from notifications.services.deeplink_service import build_conversation_url
 from notifications.services.fcm_service import FCMService
 from notifications.services.notification_service import (
@@ -428,6 +430,7 @@ class MessageService:
         shared_recruitment, media_* …) straight through to the row.
         """
         MessageService._validate_sender(conversation, sender_user, sender_org)
+        MessageService._validate_not_blocked(conversation, sender_user, sender_org)
 
         with transaction.atomic():
             message = Message.objects.create(
@@ -596,6 +599,38 @@ class MessageService:
 
         if not query.exists():
             raise NotParticipantError("Sender not part of conversation")
+
+    # BLOCK GUARD
+    @staticmethod
+    def _validate_not_blocked(conversation, sender_user, sender_org):
+        """
+        Refuse the send if a block exists between the sender and anyone else in
+        the thread, in either direction.
+
+        Deliberately in _create_and_dispatch rather than in send_message: text,
+        media and every send_shared_* funnel through that one method, so this
+        covers the WebSocket path, the media endpoint and the share endpoint
+        with a single check that no future sender can forget.
+
+        Raises BlockedParticipantError (a MessageError), so a blocked recipient
+        in a multi-target share is reported against that recipient and the rest
+        of the fan-out still lands.
+        """
+        sender = sender_user or sender_org
+
+        others = ConversationParticipant.objects.filter(
+            conversation=conversation
+        ).select_related("user", "org")
+
+        for participant in others:
+            other = participant.user or participant.org
+
+            if other is None or other == sender:
+                continue
+
+            require_not_blocked(
+                sender, other, error=BlockedParticipantError
+            )
 
     # UPDATE CONVERSATION
     @staticmethod

@@ -15,6 +15,7 @@ from recruitments.models import (
 from connections.services.follow_services import FollowService
 from core.constant import TYPE_ORGANIZATION
 from notifications.services.notification_service import NotificationService
+from moderation.services.block_guard import require_not_blocked
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,12 @@ class ApplicationService:
         )
         if not recruitment:
             raise ValidationError("Recruitment not found.")
+
+        # BLOCK GUARD — either direction between the applicant and the posting
+        # org. Ahead of the eligibility rules so a blocked applicant is never
+        # told whether the deadline passed or the cap was hit. Raises
+        # BlockedError (403).
+        require_not_blocked(actor, recruitment.organization)
 
         # ELIGIBILITY (authoritative, under the row lock)
         if recruitment.status != Recruitment.Status.ACTIVE:

@@ -119,13 +119,41 @@ def resolve_mention_target(username: str):
     return ("org", org) if org else None
 
 
+def post_author(post):
+    """The post's author as a bare User/Organization — exactly one is set."""
+    return post.author_user or post.author_org
+
+
+def require_can_interact(actor, post):
+    """
+    Guard for commenting on / reacting to a post.
+
+    Raises BlockedError (403, generic message) when a block exists in either
+    direction between ``actor`` and the post's AUTHOR. Lives here rather than
+    in the two views so any future caller — a service, a command, a second
+    endpoint — inherits it.
+    """
+    from moderation.services.block_guard import require_not_blocked
+
+    require_not_blocked(actor, post_author(post))
+
+
 def sync_post_mentions(post) -> list[tuple[str, object]]:
     """
     Diff-sync PostMention rows to the current content.
     Returns ONLY the newly added targets [("user", u) | ("org", o), ...] so
     the caller notifies new mentions on edit without re-notifying old ones.
+
+    MENTIONS OF A BLOCKED PARTY ARE SILENTLY DROPPED — no row, and therefore no
+    notification, since the caller only ever notifies what comes back from here.
+    The post itself still saves and the text still reads "@someone"; it just
+    does not become a link or a ping. Deliberately not an error: failing the
+    whole post would tell the author exactly who blocked them.
     """
+    from moderation.services.block_guard import is_blocked
     from posts.models import PostMention
+
+    author = post_author(post)
 
     # Resolve first: an unknown handle is simply not a mention, and two handles
     # that resolve to the same account collapse to one row.
@@ -135,6 +163,8 @@ def sync_post_mentions(post) -> list[tuple[str, object]]:
         if resolved is None:
             continue
         kind, target = resolved
+        if is_blocked(author, target):
+            continue
         (wanted_users if kind == "user" else wanted_orgs)[target.id] = target
 
     existing = list(

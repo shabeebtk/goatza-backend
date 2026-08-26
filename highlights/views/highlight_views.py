@@ -34,6 +34,10 @@ from highlights.serializers.highlight_serializers import (
 from highlights.services.highlight_services import HighlightService
 from utils.errors import error_body, flatten_validation_error
 from utils.response import response_data
+from moderation.selectors.profile_visibility import (
+    has_blocked_me,
+    hide_owned_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +142,24 @@ class UserHighlightListAPIView(BaseAPIView):
                 )
 
             actor = request.actor
+
+            # §1.5 — owner blocked this viewer: identical 404 to a missing
+            # username (the branch directly above).
+            if has_blocked_me(actor, owner):
+                return response_data(
+                    success=False,
+                    message="User not found",
+                    status_code=404
+                )
+
             owner_view = is_owner(owner, actor)
 
-            highlights = list(visible_highlights_for(owner, actor))
+            # Viewer blocked the owner: the rail is empty for them.
+            highlights = list(
+                hide_owned_content(
+                    visible_highlights_for(owner, actor), actor, owner
+                )
+            )
 
             return response_data(
                 success=True,

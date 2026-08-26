@@ -10,6 +10,8 @@ from accounts.models import User
 from posts.models import Post, PostMedia, Like, Comment
 from sports.models import Sport
 from utils.response import response_data
+from moderation.selectors.profile_visibility import hide_if_blocked_by_id
+from moderation.selectors.blocked_filters import exclude_blocked
 from connections.models import Follow
 from core.constant import TYPE_USER, TYPE_ORGANIZATION
 from notifications.services.notification_service import NotificationService
@@ -599,6 +601,14 @@ class ListPostsAPIView(BaseAPIView):
                 except ValueError as e:
                     return response_data(False, str(e), status_code=404)
 
+                # §1.5 — the owner blocked this viewer: the profile does
+                # not exist for them, and neither does its post list. Same 404
+                # the unknown-handle branch above returns.
+                if hide_if_blocked_by_id(actor, profile["id"], profile["type"]):
+                    return response_data(
+                        False, "Profile not found", status_code=404
+                    )
+
                 if profile["type"] == TYPE_USER:
                     queryset = queryset.filter(author_user_id=profile["id"])
                 else:
@@ -616,6 +626,10 @@ class ListPostsAPIView(BaseAPIView):
             queryset = queryset.filter(
                 profile_visibility_filter(actor, profile)
             )
+
+            # THE OTHER DIRECTION — this viewer blocked the owner, so they get
+            # the shell with an empty grid rather than a 404 (they know why).
+            queryset = exclude_blocked(queryset, actor)
 
             total_count = queryset.count()
 

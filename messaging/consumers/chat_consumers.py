@@ -3,7 +3,9 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from asgiref.sync import sync_to_async
 
 from messaging.models import Conversation, ConversationParticipant
+from messaging.services.exceptions import BlockedParticipantError
 from messaging.services.message_service import MessageService
+from moderation.services.block_guard import BLOCKED_MESSAGE
 
 
 class ChatConsumer(AsyncWebsocketConsumer):
@@ -60,6 +62,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 sender_org=self.actor.organization if self.actor.is_org else None,
                 content=message_text
             )
+
+        except BlockedParticipantError:
+            # NOT DELIVERED, and nothing is written. The socket stays open and
+            # the sender gets the same vague wording every other block guard
+            # uses — a closed socket or a specific reason would both tell them
+            # they were blocked. Caught ahead of the generic handler below so
+            # the machine-readable code travels with it.
+            await self.send(json.dumps({
+                "type": "error",
+                "code": BlockedParticipantError.reason,
+                "message": BLOCKED_MESSAGE,
+            }))
 
         except Exception as e:
             await self.send(json.dumps({

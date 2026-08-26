@@ -17,6 +17,7 @@ from organization.models import Organization, OrganizationLocation
 from posts.models import Post
 from connections.services.follow_services import FollowService
 from feed.pagination import ExploreCursorPagination
+from moderation.selectors.blocked_filters import exclude_blocked
 
 
 class ExploreService:
@@ -230,6 +231,10 @@ class ExploreService:
         if actor.is_user:
             queryset = queryset.exclude(id=actor.user.id)
 
+        # BLOCK EXCLUSION — rows here ARE the identities, so the blocked
+        # user ids match on "id" and there is no org column to match.
+        queryset = exclude_blocked(queryset, actor, user_field="id", org_field=None)
+
         # Discovery semantics: exclude followed ONLY when browsing the raw rails.
         # As soon as any filter/search is active, followed accounts are allowed
         # back in (searching a name you follow must find them).
@@ -311,6 +316,9 @@ class ExploreService:
         # Always hide the actor's own org.
         if actor.is_org:
             queryset = queryset.exclude(id=actor.organization.id)
+
+        # BLOCK EXCLUSION — same shape as players, org side.
+        queryset = exclude_blocked(queryset, actor, user_field=None, org_field="id")
 
         # Exclude followed ONLY when browsing the raw rails (see players).
         if not cls._has_any_filter(filters):
@@ -395,6 +403,10 @@ class ExploreService:
             visibility=Post.Visibility.PUBLIC,
             created_at__gte=current_time - timedelta(days=cls.TRENDING_WINDOW_DAYS),
         )
+
+        # BLOCK EXCLUSION — before scoring, so a blocked author's post cannot
+        # occupy a slot in the diversified page.
+        queryset = exclude_blocked(queryset, actor)
 
         # 2. EXCLUDE the actor's own posts.
         if actor.is_user:

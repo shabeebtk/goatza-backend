@@ -11,6 +11,9 @@ from sports.models import Sport
 from utils.response import response_data
 from connections.models import Follow
 from posts.serializers.comments_serializers import CommentSerializer
+from posts.services.post_content_service import require_can_interact
+from moderation.selectors.blocked_filters import exclude_blocked
+from moderation.services.block_guard import BlockedError, blocked_response
 from notifications.services.notification_service import NotificationService
 from feed.services.affinity_services import AffinityService
 
@@ -52,6 +55,9 @@ class CreateCommentAPIView(BaseAPIView):
 
                 if not post:
                     return response_data(False, "Post not found", status_code=404)
+
+                # BLOCK GUARD — commenting on a blocked author's post.
+                require_can_interact(actor, post)
 
                 root = None
 
@@ -119,6 +125,11 @@ class CreateCommentAPIView(BaseAPIView):
                 message="Comment added",
                 data={"comment_id": str(comment.id)}
             )
+
+        except BlockedError:
+            # Error MAPPING only — the guard itself lives in the service. Without
+            # this branch the broad handler below turns a 403 into a 500.
+            return blocked_response()
 
         except Exception as e:
             logger.error(f"{TAG} | Error | {str(e)}", exc_info=True)
@@ -241,9 +252,15 @@ class ListCommentsAPIView(BaseAPIView):
                 is_deleted=False
             ).count()
 
-            # Replies prefetch — select_related covers both actor types
-            replies_qs = Comment.objects.filter(
-                is_deleted=False
+            # BLOCK EXCLUSION — the two blocked parties stop seeing each
+            # other's comments. A THIRD party's view of the same thread is
+            # untouched (v1, per the flow doc): this filters by the VIEWER's
+            # own blocked set, so C still sees everything.
+            replies_qs = exclude_blocked(
+                Comment.objects.filter(is_deleted=False),
+                request.actor,
+                user_field="user_id",
+                org_field="organization_id",
             ).select_related(
                 "user__profile",
                 "organization",
@@ -253,10 +270,15 @@ class ListCommentsAPIView(BaseAPIView):
             ).order_by("created_at")
 
             # Main queryset — paginate then prefetch
-            queryset = Comment.objects.filter(
-                post_id=post_id,
-                parent__isnull=True,
-                is_deleted=False
+            queryset = exclude_blocked(
+                Comment.objects.filter(
+                    post_id=post_id,
+                    parent__isnull=True,
+                    is_deleted=False
+                ),
+                request.actor,
+                user_field="user_id",
+                org_field="organization_id",
             ).select_related(
                 "user__profile",
                 "organization",
@@ -315,9 +337,14 @@ class ListRepliesAPIView(BaseAPIView):
             if not parent_exists:
                 return response_data(False, "Parent comment not found", status_code=404)
 
-            queryset = Comment.objects.filter(
-                parent_id=parent_id,
-                is_deleted=False
+            queryset = exclude_blocked(
+                Comment.objects.filter(
+                    parent_id=parent_id,
+                    is_deleted=False
+                ),
+                request.actor,
+                user_field="user_id",
+                org_field="organization_id",
             ).select_related(
                 "user__profile",
                 "organization",

@@ -10,6 +10,8 @@ from sports.models import Sport
 from utils.response import response_data
 from connections.models import Follow
 from posts.serializers.like_serializers import LikeListSerializer
+from posts.services.post_content_service import require_can_interact
+from moderation.services.block_guard import BlockedError, blocked_response
 from notifications.services.notification_service import NotificationService
 from feed.services.affinity_services import AffinityService
 
@@ -48,6 +50,9 @@ class ToggleLikeAPIView(BaseAPIView):
 
                 if not post:
                     return response_data(False, "Post not found", status_code=404)
+
+                # BLOCK GUARD — reacting to a blocked author's post.
+                require_can_interact(actor, post)
                 
                 print('-=--2')
 
@@ -136,6 +141,11 @@ class ToggleLikeAPIView(BaseAPIView):
                     "likes_breakdown": post.likes_breakdown,
                 }
             )
+
+        except BlockedError:
+            # Error MAPPING only — the guard itself lives in the service. Without
+            # this branch the broad handler below turns a 403 into a 500.
+            return blocked_response()
 
         except Exception as e:
             logger.error(f"{TAG} | Error | {str(e)}", exc_info=True)

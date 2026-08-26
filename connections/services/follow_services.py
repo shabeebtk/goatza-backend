@@ -4,7 +4,9 @@ from django.db import transaction
 from django.db.models import F, Q
 from notifications.services.notification_service import NotificationService
 from core.constant import TYPE_ORGANIZATION, TYPE_USER
-from organization.models import OrganizationProfile
+from organization.models import Organization, OrganizationProfile
+from moderation.services.block_guard import require_not_blocked
+from moderation.services.block_services import BlockService
 
 
 class FollowService:
@@ -69,6 +71,9 @@ class FollowService:
 
         if actor.is_org and target_org and actor.organization.id == target_org.id:
             return False, "Cannot follow your own organization"
+
+        # BLOCK GUARD — either direction. Raises BlockedError (403).
+        require_not_blocked(actor, target_user or target_org)
 
         follow_data = {}
 
@@ -299,7 +304,44 @@ class FollowService:
             "is_following": is_following,
             "is_followed_by": is_followed_by,
             "is_connected": is_following and is_followed_by,
+            **FollowService._block_state(actor, target_id, target_type),
         }
+
+    @staticmethod
+    def _block_state(actor, target_id, target_type):
+        """
+        The block half of the relationship, so the profile buttons can switch
+        to the blocked state without a second round trip.
+
+        ``is_blocked`` is read off the CACHED symmetric set — free on the hot
+        path. ``is_blocked_by_me`` costs one directed query, and is only ever
+        asked when the symmetric answer is already true, which is rare. The
+        client needs both: symmetric decides "hide Follow/Message", directed
+        decides "offer Unblock" versus "offer nothing".
+        """
+        blocked = BlockService.blocked_ids(actor)
+
+        ids = (
+            blocked["user_ids"] if target_type == TYPE_USER
+            else blocked["org_ids"]
+        )
+
+        # blocked_ids holds UUIDs; callers pass UUIDs or strings.
+        is_blocked = any(str(i) == str(target_id) for i in ids)
+
+        if not is_blocked:
+            return {"is_blocked": False, "is_blocked_by_me": False}
+
+        if target_type == TYPE_USER:
+            directed = BlockService.is_blocked_between_directed(
+                actor, target_user=User(id=target_id)
+            )
+        else:
+            directed = BlockService.is_blocked_between_directed(
+                actor, target_org=Organization(id=target_id)
+            )
+
+        return {"is_blocked": True, "is_blocked_by_me": directed}
 
     @staticmethod
     def _self_response():
@@ -308,6 +350,8 @@ class FollowService:
             "is_following": False,
             "is_followed_by": False,
             "is_connected": False,
+            "is_blocked": False,
+            "is_blocked_by_me": False,
         }
 
     @staticmethod
@@ -318,6 +362,8 @@ class FollowService:
             "is_following": False,
             "is_followed_by": False,
             "is_connected": False,
+            "is_blocked": False,
+            "is_blocked_by_me": False,
         }
 
 

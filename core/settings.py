@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'cv',
     'matches',
     'waitlist',
+    'moderation',
 
     # buildin apps 
     'django.contrib.admin',

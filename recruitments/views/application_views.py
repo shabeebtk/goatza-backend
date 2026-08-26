@@ -18,6 +18,7 @@ from highlights.selectors.highlight_selectors import (
     visible_highlight_counts_for,
 )
 from recruitments.services.application_service import ApplicationService
+from moderation.services.block_guard import BlockedError, blocked_response
 from utils.response import response_data
 from utils.errors import flatten_validation_error
 
@@ -78,6 +79,11 @@ class ApplyRecruitmentAPIView(BaseAPIView):
                     "applied_at": application.applied_at.isoformat()
                 }
             )
+
+        except BlockedError:
+            # Error MAPPING only — the guard itself lives in the service. Without
+            # this branch the broad handler below turns a 403 into a 500.
+            return blocked_response()
 
         except ValidationError as e:
             flat = flatten_validation_error(e.detail)

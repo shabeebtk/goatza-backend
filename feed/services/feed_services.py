@@ -11,6 +11,7 @@ from connections.models import Follow
 from sports.models import UserSport
 
 from organization.models import OrganizationSport
+from moderation.selectors.blocked_filters import exclude_blocked
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -278,6 +279,11 @@ class FeedService:
 
         queryset = queryset.filter(visibility_filter)
 
+        # BLOCK EXCLUSION — the one choke point for sources 1 and 2
+        # (get_feed_queryset and get_followed_queryset both build on this).
+        # Queryset stage only; the §3.1 ranking below is untouched.
+        queryset = exclude_blocked(queryset, actor)
+
         if seen_ids:
             queryset = queryset.exclude(id__in=seen_ids)
 
@@ -358,6 +364,10 @@ class FeedService:
             queryset = queryset.exclude(author_user=actor.user)
         else:
             queryset = queryset.exclude(author_org=actor.organization)
+
+        # BLOCK EXCLUSION — source 3 builds its own queryset instead of
+        # going through visible_posts_queryset, so it needs its own call.
+        queryset = exclude_blocked(queryset, actor)
 
         if seen_ids:
             queryset = queryset.exclude(id__in=seen_ids)

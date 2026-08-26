@@ -7,6 +7,8 @@ from connections.services.follow_services import FollowService
 from connections.models import Follow
 from accounts.models import User
 from organization.models import Organization
+from moderation.services.block_guard import require_not_blocked
+from moderation.selectors.blocked_filters import blocked_id_sets
 from django.utils import timezone
 
 
@@ -32,6 +34,14 @@ class ConversationService:
         - prevents duplicate conversations
         - applies follow/request logic
         """
+
+        # BLOCK GUARD — before the lookup, so a blocked pair can neither open a
+        # new thread nor re-surface an old one as a message request. Raises
+        # BlockedError (403); ShareService guards its own recipients first with
+        # the MessageError flavour so a fan-out still reports per target.
+        require_not_blocked(
+            actor_user or actor_org, target_user or target_org
+        )
 
         # ----------------------------------------
         # FIND EXISTING
@@ -340,6 +350,11 @@ class ConversationService:
         actor_user = actor.user if actor.is_user else None
         actor_org = actor.organization if actor.is_org else None
 
+        # BLOCK EXCLUSION — this search feeds three prioritised sources
+        # (existing threads, follows, global) into one list, so it filters in
+        # the two add_* closures rather than on any single queryset.
+        blocked_user_ids, blocked_org_ids = blocked_id_sets(actor)
+
         results = []
         seen_users = set()
         seen_orgs = set()
@@ -352,6 +367,8 @@ class ConversationService:
                 return
             if actor_user and user.id == actor_user.id:
                 return
+            if user.id in blocked_user_ids:
+                return
             seen_users.add(user.id)
             results.append(
                 ConversationService._target_item_user(user, conversation_id, source)
@@ -361,6 +378,8 @@ class ConversationService:
             if org is None or org.id in seen_orgs:
                 return
             if actor_org and org.id == actor_org.id:
+                return
+            if org.id in blocked_org_ids:
                 return
             seen_orgs.add(org.id)
             results.append(

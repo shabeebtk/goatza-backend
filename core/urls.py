@@ -44,4 +44,6 @@ urlpatterns = [
     # No username-shadowing hazard here, unlike cv: the diary hangs off its own
     # top-level prefix rather than under 'user/', so ordering does not matter.
     path('matches/', include('matches.urls')),
+
+    path('moderation/', include('moderation.urls')),
 ]

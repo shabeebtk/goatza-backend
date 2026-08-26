@@ -12,6 +12,10 @@ from utils.response import response_data
 from utils.cache import cache_set, cache_get, cache_delete
 from utils.cache_keys import CacheKeys
 from connections.services.follow_services import FollowService
+from moderation.selectors.profile_visibility import (
+    hide_if_blocked,
+    profile_block_state,
+)
 from services.storage.factory import get_storage_service
 from services.storage.validators import (
     allowed_image_extensions,
@@ -57,6 +61,11 @@ class GetUserDetails(BaseAPIView):
                 user = User.objects.select_related("profile").get(username=username)
                 serializer = UserSerializer(user)
 
+            # §1.5 — a profile that blocked THIS viewer does not exist for
+            # them. Raises User.DoesNotExist, so the handler below renders the
+            # exact same 404 an unknown username does.
+            hide_if_blocked(user, actor)
+
             user_data = serializer.data
             user_id = user.id
 
@@ -66,6 +75,10 @@ class GetUserDetails(BaseAPIView):
                 target_type=TYPE_USER
             )
             user_data.update({"relationship" : relation})
+
+            # The OTHER direction: the blocker sees a shell plus the flag that
+            # drives "You blocked this account" + Unblock.
+            user_data.update(profile_block_state(actor, user))
 
             return response_data(success=True, data=user_data)
         except User.DoesNotExist as e:

@@ -55,3 +55,17 @@ class RecipientNotFoundError(MessageError):
 
 class SelfShareError(MessageError):
     reason = "cannot_share_with_self"
+
+
+class BlockedParticipantError(MessageError):
+    """
+    A block exists between the sender and the other party, in either
+    direction.
+
+    A MessageError rather than a bare 403 so the multi-target share endpoint
+    reports it against the one recipient it applies to and still delivers to
+    everybody else. The human message is the generic one every block guard
+    uses (moderation.services.block_guard.BLOCKED_MESSAGE) — the reason code
+    is for the client's own logic, not for display.
+    """
+    reason = "blocked"

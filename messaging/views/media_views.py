@@ -92,10 +92,10 @@ class SendMediaMessageAPIView(BaseAPIView):
                         caption=payload.get("caption", ""),
                     )
             except MessageError as exc:
-                # not_a_participant → 403; invalid_media → 400.
+                # not_a_participant / blocked → 403; invalid_media → 400.
                 code = (
                     status.HTTP_403_FORBIDDEN
-                    if exc.reason == "not_a_participant"
+                    if exc.reason in ("not_a_participant", "blocked")
                     else status.HTTP_400_BAD_REQUEST
                 )
                 return response_data(
