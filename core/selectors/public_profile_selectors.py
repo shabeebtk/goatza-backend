@@ -106,7 +106,10 @@ def get_public_organization(username):
         Organization.objects
         .select_related("profile")
         .prefetch_related("sports__sport", "locations")
-        .filter(username=username, is_active=True)
+        # is_suspended mirrors the authenticated lookup in
+        # OrganizationService.get_organization — a suspended club must not be
+        # reachable by logging out.
+        .filter(username=username, is_active=True, is_suspended=False)
         .first()
     )
 

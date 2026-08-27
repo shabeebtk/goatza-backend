@@ -528,6 +528,22 @@ class MessageService:
         if not is_sender:
             raise NotMessageSenderError("You can only delete your own messages")
 
+        return MessageService._apply_delete(conversation, message)
+
+    @staticmethod
+    def _apply_delete(conversation, message):
+        """
+        The unsend itself, with no permission check of its own.
+
+        Extracted verbatim from ``delete_message`` so the moderator takedown
+        below runs the identical mechanics — same soft-delete flag, same
+        last_message rollback, same realtime ``message_deleted`` event. A
+        second copy would be the one that drifts, and a takedown that skipped
+        the websocket event would leave the message on every open client until
+        they refreshed.
+
+        Callers are responsible for deciding WHO may do this.
+        """
         with transaction.atomic():
             message.is_deleted = True
             message.save(update_fields=["is_deleted"])
@@ -552,6 +568,23 @@ class MessageService:
         MessageService._trigger_realtime_delete(conversation, message)
 
         return message
+
+    @staticmethod
+    def moderator_delete_message(message):
+        """
+        Take a message down as a moderator. Returns True if it moved.
+
+        Skips the sender check that ``delete_message`` enforces — that is the
+        whole difference — and reuses ``_apply_delete`` for everything else, so
+        a moderated message disappears from open chats exactly the way an
+        unsend does.
+        """
+        if message.is_deleted:
+            return False
+
+        MessageService._apply_delete(message.conversation, message)
+
+        return True
 
     @staticmethod
     def _trigger_realtime_delete(conversation, message):

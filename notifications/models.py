@@ -24,6 +24,10 @@ class Notification(BaseUUIDModel):
         ACHIEVEMENT_VERIFICATION_REQUEST = "achievement_verification_request", "Achievement Verification Request"
         ACHIEVEMENT_VERIFIED = "achievement_verified", "Achievement Verified"
         ACHIEVEMENT_REJECTED = "achievement_rejected", "Achievement Rejected"
+        # PLATFORM notification: no actor_user / actor_org. Goatza itself is
+        # speaking, and naming the moderator who decided would hand the warned
+        # account someone to retaliate against.
+        MODERATION_WARNING = "moderation_warning", "Moderation Warning"
         # future:
         # TRIAL = "trial"
         
@@ -147,11 +151,18 @@ class Notification(BaseUUIDModel):
                 name="notification_recipient_user_or_org"
             ),
 
-            # actor must be one
+            # AT MOST one actor.
+            #
+            # The all-null branch is for PLATFORM notifications — a moderation
+            # warning is sent by Goatza, not by a person or a club, and there
+            # is no identity to put in either column. Stamping the acting
+            # moderator there instead would leak who made the call to the
+            # account being warned.
             models.CheckConstraint(
                 condition=(
                     Q(actor_user__isnull=False, actor_org__isnull=True) |
-                    Q(actor_user__isnull=True, actor_org__isnull=False)
+                    Q(actor_user__isnull=True, actor_org__isnull=False) |
+                    Q(actor_user__isnull=True, actor_org__isnull=True)
                 ),
                 name="notification_actor_user_or_org"
             ),

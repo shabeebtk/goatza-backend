@@ -296,6 +296,36 @@ class RecruitmentService:
         return recruitment
 
     # -----------------------------------------------------------------
+    # MODERATION
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def moderator_delete_recruitment(recruitment):
+        """
+        Take a recruitment down as a moderator. Returns True if it moved.
+
+        There is no owner-facing delete to mirror — an org CLOSES or CANCELS a
+        listing (``change_status``), it never deletes one. ``is_deleted`` is
+        the flag the read layer already honours: every visibility decision runs
+        through ``recruitment_selectors.filtered_queryset``, which filters
+        ``is_deleted=False``, so setting it removes the listing from discover,
+        search, the org profile and the apply path in one write.
+
+        Status is deliberately LEFT ALONE. Cancelling would tell the org's
+        applicants the club withdrew the trial; a takedown is not the club's
+        decision to announce, and the status column is the org's own record.
+        Media stays in the bucket for the same reason posts keep theirs — the
+        report's evidence outlives the takedown, and the call is reversible.
+        """
+        if recruitment.is_deleted:
+            return False
+
+        recruitment.is_deleted = True
+        recruitment.save(update_fields=["is_deleted"])
+
+        return True
+
+    # -----------------------------------------------------------------
     # MEDIA VALIDATION + CLEANUP
     # -----------------------------------------------------------------
 

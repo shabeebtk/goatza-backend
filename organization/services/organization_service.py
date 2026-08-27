@@ -198,7 +198,10 @@ class OrganizationService:
 
         queryset = (
             Organization.objects
-            .filter(is_active=True)
+            # A suspended org is not found, not "found but hidden": the profile
+            # view turns a None from here into the standard 404 envelope, which
+            # is the same answer an unknown handle gets.
+            .filter(is_active=True, is_suspended=False)
             .select_related("profile")
             .prefetch_related(
                 "locations",

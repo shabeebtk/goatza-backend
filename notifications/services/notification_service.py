@@ -81,11 +81,24 @@ ACHIEVEMENT_DECISION_COPY = {
     },
 }
 
+# The ONE piece of moderation copy the warned account ever sees. Generic on
+# purpose (spec §2.5): it says a rule was broken, never which one, never who
+# said so. A category name here would tell a harasser which report landed.
+MODERATION_WARNING_BODY = (
+    "Your content was found to violate Goatza's community guidelines."
+)
+
+
 def _resolve_actor_display(notification: "Notification"):
     """
     Return (name, username, avatar) for whichever actor
     (user or org) triggered the notification.
     """
+    # PLATFORM notification (moderation warning): no actor in either column.
+    # Goatza is the sender, so that is the name the client renders.
+    if notification.actor_user_id is None and notification.actor_org_id is None:
+        return "Goatza", "", ""
+
     if notification.actor_user:
         actor = notification.actor_user
         profile = getattr(actor, "profile", None)
@@ -248,6 +261,14 @@ def build_notification_payload(notification: "Notification") -> dict:
         reason = notification.data.get("reason", "")
         title = f"{actor_name} {copy['verb']}"
         body = reason or f"{achievement_title} {copy['body']}"
+
+    elif notification.type == Notification.Type.MODERATION_WARNING:
+        # Fixed copy. It deliberately does NOT name the category, the reporter
+        # or the moderator: the account is told what happened to their content,
+        # not who objected or on what grounds, because either detail turns a
+        # warning into a lead for retaliation.
+        title = "Community guidelines"
+        body = MODERATION_WARNING_BODY
 
     return {
         "type": notification.type,
@@ -874,3 +895,40 @@ class NotificationService:
             **NotificationService._recipient_kwargs(recipient_user=owner),
         )
         _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # MODERATION (platform → account)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def moderation_warning(recipient_user=None, recipient_org=None, post=None,
+                           comment=None, recruitment=None):
+        """
+        Tell an account its content broke the guidelines.
+
+        NO ACTOR. Every other notification in this file is "somebody did
+        something to you"; this one is the platform speaking, so both actor
+        columns stay NULL (the model's at-most-one actor constraint exists for
+        exactly this) and the client renders "Goatza" as the sender. Putting
+        the deciding moderator in `actor_user` would name a staff member to the
+        account they just actioned.
+
+        NO DEDUP KEY and no group_key: two warnings are two separate incidents
+        and must both be visible. Collapsing them would hide a pattern from the
+        only person who can correct it.
+
+        The content FK is attached when there is one, so the row survives
+        the same way every other notification does and the warned account can
+        see WHICH piece of content it refers to — but the body text never
+        names the category or the reporter.
+        """
+        notification = Notification.objects.create(
+            type=Notification.Type.MODERATION_WARNING,
+            post=post,
+            comment=comment,
+            recruitment=recruitment,
+            data={"message": MODERATION_WARNING_BODY},
+            **NotificationService._recipient_kwargs(recipient_user, recipient_org),
+        )
+        _dispatch(notification)
+
+        return notification

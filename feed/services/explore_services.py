@@ -310,6 +310,7 @@ class ExploreService:
     def _orgs_queryset(cls, actor, mode, center, radius, followed, types, filters):
         queryset = Organization.objects.filter(
             is_active=True,
+            is_suspended=False,
             type__in=types,
         )
 

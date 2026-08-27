@@ -67,6 +67,7 @@ class OrganizationAdmin(admin.ModelAdmin):
         "created_by",
         "is_verified",
         "is_active",
+        "is_suspended",
         "created_at",
     )
 
@@ -74,8 +75,14 @@ class OrganizationAdmin(admin.ModelAdmin):
         "type",
         "is_verified",
         "is_active",
+        "is_suspended",
         "created_at",
     )
+
+    # The un-suspend path. A moderation suspension is set by an action on a
+    # Report; clearing it is a deliberate manual edit, and this is the only
+    # place it can be done.
+    list_editable = ("is_suspended",)
 
     search_fields = (
         "name",

@@ -30,6 +30,16 @@ class JWTProtocolAuthMiddleware:
                         id=access_token["user_id"]
                     )
 
+                    # SUSPENDED ACCOUNT — the websocket half of the check
+                    # SimpleJWT already does over HTTP (CHECK_USER_IS_ACTIVE).
+                    # Without it a suspended user keeps a live chat socket for
+                    # as long as the connection stays open, which is the one
+                    # place a suspension would not be felt immediately. Raising
+                    # lands in the except below: user and actor stay None and
+                    # the consumer closes the connection.
+                    if not user.is_active:
+                        raise ValueError("inactive user")
+
                     scope["user"] = user
 
                     # RESOLVE ACTOR 
@@ -48,7 +58,10 @@ class JWTProtocolAuthMiddleware:
                             ).first
                         )()
 
-                        if membership:
+                        # Membership AND not suspended — mirrors
+                        # core.actor.resolve_actor, so a club cannot be spoken
+                        # for over the socket after it is suspended over HTTP.
+                        if membership and not membership.organization.is_suspended:
                             scope["actor"] = Actor(
                                 actor_type="organization",
                                 organization=membership.organization

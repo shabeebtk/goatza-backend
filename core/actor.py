@@ -44,6 +44,16 @@ def resolve_actor(request):
         if not membership:
             raise PermissionDenied("You are not part of this organization")
 
+        # SUSPENDED ORG — nobody acts as it, not even its owner. Same
+        # PermissionDenied shape as every other refusal here so the client
+        # handles one error, and deliberately worded without "suspended" in the
+        # membership branch above it: an outsider probing org ids learns only
+        # that they cannot act as it.
+        if membership.organization.is_suspended:
+            raise PermissionDenied(
+                "This organization is suspended and cannot be used"
+            )
+
         return Actor(
             actor_type="organization",
             organization=membership.organization,

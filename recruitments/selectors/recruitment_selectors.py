@@ -115,7 +115,12 @@ class RecruitmentSelector:
         """
 
         queryset = Recruitment.objects.filter(
-            is_deleted=False
+            is_deleted=False,
+            # A suspended club's listings go with it. This is the one place
+            # that decides which recruitments are visible, so filtering here
+            # covers discover, the ranked list, search and the org profile at
+            # once — no second call site to keep in step.
+            organization__is_suspended=False,
         )
         target_org = None
 
