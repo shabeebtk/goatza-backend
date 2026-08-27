@@ -554,6 +554,12 @@ class FollowServiceAnonymousTests(APITestCase):
                 "is_following": False,
                 "is_followed_by": False,
                 "is_connected": False,
+                # Blocking added these to the shape. An anonymous caller has no
+                # identity to be blocked with, so both are False — and the
+                # exact-dict comparison is kept deliberately: it is what makes
+                # a field silently appearing on this response a test failure.
+                "is_blocked": False,
+                "is_blocked_by_me": False,
             },
         )
 

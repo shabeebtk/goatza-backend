@@ -25,6 +25,7 @@ from messaging.selectors.share_selectors import (
     is_user_profile_shareable,
 )
 from messaging.services.exceptions import (
+    BlockedParticipantError,
     ContentUnavailableError,
     EmptyMessageError,
     InvalidMediaError,
@@ -34,6 +35,7 @@ from messaging.services.exceptions import (
     NotParticipantError,
 )
 from feed.services.affinity_services import AffinityService
+from moderation.services.block_guard import require_not_blocked
 from notifications.services.deeplink_service import build_conversation_url
 from notifications.services.fcm_service import FCMService
 from notifications.services.notification_service import (
@@ -428,6 +430,7 @@ class MessageService:
         shared_recruitment, media_* …) straight through to the row.
         """
         MessageService._validate_sender(conversation, sender_user, sender_org)
+        MessageService._validate_not_blocked(conversation, sender_user, sender_org)
 
         with transaction.atomic():
             message = Message.objects.create(
@@ -525,6 +528,22 @@ class MessageService:
         if not is_sender:
             raise NotMessageSenderError("You can only delete your own messages")
 
+        return MessageService._apply_delete(conversation, message)
+
+    @staticmethod
+    def _apply_delete(conversation, message):
+        """
+        The unsend itself, with no permission check of its own.
+
+        Extracted verbatim from ``delete_message`` so the moderator takedown
+        below runs the identical mechanics — same soft-delete flag, same
+        last_message rollback, same realtime ``message_deleted`` event. A
+        second copy would be the one that drifts, and a takedown that skipped
+        the websocket event would leave the message on every open client until
+        they refreshed.
+
+        Callers are responsible for deciding WHO may do this.
+        """
         with transaction.atomic():
             message.is_deleted = True
             message.save(update_fields=["is_deleted"])
@@ -549,6 +568,23 @@ class MessageService:
         MessageService._trigger_realtime_delete(conversation, message)
 
         return message
+
+    @staticmethod
+    def moderator_delete_message(message):
+        """
+        Take a message down as a moderator. Returns True if it moved.
+
+        Skips the sender check that ``delete_message`` enforces — that is the
+        whole difference — and reuses ``_apply_delete`` for everything else, so
+        a moderated message disappears from open chats exactly the way an
+        unsend does.
+        """
+        if message.is_deleted:
+            return False
+
+        MessageService._apply_delete(message.conversation, message)
+
+        return True
 
     @staticmethod
     def _trigger_realtime_delete(conversation, message):
@@ -596,6 +632,38 @@ class MessageService:
 
         if not query.exists():
             raise NotParticipantError("Sender not part of conversation")
+
+    # BLOCK GUARD
+    @staticmethod
+    def _validate_not_blocked(conversation, sender_user, sender_org):
+        """
+        Refuse the send if a block exists between the sender and anyone else in
+        the thread, in either direction.
+
+        Deliberately in _create_and_dispatch rather than in send_message: text,
+        media and every send_shared_* funnel through that one method, so this
+        covers the WebSocket path, the media endpoint and the share endpoint
+        with a single check that no future sender can forget.
+
+        Raises BlockedParticipantError (a MessageError), so a blocked recipient
+        in a multi-target share is reported against that recipient and the rest
+        of the fan-out still lands.
+        """
+        sender = sender_user or sender_org
+
+        others = ConversationParticipant.objects.filter(
+            conversation=conversation
+        ).select_related("user", "org")
+
+        for participant in others:
+            other = participant.user or participant.org
+
+            if other is None or other == sender:
+                continue
+
+            require_not_blocked(
+                sender, other, error=BlockedParticipantError
+            )
 
     # UPDATE CONVERSATION
     @staticmethod

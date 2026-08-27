@@ -54,7 +54,7 @@ class PostSearchAPIView(BaseAPIView):
             # The search service is actor-free (the result set is global), so
             # the viewer-specific is_saved is layered on here.
             queryset = annotate_is_saved(
-                PostSearchService.search_posts_queryset(q), actor
+                PostSearchService.search_posts_queryset(q, actor), actor
             )
 
             # 2. PAGINATION (keyset on -id, page size 15)

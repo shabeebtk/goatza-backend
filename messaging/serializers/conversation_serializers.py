@@ -3,12 +3,14 @@ from rest_framework import serializers
 from messaging.models import Conversation, ConversationParticipant
 from accounts.serializers.user_serializers import UserMiniSerializer
 from shared.serializers.actor_serializers import ActorMiniSerializer
+from moderation.services.block_guard import is_blocked as _is_blocked_between
 
 class ConversationListSerializer(serializers.ModelSerializer):
 
     other_participant = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
+    is_blocked = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
@@ -20,6 +22,7 @@ class ConversationListSerializer(serializers.ModelSerializer):
             "last_message_at",
             "other_participant",
             "unread_count",
+            "is_blocked",
         ]
 
     # ----------------------------------------
@@ -43,6 +46,37 @@ class ConversationListSerializer(serializers.ModelSerializer):
             return ActorMiniSerializer(participant.org).data
 
         return None
+
+    # ----------------------------------------
+    # BLOCK STATE (§1.5)
+    # ----------------------------------------
+    def get_is_blocked(self, obj):
+        """
+        True when the two participants are blocked in EITHER direction.
+
+        HISTORY STAYS READABLE — this does not hide the thread or its
+        messages, it only tells the client to disable the composer ("You can't
+        reply to this conversation."). The send itself is already refused
+        server-side by MessageService, so this flag is presentation, never
+        enforcement.
+
+        Symmetric on purpose: the blocked party must not be able to tell which
+        side blocked, and a thread that silently swallowed their messages would
+        be worse than one that plainly cannot be replied to.
+        """
+        actor = self.context["request"].actor
+
+        participant = obj.participants.exclude(
+            user=actor.user if actor.is_user else None,
+            org=actor.organization if actor.is_org else None
+        ).select_related("user", "org").first()
+
+        if not participant:
+            return False
+
+        other = participant.user or participant.org
+
+        return _is_blocked_between(actor, other)
 
     # ----------------------------------------
     # LAST MESSAGE
@@ -98,6 +132,7 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
     last_read_at = serializers.SerializerMethodField()
     other_last_read_at = serializers.SerializerMethodField()
     is_last_message_seen = serializers.SerializerMethodField()
+    is_blocked = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
@@ -119,6 +154,7 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
             "last_read_at",
             "other_last_read_at",
             "is_last_message_seen",
+            "is_blocked",
         ]
 
     # OTHER PARTICIPANT
@@ -140,6 +176,37 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
             return ActorMiniSerializer(participant.org).data
 
         return None
+
+    # ----------------------------------------
+    # BLOCK STATE (§1.5)
+    # ----------------------------------------
+    def get_is_blocked(self, obj):
+        """
+        True when the two participants are blocked in EITHER direction.
+
+        HISTORY STAYS READABLE — this does not hide the thread or its
+        messages, it only tells the client to disable the composer ("You can't
+        reply to this conversation."). The send itself is already refused
+        server-side by MessageService, so this flag is presentation, never
+        enforcement.
+
+        Symmetric on purpose: the blocked party must not be able to tell which
+        side blocked, and a thread that silently swallowed their messages would
+        be worse than one that plainly cannot be replied to.
+        """
+        actor = self.context["request"].actor
+
+        participant = obj.participants.exclude(
+            user=actor.user if actor.is_user else None,
+            org=actor.organization if actor.is_org else None
+        ).select_related("user", "org").first()
+
+        if not participant:
+            return False
+
+        other = participant.user or participant.org
+
+        return _is_blocked_between(actor, other)
 
     # LAST MESSAGE
     def get_last_message(self, obj):

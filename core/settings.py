@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'cv',
     'matches',
     'waitlist',
+    'moderation',
 
     # buildin apps 
     'django.contrib.admin',
@@ -187,6 +188,10 @@ REST_FRAMEWORK = {
         # the public surface, so per IP and deliberately tight (see
         # waitlist.throttles.WaitlistSignupThrottle).
         'waitlist_signup': '5/hour',
+        # Filing reports. Per USER, not per actor (see
+        # moderation.throttles.ReportThrottle) — an actor-scoped bucket would
+        # give one person a fresh ten for every org they belong to.
+        'moderation_report': '10/hour',
     }
 }
 
@@ -391,3 +396,22 @@ WAITLIST_GOAL = int(os.getenv("WAITLIST_GOAL", "1000"))
 # pointing at numbers nobody will be shown again.
 WAITLIST_DISPLAY_OFFSET = int(os.environ.get("WAITLIST_DISPLAY_OFFSET", 36))
 # ------ WAITLIST END ------/
+
+# ------ MODERATION (reports) ------/
+
+# Where a PRIORITY report alert goes — minor_safety, self_harm and violence
+# only. Empty means the mail is skipped and the report still lands; an address
+# baked into source control is an address that keeps receiving mail from every
+# fork, staging box and local run (same reasoning as WAITLIST_NOTIFY_EMAIL).
+#
+# Deliberately not every category. A spam report at 3am is not worth a
+# notification; the admin queue is where those get seen.
+MODERATION_ALERT_EMAIL = os.getenv("MODERATION_ALERT_EMAIL", "")
+
+# Origin the alert's "Review it" link is built against, e.g.
+# https://api.goatza.com. Empty leaves the link RELATIVE
+# (/admin/moderation/report/<id>/change/), which is right for a local run and
+# harmless in mail — better a path than an absolute URL pointing at the wrong
+# environment.
+SITE_ADMIN_BASE_URL = os.getenv("SITE_ADMIN_BASE_URL", "")
+# ------ MODERATION END ------/

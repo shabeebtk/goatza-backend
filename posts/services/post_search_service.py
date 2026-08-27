@@ -2,6 +2,7 @@ from django.db.models import Q, Exists, OuterRef
 
 from posts.models import Post, PostHashtag
 from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
+from moderation.selectors.blocked_filters import exclude_blocked
 
 
 class PostSearchService:
@@ -19,7 +20,7 @@ class PostSearchService:
     """
 
     @staticmethod
-    def search_posts_queryset(q):
+    def search_posts_queryset(q, actor=None):
         # Hashtags are stored without the leading "#" and LOWERCASED by
         # post_content_service.extract_hashtags, but users type "#FootBall".
         # Strip a single leading "#" and fold the case to match the stored
@@ -50,6 +51,11 @@ class PostSearchService:
             # the PK index — do NOT "fix" this to "-created_at".
             .order_by("-id")
         )
+
+        # BLOCK EXCLUSION. ``actor`` is optional so the signature stays
+        # backward compatible, and None (an anonymous or unspecified caller)
+        # no-ops inside the helper — but every real caller passes one.
+        queryset = exclude_blocked(queryset, actor)
 
         # Same select_related / prefetch_related shape as the trending feed
         # (ExploreTrendingPostsAPIView) so PostListSerializer needs no extra

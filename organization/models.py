@@ -51,6 +51,12 @@ class Organization(BaseUUIDModel):
     is_verified = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
 
+    # Moderation suspension. Distinct from is_active, which is the org's own
+    # lifecycle (deactivated by its owner): this one is imposed, only staff can
+    # clear it, and it is what actor resolution refuses to act as. Indexed
+    # because every org read path now filters on it.
+    is_suspended = models.BooleanField(default=False, db_index=True)
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

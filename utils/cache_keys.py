@@ -84,3 +84,24 @@ class CacheKeys:
         screen followed by "412 joined" on the same page reads as broken.
         """
         return "waitlist:signup:count"
+
+    # ── Moderation ───────────────────────────────────────────────
+
+    @staticmethod
+    def blocked_ids(actor_type, actor_id):
+        """
+        The union of "identities this actor blocked" and "identities that
+        blocked this actor" — the one set every read path filters against.
+
+        Keyed by (type, id) rather than username because the actor here is
+        resolved from a token, not from a URL: the id is what the request
+        already has, and unlike a handle it never moves.
+
+        SYMMETRIC by construction, so one block invalidates TWO keys — the
+        blocker's and the blocked party's (BlockService.invalidate_blocked_ids
+        is called for both on every write). A short TTL on top of that is a
+        backstop, not the mechanism: a stale entry here means a blocked account
+        keeps appearing in a feed, which is the one thing blocking promises not
+        to do.
+        """
+        return f"blocked_ids:{actor_type}:{actor_id}"

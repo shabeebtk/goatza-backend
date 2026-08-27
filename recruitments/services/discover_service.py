@@ -33,6 +33,7 @@ from recruitments.selectors.recruitment_selectors import (
 )
 from recruitments.services import eligibility_service
 from recruitments.services.match_score_service import MatchScoreService
+from moderation.selectors.blocked_filters import exclude_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -110,9 +111,17 @@ class RecruitmentDiscoverService:
 
         context = PlayerContextSelector.resolve(actor)
 
+        # BLOCK EXCLUSION — a recruitment is owned by an org, so only the
+        # org side applies. Before the candidate cap, so a blocked club cannot
+        # consume slots that would otherwise hold real candidates.
         candidates = list(
-            RecruitmentSelector.discover_candidates(
-                context, context.followed_org_ids, now=now
+            exclude_blocked(
+                RecruitmentSelector.discover_candidates(
+                    context, context.followed_org_ids, now=now
+                ),
+                actor,
+                user_field=None,
+                org_field="organization_id",
             )[:MAX_SCORED_CANDIDATES]
         )
         if len(candidates) == MAX_SCORED_CANDIDATES:
@@ -343,6 +352,11 @@ class RecruitmentDiscoverService:
             actor=actor,
             center=context.center,
             **filters,
+        )
+
+        # BLOCK EXCLUSION — same rule for the "All" tab as for discover.
+        queryset = exclude_blocked(
+            queryset, actor, user_field=None, org_field="organization_id"
         )
 
         if context.center and not filters.get("max_distance_km"):

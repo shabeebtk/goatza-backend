@@ -28,6 +28,10 @@ from careers.services.career_services import CareerEntryService
 from core.views.base_views import BaseAPIView
 from utils.errors import error_body, flatten_validation_error
 from utils.response import response_data
+from moderation.selectors.profile_visibility import (
+    has_blocked_me,
+    hide_owned_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +94,18 @@ class UserCareerEntryListAPIView(BaseAPIView):
                     status_code=404
                 )
 
-            entries = list(career_entries_for(owner))
+
+            # §1.5 — owner blocked this viewer: the same 404 the missing-user
+            # branch above renders, so blocked is indistinguishable from gone.
+            if has_blocked_me(request.actor, owner):
+                return response_data(
+                    success=False,
+                    message="User not found",
+                    status_code=404,
+                )
+            entries = list(
+                hide_owned_content(career_entries_for(owner), request.actor, owner)
+            )
 
             return response_data(
                 success=True,

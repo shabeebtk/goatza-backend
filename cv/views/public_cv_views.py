@@ -19,6 +19,7 @@ from cv.services.cv_services import CVService
 from utils.cache import cache_get, cache_set
 from utils.cache_keys import CacheKeys
 from utils.response import response_data
+from moderation.selectors.profile_visibility import has_blocked_me
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,17 @@ class PublicCVAPIView(PublicAPIView):
                 )
 
             user, settings = resolved
+
+            # §1.5 — the CV's owner blocked this viewer. Identical 404 to the
+            # branch above, which is what keeps "blocked" indistinguishable
+            # from "no such CV". Anonymous callers have no actor and are
+            # unaffected, so the cached public bundle is untouched.
+            if has_blocked_me(request.actor, user):
+                return response_data(
+                    success=False,
+                    message="CV not found",
+                    status_code=404,
+                )
 
             # 2. Count the view BEFORE the cache check. A shared CV is served
             #    from cache almost every time; counting after the early return

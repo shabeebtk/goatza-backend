@@ -10,6 +10,7 @@ from messaging.serializers.conversation_serializers import (
 )
 from utils.response import response_data 
 from messaging.services.conversation_service import ConversationService
+from moderation.services.block_guard import BlockedError, blocked_response
 from accounts.services.user_services import UserService
 from organization.services.user_organization_services import UserOrganizationService
 from core.constant import TYPE_USER
@@ -97,6 +98,11 @@ class GetOrCreateConversationAPIView(BaseAPIView):
                     "can_message": conversation.status == "active"
                 }
             )
+
+        except BlockedError:
+            # Error MAPPING only — the guard itself lives in the service. Without
+            # this branch the broad handler below turns a 403 into a 500.
+            return blocked_response()
 
         except Exception as e:
             return response_data(

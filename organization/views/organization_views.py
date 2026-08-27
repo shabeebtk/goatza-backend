@@ -21,6 +21,10 @@ from services.storage.validators import (
 )
 from organization.services.organization_member_service import OrganizationMemberService
 from connections.services.follow_services import FollowService
+from moderation.selectors.profile_visibility import (
+    has_blocked_me,
+    profile_block_state,
+)
 from usernames.exceptions import UsernameTaken
 from usernames.services.username_service import UsernameService
 from core.constant import TYPE_ORGANIZATION
@@ -149,6 +153,18 @@ class OrganizationsDetailsAPIView(BaseAPIView):
                     status_code=404
                 )
 
+            # §1.5 — an org that blocked this viewer is indistinguishable from
+            # one that does not exist. Returned as None so the SAME 404 branch
+            # above renders it (this view fetches through a service that
+            # returns None rather than raising, so the shape differs from the
+            # user profile's DoesNotExist).
+            if has_blocked_me(actor, organization):
+                return response_data(
+                    success=False,
+                    error="Organization not found",
+                    status_code=404
+                )
+
             # -------------------------
             # SERIALIZE
             # -------------------------
@@ -169,6 +185,7 @@ class OrganizationsDetailsAPIView(BaseAPIView):
 
             data = serializer.data
             data["relationship"] = relation
+            data.update(profile_block_state(actor, organization))
 
             return response_data(
                 success=True,

@@ -21,6 +21,7 @@ from messaging.selectors.share_selectors import (
 )
 from messaging.services.conversation_service import ConversationService
 from messaging.services.exceptions import (
+    BlockedParticipantError,
     ContentUnavailableError,
     MessageError,
     RecipientNotFoundError,
@@ -30,6 +31,7 @@ from messaging.services.message_service import MessageService
 from posts.models import Post
 from recruitments.models import Recruitment
 from organization.models import Organization
+from moderation.services.block_guard import require_not_blocked
 
 TARGET_POST = "post"
 TARGET_RECRUITMENT = "recruitment"
@@ -247,6 +249,14 @@ class ShareService:
                 raise RecipientNotFoundError("Recipient not found")
             if actor.is_org and actor.organization.id == target_org.id:
                 raise SelfShareError("Cannot share with your own organization")
+
+        # BLOCK GUARD — as a MessageError, so ONE blocked recipient lands in
+        # `failed` and the other nine in the same share still go out. Runs
+        # before get_or_create, whose own guard raises the 403 flavour that
+        # would fail the whole request.
+        require_not_blocked(
+            actor, target_user or target_org, error=BlockedParticipantError
+        )
 
         conversation, _ = ConversationService.get_or_create_conversation(
             actor_user=actor.user if actor.is_user else None,

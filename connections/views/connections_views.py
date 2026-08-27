@@ -11,6 +11,8 @@ from organization.models import Organization
 from core.constant import TYPE_USER, TYPE_ORGANIZATION
 from core.views.base_views import BaseAPIView
 from connections.services.follow_services import FollowService
+from moderation.services.block_guard import BlockedError, blocked_response
+from moderation.selectors.blocked_filters import exclude_blocked
 from organization.services.user_organization_services import (
     UserOrganizationService,
 )
@@ -48,6 +50,11 @@ class FollowAPIView(BaseAPIView):
                 result if isinstance(result, str) else "Followed successfully",
                 data=result if isinstance(result, dict) else {"is_following": False}
             )
+
+        except BlockedError:
+            # Error MAPPING only — the guard itself lives in the service. Without
+            # this branch the broad handler below turns a 403 into a 500.
+            return blocked_response()
 
         except Exception as e:
             logger.error(f"Follow error: {str(e)}")
@@ -265,6 +272,18 @@ class FollowListAPIView(BaseAPIView):
                     following_user__in=followers_of_target,
                 ).select_related("following_user__profile")
                 user_field, org_field = "following_user", None
+
+            # BLOCK EXCLUSION — the ENTITY columns for this list type, which
+            # is exactly what user_field/org_field already name. A blocked
+            # account disappears from both parties' followers and following
+            # lists; the counters on the profile are NOT recomputed (they are
+            # decremented at block time by the follow teardown in Stage 2).
+            queryset = exclude_blocked(
+                queryset,
+                actor,
+                user_field=f"{user_field}_id",
+                org_field=f"{org_field}_id" if org_field else None,
+            )
 
             # SEARCH — username / profile name (users) and org name (orgs).
             if search:

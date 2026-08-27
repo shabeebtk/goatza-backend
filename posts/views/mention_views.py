@@ -15,6 +15,7 @@ from posts.serializers.posts_serializers import (
 from posts.services.saved_post_service import annotate_is_saved
 from feed.services.feed_services import FeedService
 from utils.response import response_data
+from moderation.selectors.blocked_filters import exclude_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class MyMentionsAPIView(BaseAPIView):
             )
 
 
-class MentionSuggestAPIView(APIView):
+class MentionSuggestAPIView(BaseAPIView):
     """
     GET /posts/mention/suggest?q=<term>
 
@@ -115,9 +116,12 @@ class MentionSuggestAPIView(APIView):
     username columns on both models — this runs on every keystroke after the
     client's debounce, so it must stay an index seek, never a scan.
 
-    No actor needed: who you can mention doesn't depend on which hat you wear.
+    WHICH hat you wear does not change the ranking — but it does change the
+    block set, so this is a BaseAPIView (it was a bare APIView while the list
+    was actor-independent): an org actor and its owner can have different
+    people blocked, and a handle the write path would silently drop must not
+    be offered here.
     """
-    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         TAG = "MentionSuggestAPIView"
@@ -132,16 +136,31 @@ class MentionSuggestAPIView(APIView):
                     data={"users": [], "organizations": []},
                 )
 
+            # BLOCK EXCLUSION — suggesting a blocked handle would be a
+            # dead end: sync_post_mentions silently drops the mention anyway,
+            # so the picker must not offer it in the first place.
+            actor = request.actor
+
             users = (
-                User.objects
-                .filter(username__istartswith=q, is_active=True)
+                exclude_blocked(
+                    User.objects.filter(username__istartswith=q, is_active=True),
+                    actor,
+                    user_field="id",
+                    org_field=None,
+                )
                 .select_related("profile")
                 .order_by("username")[:SUGGEST_LIMIT]
             )
 
             organizations = (
-                Organization.objects
-                .filter(username__istartswith=q, is_active=True)
+                exclude_blocked(
+                    Organization.objects.filter(
+                        username__istartswith=q, is_active=True
+                    ),
+                    actor,
+                    user_field=None,
+                    org_field="id",
+                )
                 .select_related("profile")
                 .order_by("username")[:SUGGEST_LIMIT]
             )
