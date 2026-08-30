@@ -16,6 +16,7 @@ from rest_framework_simplejwt.token_blacklist.models import (
     OutstandingToken, BlacklistedToken,
 )
 from accounts.serializers.user_serializers import UserSerializer
+from accounts.services.login_service import on_successful_login
 from usernames.services.username_service import UsernameService
 from utils.response import response_data
 from utils.validations import is_valid_email, is_valid_password
@@ -132,6 +133,11 @@ class VerifySignupOTPAPIView(APIView):
 
         refresh = RefreshToken.for_user(user)
 
+        # A successful OTP verification IS a login — it is the first one a new
+        # account gets. Stamps last_login and tops up the profile city's
+        # coordinates; never raises.
+        on_successful_login(user)
+
         logger.info(f"User verified: {email}")
 
         response = response_data(
@@ -195,6 +201,10 @@ class UserLoginAPIView(APIView):
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
         access_token = str(refresh.access_token)
+
+        # RefreshToken.for_user does not write last_login and these views never
+        # call django.contrib.auth.login, so nothing else would.
+        on_successful_login(user)
 
         # Prepare response data
         user_data = UserSerializer(user).data

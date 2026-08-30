@@ -27,8 +27,8 @@ built around that one fact:
   * THE LOCATION BLOCK MIRRORS ``accounts.models.UserProfile``. Same names,
     same types, same order, so converting a signup into a real profile at
     launch is a field copy rather than a mapping. Goatza is not Kerala-only:
-    the FK resolves through the shared LocationService against whatever Mapbox
-    returned, and every part of it is optional — a player who declines the
+    the FK resolves through the shared LocationService against whatever the
+    place picker returned, and every part of it is optional — a player who declines the
     location prompt, or whose geocoding fails, still gets on the list.
 """
 

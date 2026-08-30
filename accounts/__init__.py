@@ -1,4 +1,7 @@
 '''
+Original location-feature sketch. The provider is now Google Places and the
+authority on all of it is docs/PLACES_MIGRATION.md — this is kept only as the
+list of surfaces location touches.
 
 User location (profile)
 Post location (optional tagging)
@@ -8,7 +11,7 @@ Future: feed ranking boost
 
 src/shared/
   services/
-    mapbox.service.ts          ← new
+    places.service.ts          ← new
   components/ui/
     LocationPicker/
       LocationPicker.tsx       ← new (reusable anywhere)

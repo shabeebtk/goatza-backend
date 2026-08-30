@@ -56,8 +56,13 @@ POST   /applications/{id}/status/
   "payment_note": "Payment handled directly by organization after shortlisting.",
 
   "location": {
+    "provider": "google",
+    "external_id": "ChIJ...",
     "name": "Kannur Municipal Stadium",
+    "type": "place",
     "city": "Kannur",
+    "state": "Kerala",
+    "country": "India",
     "country_code": "IN",
     "latitude": 11.8745,
     "longitude": 75.3704

@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from shared.models import Location
 from organization.models import (
     Organization, OrganizationProfile, OrganizationLocation, OrganizationSport,
     OrganizationMember
@@ -10,8 +11,32 @@ class OrganizationLocationInputSerializer(serializers.Serializer):
     city = serializers.CharField(max_length=100, required=False, allow_blank=True)
     state = serializers.CharField(max_length=100, required=False, allow_blank=True)
     country_code = serializers.CharField(max_length=5, required=False, allow_blank=True)
-    latitude = serializers.FloatField(required=False)
-    longitude = serializers.FloatField(required=False)
+    latitude = serializers.FloatField(required=False, allow_null=True)
+    longitude = serializers.FloatField(required=False, allow_null=True)
+
+    # PLACE (docs/PLACES_MIGRATION.md 5.4). ``name`` above is the BRANCH label
+    # ("Main Branch"); the place's own label is ``location_name``, the same word
+    # UserProfile and Post use for it. provider + external_id are the shared
+    # Location's identity — without them every branch mints a duplicate row.
+    provider = serializers.ChoiceField(
+        choices=Location.Provider.choices,
+        required=False,
+        default=Location.Provider.GOOGLE,
+    )
+    external_id = serializers.CharField(
+        max_length=255, required=False, allow_blank=True
+    )
+    location_name = serializers.CharField(
+        max_length=255, required=False, allow_blank=True
+    )
+    type = serializers.ChoiceField(
+        choices=Location.Type.choices,
+        required=False,
+        default=Location.Type.CITY,
+    )
+    country = serializers.CharField(
+        max_length=100, required=False, allow_blank=True
+    )
 
     def validate(self, attrs):
         latitude = attrs.get("latitude")

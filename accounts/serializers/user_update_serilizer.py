@@ -83,13 +83,35 @@ class UpdateUserProfileSerializer(serializers.Serializer):
         return value
 
     def validate_location(self, value):
+        """
+        The place payload from docs/PLACES_MIGRATION.md 5.4.
+
+        A DictField, so ``provider`` and ``external_id`` pass straight through
+        to LocationService — they are the row's identity and dropping them here
+        would mint a duplicate Location per save.
+
+        Coordinates are no longer part of that identity: a payload carrying a
+        place id is resolvable without them (the stored row already has a point,
+        or the refresh job will fetch one). They are required only for a place
+        nothing has ever seen, which LocationService enforces itself.
+        """
         if value is None:
             return value
 
-        required_fields = ["latitude", "longitude", "name"]
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Invalid location format")
 
-        for field in required_fields:
-            if field not in value:
-                raise serializers.ValidationError(f"{field} is required")
+        if not value.get("name"):
+            raise serializers.ValidationError("name is required")
+
+        has_coords = (
+            value.get("latitude") is not None
+            and value.get("longitude") is not None
+        )
+
+        if not has_coords and not value.get("external_id"):
+            raise serializers.ValidationError(
+                "latitude and longitude are required"
+            )
 
         return value

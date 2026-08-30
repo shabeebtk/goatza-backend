@@ -14,6 +14,7 @@ from accounts.models import (
 from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from accounts.serializers.user_serializers import UserSerializer
+from accounts.services.login_service import on_successful_login
 from utils.response import response_data
 from usernames.services.username_service import UsernameService
 from utils.passwords import generate_random_password
@@ -148,6 +149,12 @@ class GoogleAuthCallbackView(APIView):
 
             # Step 4: Generate JWT
             refresh = RefreshToken.for_user(user)
+
+            # Outside the transaction above on purpose: this stamps last_login
+            # and can make one Google Places call, and neither belongs inside a
+            # transaction that is creating a user.
+            on_successful_login(user)
+
             logger.info(f"Google login success: {email}")
             
             response = response_data(

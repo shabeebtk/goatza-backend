@@ -130,14 +130,16 @@ class CreatePostAPIView(BaseAPIView):
             }
         ],
         "location": {
+            "provider": "google",          # optional, defaults to google
+            "external_id": "ChIJ...",      # Google place_id
             "name": "Kannur Stadium",
             "type": "place",
             "city": "Kannur",
             "state": "Kerala",
+            "country": "India",
             "country_code": "IN",
             "latitude": 11.868,
-            "longitude": 75.355,
-            "external_id": "place.kannur.stadium"
+            "longitude": 75.355
         }
     }
     '''
@@ -170,12 +172,21 @@ class CreatePostAPIView(BaseAPIView):
                 return response_data(False, message="Invalid visibility", status_code=400)
 
 
-            # location validation 
+            # location validation
+            # A place is identified by its id, so a payload carrying one is
+            # valid with or without coordinates — LocationService resolves it
+            # against the row it already has. Coordinates are only REQUIRED for
+            # a place nothing has ever seen. Note the `is None` test: latitude 0
+            # is a real coordinate, and a falsy check rejected the equator.
             if location_data:
                 if not isinstance(location_data, dict):
                     return response_data(False, message="Invalid location format", status_code=400)
 
-                if not location_data.get("latitude") or not location_data.get("longitude"):
+                has_coords = (
+                    location_data.get("latitude") is not None
+                    and location_data.get("longitude") is not None
+                )
+                if not has_coords and not location_data.get("external_id"):
                     return response_data(False, message="Location must include latitude and longitude", status_code=400)
 
             # Sport validation
@@ -334,7 +345,11 @@ class CreatePostAPIView(BaseAPIView):
                 location = None
                 denorm = {}
                 if location_data:
-                    location = LocationService.get_or_create_location(location_data)
+                    try:
+                        location = LocationService.get_or_create_location(location_data)
+                    except ValueError as ve:
+                        return response_data(False, error=str(ve), status_code=400)
+
                     denorm = LocationService.build_denormalized(location)
 
                 post = Post.objects.create(
@@ -488,7 +503,11 @@ class UpdatePostAPIView(BaseAPIView):
                     if location_data:
                         if not isinstance(location_data, dict):
                             return response_data(False, message="Invalid location format", status_code=400)
-                        if not location_data.get("latitude") or not location_data.get("longitude"):
+                        has_coords = (
+                            location_data.get("latitude") is not None
+                            and location_data.get("longitude") is not None
+                        )
+                        if not has_coords and not location_data.get("external_id"):
                             return response_data(False, message="Location must include latitude and longitude", status_code=400)
 
                         try:

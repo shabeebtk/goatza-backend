@@ -58,6 +58,9 @@ INSTALLED_APPS = [
     'matches',
     'waitlist',
     'moderation',
+    # Google Places (New) proxy. No models — it owns the API key and the daily
+    # spend guard, nothing else.
+    'places',
 
     # buildin apps 
     'django.contrib.admin',
@@ -192,6 +195,18 @@ REST_FRAMEWORK = {
         # moderation.throttles.ReportThrottle) — an actor-scoped bucket would
         # give one person a fresh ten for every org they belong to.
         'moderation_report': '10/hour',
+        # Google Places proxy (places.throttles, doc section 4.3). TWO scopes
+        # per endpoint, not one: DRF resolves a single rate per scope name, so
+        # the authenticated and anonymous halves of the doc's table each need
+        # their own. Anonymous is tighter because the /join city picker is the
+        # one place an anonymous caller can spend our Google quota.
+        'places_autocomplete': '60/min',
+        'places_autocomplete_anon': '20/min',
+        # Details is the expensive half and is called ONCE per completed
+        # search, for the prediction the user picked. A client burning through
+        # this budget is calling it for the whole list.
+        'places_details': '20/min',
+        'places_details_anon': '10/min',
     }
 }
 
@@ -415,3 +430,56 @@ MODERATION_ALERT_EMAIL = os.getenv("MODERATION_ALERT_EMAIL", "")
 # environment.
 SITE_ADMIN_BASE_URL = os.getenv("SITE_ADMIN_BASE_URL", "")
 # ------ MODERATION END ------/
+
+# ------ GOOGLE PLACES (city + venue search) ------/
+# The proxy in places/ is the ONLY thing that talks to Google. The key is
+# server-side and never reaches the browser (docs/PLACES_MIGRATION.md decision
+# 2), which is the whole reason the proxy exists.
+
+# Unset is a supported state: the app boots normally and the two /places/
+# endpoints answer 503 with a logged warning, so a checkout with no key still
+# runs everything that is not place search.
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
+
+# The INNER spend backstop, per UTC day, per SKU. Google console quotas are the
+# outer one — this is the one that can answer with a friendly 503 instead of a
+# dead picker, and it stops the call before it is billed. `or` rather than
+# getenv's default argument for the same reason as the R2 block above: the keys
+# ship in .env with empty values, and int("") raises at import, which would
+# take the whole app down over a blank line in an env file.
+#
+# Details and the coordinate-refresh job SHARE the details cap: same endpoint,
+# same SKU, same money.
+PLACES_DAILY_CAP_AUTOCOMPLETE = int(
+    os.getenv("PLACES_DAILY_CAP_AUTOCOMPLETE") or 2000
+)
+PLACES_DAILY_CAP_DETAILS = int(os.getenv("PLACES_DAILY_CAP_DETAILS") or 1000)
+
+# The city picker's type filter, comma-separated. A SETTING rather than a
+# constant because which small towns Google classifies as a "city" is not
+# stable and widening the list must not need a deploy: `(cities)` (= locality +
+# administrative_area_level_3) covers Thalassery, Panoor and Kuthuparamba, but
+# a village that goes missing is fixed by setting e.g.
+# "locality,sublocality,neighborhood,administrative_area_level_3,administrative_area_level_4".
+# Google allows at most 5 values and refuses to mix a collection like
+# `(cities)` with individual types.
+PLACES_CITY_PRIMARY_TYPES = os.getenv("PLACES_CITY_PRIMARY_TYPES") or "(cities)"
+
+# ---- Coordinate lifecycle ("B-lite", doc section 6) ----
+# We may keep a place_id forever but not its coordinates, so a Location's point
+# is a cache with an expiry. REFRESH re-fetches a place something still depends
+# on; EXPIRE nulls the coordinates of one nothing does. The gap between the two
+# is the safety margin: refresh at 25 days so a place has five days of runs to
+# be caught before the 30-day expiry drops it.
+PLACES_COORDS_REFRESH_AFTER_DAYS = int(
+    os.getenv("PLACES_COORDS_REFRESH_AFTER_DAYS") or 25
+)
+PLACES_COORDS_EXPIRE_AFTER_DAYS = int(
+    os.getenv("PLACES_COORDS_EXPIRE_AFTER_DAYS") or 30
+)
+
+# What counts as an "active user" for the refresh job: last_login OR
+# profile.updated_at inside this window. Both, because refresh tokens rotate
+# for thirty days without touching last_login.
+PLACES_ACTIVE_USER_DAYS = int(os.getenv("PLACES_ACTIVE_USER_DAYS") or 30)
+# ------ GOOGLE PLACES END ------/

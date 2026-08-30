@@ -36,16 +36,24 @@ MAX_AGE_YEARS = 60
 MIN_PHONE_DIGITS = 10
 MAX_PHONE_DIGITS = 15
 
-# The keys of a Mapbox result this app will pass on, and nothing else. Same
+# The keys of a place result this app will pass on, and nothing else. Same
 # allow-list reasoning as the form itself: LocationService reads a fixed set of
 # keys, and anything outside it is either noise or somebody probing.
 #
 # ``name`` is the FULL label ("Kozhikode, Kerala, India") — it becomes
 # Location.name and the signup's location_name. ``city`` is the short one. The
-# frontend's MapboxCity calls those two ``label`` and ``name``, so ``label`` is
-# accepted as an alias below for a client that forwards the object untouched.
+# city picker calls those two ``label`` and ``name``, so ``label`` is accepted
+# as an alias below for a client that forwards the object untouched.
+#
+# ``provider`` and ``external_id`` are what make the row shareable with the rest
+# of the app: together they are the Location's identity (a Google ``place_id``
+# under provider ``google``), so a signup and a profile naming the same place
+# land on one row. Dropping them from this list would silently turn every
+# signup into a fresh duplicate Location.
 LOCATION_FIELDS = (
+    "provider",
     "name",
+    "type",
     "city",
     "state",
     "country",
@@ -200,7 +208,7 @@ class PlayerSignupCreateSerializer(serializers.Serializer):
 
     def validate_location(self, value):
         """
-        Reduce a Mapbox result to the keys this app stores, dropping anything
+        Reduce a place-picker result to the keys this app stores, dropping anything
         it cannot use — WITHOUT ever raising.
 
         Nothing in here is a 400. The location is optional, so every way it can
@@ -232,14 +240,17 @@ class PlayerSignupCreateSerializer(serializers.Serializer):
                 continue
             location[field] = entry
 
-        # MapboxCity's own naming: ``label`` is the full label, ``name`` is the
+        # The city picker's own naming: ``label`` is the full label, ``name`` is the
         # short city. Only used when the client sent the object as-is.
         label = value.get("label")
         if label and not value.get("city"):
             location["city"] = location.get("name") or ""
             location["name"] = label
 
-        for field in ("name", "city", "state", "country", "country_code", "external_id"):
+        for field in (
+            "provider", "name", "type", "city", "state", "country",
+            "country_code", "external_id",
+        ):
             if field in location:
                 location[field] = str(location[field]).strip()
 

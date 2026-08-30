@@ -350,7 +350,19 @@ class UpdateUserProfileAPIView(APIView):
                     ])
                     logger.info(f"{TAG} Location cleared")
                 else:
-                    location = LocationService.get_or_create_location(location_data)
+                    try:
+                        location = LocationService.get_or_create_location(location_data)
+                    except ValueError as e:
+                        # Out-of-range or missing coordinates on a place with no
+                        # row on file. A 400 with the field name, not the 500
+                        # the generic handler below would turn it into.
+                        return response_data(
+                            success=False,
+                            message="Validation failed",
+                            data={"location": [str(e)]},
+                            status_code=400
+                        )
+
                     denorm = LocationService.build_denormalized(location)
                     profile.location = location
                     profile.location_name = denorm["location_name"]

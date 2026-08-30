@@ -67,8 +67,8 @@ def body(**overrides):
     return payload
 
 
-def mapbox(**overrides):
-    """A Mapbox result in the shape the frontend forwards it."""
+def place(**overrides):
+    """A place-picker result in the shape the frontend forwards it."""
     payload = {
         "name": "Kozhikode, Kerala, India",
         "city": "Kozhikode",
@@ -77,7 +77,7 @@ def mapbox(**overrides):
         "country_code": "IN",
         "latitude": 11.2588,
         "longitude": 75.7804,
-        "external_id": "place.11223344",
+        "external_id": "ChIJ_placeholder_kozhikode",
     }
     payload.update(overrides)
     return payload
@@ -206,7 +206,7 @@ class ServiceTests(APITestCase):
     @patch("waitlist.services.signup_services.send_email_async")
     def test_notification_subject_and_body(self, mock_send):
         PlayerSignupService.create(
-            **body(instagram="@arjun", location=mapbox())
+            **body(instagram="@arjun", location=place())
         )
 
         kwargs = mock_send.call_args.kwargs
@@ -262,7 +262,7 @@ class ServiceTests(APITestCase):
         PlayerSignupService.create(**body())
 
         decoy = PlayerSignupService.decoy_payload(
-            {"name": "Bot", "location": mapbox()}
+            {"name": "Bot", "location": place()}
         )
 
         self.assertEqual(
@@ -284,7 +284,7 @@ class LocationTests(APITestCase):
         cache.clear()
 
     def test_resolves_the_fk_and_the_denormalised_copy(self):
-        signup, _ = PlayerSignupService.create(**body(location=mapbox()))
+        signup, _ = PlayerSignupService.create(**body(location=place()))
 
         self.assertIsNotNone(signup.location)
         self.assertEqual(signup.location_name, "Kozhikode, Kerala, India")
@@ -296,9 +296,9 @@ class LocationTests(APITestCase):
 
     def test_the_fk_is_the_shared_location_row(self):
         """Two signups in the same place share one Location — not two."""
-        first, _ = PlayerSignupService.create(**body(location=mapbox()))
+        first, _ = PlayerSignupService.create(**body(location=place()))
         second, _ = PlayerSignupService.create(
-            **body(name="Fathima P", phone="9995551234", location=mapbox())
+            **body(name="Fathima P", phone="9995551234", location=place())
         )
 
         self.assertEqual(Location.objects.count(), 1)
@@ -308,7 +308,7 @@ class LocationTests(APITestCase):
         signup, _ = PlayerSignupService.create(
             **body(
                 phone="+44 7700 900123",
-                location=mapbox(
+                location=place(
                     name="Manchester, England, United Kingdom",
                     city="Manchester",
                     state="England",
@@ -354,7 +354,7 @@ class LocationTests(APITestCase):
         side_effect=RuntimeError("geocoder down"),
     )
     def test_a_raising_geocoder_never_costs_the_signup(self, mock_resolve):
-        signup, created = PlayerSignupService.create(**body(location=mapbox()))
+        signup, created = PlayerSignupService.create(**body(location=place()))
 
         self.assertTrue(created)
         self.assertEqual(PlayerSignup.objects.count(), 1)
@@ -369,7 +369,7 @@ class LocationTests(APITestCase):
         return_value=None,
     )
     def test_a_geocoder_that_resolves_to_nothing_is_the_same_case(self, mock_resolve):
-        signup, created = PlayerSignupService.create(**body(location=mapbox()))
+        signup, created = PlayerSignupService.create(**body(location=place()))
 
         self.assertTrue(created)
         self.assertIsNone(signup.location)
@@ -379,7 +379,7 @@ class LocationTests(APITestCase):
         signup, _ = PlayerSignupService.create(
             **body(
                 state="Karnataka",
-                location=mapbox(state="", name="Somewhere"),
+                location=place(state="", name="Somewhere"),
             )
         )
 
@@ -398,7 +398,7 @@ class APITests(APITestCase):
     def test_create_returns_the_public_shape(self):
         response = self.client.post(
             f"{CREATE_URL}?src=ig_reel_04",
-            body(location=mapbox()),
+            body(location=place()),
             format="json",
         )
 
@@ -438,7 +438,7 @@ class APITests(APITestCase):
     def test_honeypot_looks_like_success_but_writes_nothing(self):
         response = self.client.post(
             CREATE_URL,
-            body(website="http://spam.example", location=mapbox()),
+            body(website="http://spam.example", location=place()),
             format="json",
         )
 
@@ -469,10 +469,10 @@ class APITests(APITestCase):
     def test_a_broken_location_is_dropped_not_rejected(self):
         """Bad coordinates cost the FK, never the signup."""
         cases = [
-            mapbox(latitude=999, longitude=75.7804),
-            mapbox(latitude=11.2588, longitude=-500),
-            mapbox(latitude="not a number", longitude="also not"),
-            mapbox(latitude=None, longitude=None),
+            place(latitude=999, longitude=75.7804),
+            place(latitude=11.2588, longitude=-500),
+            place(latitude="not a number", longitude="also not"),
+            place(latitude=None, longitude=None),
         ]
 
         for index, location in enumerate(cases):
@@ -529,7 +529,7 @@ class APITests(APITestCase):
     def test_card_payload_leaks_nothing(self):
         self.client.post(
             CREATE_URL,
-            body(email="a@b.com", instagram="@arjun", location=mapbox()),
+            body(email="a@b.com", instagram="@arjun", location=place()),
             format="json",
         )
 

@@ -249,8 +249,12 @@ class Command(BaseCommand):
     def _seed_locations(self):
         locations = {}
         for name, city, state, country, code, lat, lng in CITIES:
+            # provider=manual: these are hand-written coordinates with no
+            # place_id behind them, and the refresh job must not try to look
+            # them up against Google.
             loc, _ = Location.objects.get_or_create(
                 name=name,
+                provider=Location.Provider.MANUAL,
                 latitude=lat,
                 longitude=lng,
                 defaults={

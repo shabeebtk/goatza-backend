@@ -33,7 +33,7 @@ this app different from every other write path in the codebase:
     level: the client may send none, the coordinates may be missing, and
     LocationService may raise or come back empty. Each of those saves the
     signup with whatever text was given and ``location=None``. A player lost
-    because Mapbox was slow is a player lost for nothing.
+    because place search was slow is a player lost for nothing.
 """
 
 import logging
@@ -218,7 +218,7 @@ class PlayerSignupService:
     @classmethod
     def resolve_location(cls, raw) -> dict:
         """
-        Turn the Mapbox result the client sent into model fields.
+        Turn the place-picker result the client sent into model fields.
 
         Returns the ``location`` FK plus the denormalised copy, ready to be
         merged into the create payload. The dict is always usable — there is no
@@ -304,7 +304,7 @@ class PlayerSignupService:
         them they are already in and which number they are, not raise.
 
         ``location`` is read out of the payload separately from the allow-list:
-        it arrives as the Mapbox object the client picked, not as columns, and
+        it arrives as the place object the client picked, not as columns, and
         ``resolve_location`` is what turns it into columns.
         """
         payload = {

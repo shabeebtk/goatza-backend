@@ -3,7 +3,7 @@ from django.conf import settings
 from django.db.models import Q
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
-from shared.models import BaseUUIDModel
+from shared.models import BaseUUIDModel, Location
 from accounts.models import User
 from sports.models import Sport
 
@@ -146,6 +146,19 @@ class OrganizationLocation(BaseUUIDModel):
     name = models.CharField(max_length=255, blank=True)  # e.g. "Main Branch"
 
     address = models.CharField(max_length=500, blank=True)
+
+    # The shared place this branch sits at. Nullable because a branch typed in
+    # by hand (or written before the picker existed) has no resolved place, and
+    # SET_NULL because losing the place must never delete the branch. The
+    # columns below stay as denormalized copies — explore reads them directly,
+    # and the refresh job writes coordinates back through this FK.
+    location = models.ForeignKey(
+        Location,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="organization_locations"
+    )
 
     city = models.CharField(max_length=100, db_index=True)
     state = models.CharField(max_length=100, blank=True)
