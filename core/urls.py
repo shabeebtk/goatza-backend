@@ -46,4 +46,11 @@ urlpatterns = [
     path('matches/', include('matches.urls')),
 
     path('moderation/', include('moderation.urls')),
+
+    # Google Places proxy. AllowAny, but deliberately NOT under 'public/':
+    # core.public_urls is an allow-list of anonymous reads of OUR data, and
+    # these two endpoints read none of it — they spend money at Google. The
+    # guard that matters is places.throttles plus the daily cap, not a
+    # permission class. The public /join city picker is why they are open.
+    path('places/', include('places.urls')),
 ]

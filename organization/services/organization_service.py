@@ -2,6 +2,7 @@ import logging
 from django.db import IntegrityError, transaction
 from core.constant import TYPE_ORGANIZATION
 from sports.models import Sport
+from organization.services.organization_location_service import resolve_place
 from usernames.exceptions import UsernameTaken
 from usernames.services.username_service import (
     GENERATE_CLAIM_ATTEMPTS,
@@ -107,17 +108,24 @@ class OrganizationService:
             )
 
             # LOCATION (optional)
+            # The payload is one branch: `name`/`address` are the org's own,
+            # everything else describes the place and goes through the shared
+            # LocationService so the FK — and therefore coordinate refresh —
+            # points at the same row every other actor uses.
             location = data.get('location', {})
             if location and isinstance(location, dict) and location.get('city'):
+                place, columns = resolve_place(location)
+
                 OrganizationLocation.objects.create(
                     organization=org,
                     name=location.get("name", ""),
                     address=location.get("address", ""),
-                    city=location.get("city", ""),
-                    state=location.get("state", ""),
-                    country_code=location.get("country_code", ""),
-                    latitude=location.get("latitude"),
-                    longitude=location.get("longitude"),
+                    location=place,
+                    city=columns["city"],
+                    state=columns["state"],
+                    country_code=columns["country_code"],
+                    latitude=columns["latitude"],
+                    longitude=columns["longitude"],
                     is_primary=True
                 )
 

@@ -15,6 +15,7 @@ from recruitments.models import (
     RecruitmentEligibilityCriteria
 )
 from sports.models import Sport
+from services.location.location_service import LocationService
 from services.storage.factory import get_storage_service
 from services.storage.validators import (
     allowed_image_extensions,
@@ -59,6 +60,62 @@ class RecruitmentService:
         Recruitment.Status.CANCELLED: set(),
     }
 
+    # =================================================================
+    # LOCATION
+    # =================================================================
+
+    @staticmethod
+    def _resolve_location(location_data):
+        """
+        Turn the place payload (docs/PLACES_MIGRATION.md 5.4) into the FK plus
+        the denormalized copy, as ``(location, fields)``.
+
+        A missing block means "no location" — this returns the cleared shape, so
+        create and update both write the same thing and an edit that drops the
+        block clears the row rather than leaving a stale venue behind.
+
+        The FK matters even though every distance query reads the denormalized
+        columns: it is what ``LocationService.propagate_coords`` follows when
+        the refresh job re-fetches (or expires) a place's coordinates. A
+        recruitment that stored only the strings would keep whatever the client
+        sent forever.
+        """
+        cleared = {
+            "location": None,
+            "location_name": "",
+            "city": "",
+            "country_code": "",
+            "latitude": None,
+            "longitude": None,
+        }
+
+        if not location_data:
+            return None, cleared
+
+        try:
+            location = LocationService.get_or_create_location(location_data)
+        except ValueError as e:
+            # Missing / out-of-range coordinates on a place we have never seen.
+            raise ValidationError({"location": [str(e)]})
+
+        if location is None:
+            # get_or_create_location's race fallback can come back empty. Keep
+            # the recruitment, keep the text, lose only the FK.
+            logger.warning(
+                "RecruitmentService | Location resolved to nothing | "
+                f"name={location_data.get('name') or '-'}"
+            )
+            return None, {
+                **cleared,
+                "location_name": location_data.get("name", ""),
+                "city": location_data.get("city", ""),
+                "country_code": location_data.get("country_code", ""),
+                "latitude": location_data.get("latitude"),
+                "longitude": location_data.get("longitude"),
+            }
+
+        return location, LocationService.build_denormalized(location)
+
     @staticmethod
     @transaction.atomic
     def create_recruitment(actor, validated_data):
@@ -99,19 +156,9 @@ class RecruitmentService:
         sport = Sport.objects.get(id=sport_id)
 
         # LOCATION
-        location = None
-        location_name = ""
-        city = ""
-        country_code = ""
-        latitude = None
-        longitude = None
-
-        if location_data:
-            location_name = location_data.get("name", "")
-            city = location_data.get("city", "")
-            country_code = location_data.get("country_code", "")
-            latitude = location_data.get("latitude")
-            longitude = location_data.get("longitude")
+        location, location_fields = RecruitmentService._resolve_location(
+            location_data
+        )
 
         # CREATE RECRUITMENT
         recruitment = Recruitment.objects.create(
@@ -126,11 +173,11 @@ class RecruitmentService:
             published_at=published_at,
 
             location=location,
-            location_name=location_name,
-            city=city,
-            country_code=country_code,
-            latitude=latitude,
-            longitude=longitude,
+            location_name=location_fields["location_name"],
+            city=location_fields["city"],
+            country_code=location_fields["country_code"],
+            latitude=location_fields["latitude"],
+            longitude=location_fields["longitude"],
 
             **validated_data
         )
@@ -201,27 +248,22 @@ class RecruitmentService:
 
         sport = Sport.objects.get(id=sport_id)
 
-        # LOCATION — handled the same way create does
-        location_name = ""
-        city = ""
-        country_code = ""
-        latitude = None
-        longitude = None
-
-        if location_data:
-            location_name = location_data.get("name", "")
-            city = location_data.get("city", "")
-            country_code = location_data.get("country_code", "")
-            latitude = location_data.get("latitude")
-            longitude = location_data.get("longitude")
+        # LOCATION — handled the same way create does. An absent block is a
+        # removal, and that clears the FK too: leaving it set would keep the
+        # recruitment on the refresh job's active list for a place it no longer
+        # names.
+        location, location_fields = RecruitmentService._resolve_location(
+            location_data
+        )
 
         # SCALAR FIELDS
         recruitment.sport = sport
-        recruitment.location_name = location_name
-        recruitment.city = city
-        recruitment.country_code = country_code
-        recruitment.latitude = latitude
-        recruitment.longitude = longitude
+        recruitment.location = location
+        recruitment.location_name = location_fields["location_name"]
+        recruitment.city = location_fields["city"]
+        recruitment.country_code = location_fields["country_code"]
+        recruitment.latitude = location_fields["latitude"]
+        recruitment.longitude = location_fields["longitude"]
 
         for field, value in validated_data.items():
             setattr(recruitment, field, value)

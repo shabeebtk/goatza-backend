@@ -4,6 +4,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import serializers
 from core.views.base_views import BaseAPIView
 from organization.models import Organization, OrganizationLocation
+from organization.services.organization_location_service import resolve_place
 from organization.services.organization_member_service import OrganizationMemberService
 from utils.response import response_data
 from organization.serializers.organization_location_serializers import UpsertOrganizationLocationSerializer
@@ -45,6 +46,12 @@ class OrganizationLocationAPIView(BaseAPIView):
             location_id = data.get("id")
             is_primary = data.get("is_primary", False)
 
+            # The place half of the payload, resolved once for both branches
+            # below. `place` is the shared Location row (None when there is
+            # nothing to resolve); `columns` are the denormalized copies, taken
+            # from that row when it resolved and from the payload otherwise.
+            place, columns = resolve_place(data)
+
             with transaction.atomic():
                 # Enforce unique primary location constraint if setting this one to primary
                 if is_primary:
@@ -56,11 +63,16 @@ class OrganizationLocationAPIView(BaseAPIView):
                         loc = OrganizationLocation.objects.get(id=location_id, organization=org)
                         loc.name = data.get("name", loc.name)
                         loc.address = data.get("address", loc.address)
-                        loc.city = data.get("city", loc.city)
-                        loc.state = data.get("state", loc.state)
-                        loc.country_code = data.get("country_code", loc.country_code)
-                        if "latitude" in data: loc.latitude = data["latitude"]
-                        if "longitude" in data: loc.longitude = data["longitude"]
+                        loc.location = place
+                        loc.city = columns["city"] or loc.city
+                        loc.state = columns["state"] or loc.state
+                        loc.country_code = (
+                            columns["country_code"] or loc.country_code
+                        )
+                        if "latitude" in data or place is not None:
+                            loc.latitude = columns["latitude"]
+                        if "longitude" in data or place is not None:
+                            loc.longitude = columns["longitude"]
                         loc.is_primary = is_primary
                         loc.save()
                         message = "Location updated successfully"
@@ -76,11 +88,12 @@ class OrganizationLocationAPIView(BaseAPIView):
                         organization=org,
                         name=data.get("name", ""),
                         address=data.get("address", ""),
-                        city=data.get("city"),
-                        state=data.get("state", ""),
-                        country_code=data.get("country_code"),
-                        latitude=data.get("latitude"),
-                        longitude=data.get("longitude"),
+                        location=place,
+                        city=columns["city"],
+                        state=columns["state"],
+                        country_code=columns["country_code"],
+                        latitude=columns["latitude"],
+                        longitude=columns["longitude"],
                         is_primary=is_primary
                     )
                     message = "Location added successfully"

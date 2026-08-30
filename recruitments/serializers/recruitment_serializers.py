@@ -9,6 +9,7 @@ from recruitments.models import (
     RecruitmentContact,
 )
 from sports.models import SportPosition, Sport
+from shared.models import Location
 
 # E.164-ish phone: optional leading +, then 7–15 digits (separators stripped).
 PHONE_RE = re.compile(r"^\+?\d{7,15}$")
@@ -201,17 +202,41 @@ class RecruitmentEligibilityCriteriaInputSerializer(serializers.Serializer):
 
 
 # LOCATION INPUT
+# The shared place payload (docs/PLACES_MIGRATION.md 5.4). ``provider`` +
+# ``external_id`` are the Location's identity, so they have to survive the
+# serializer — a strict Serializer drops anything not declared here, which is
+# exactly how a recruitment would end up creating a duplicate Location row.
 class RecruitmentLocationInputSerializer(serializers.Serializer):
+    provider = serializers.ChoiceField(
+        choices=Location.Provider.choices,
+        required=False,
+        default=Location.Provider.GOOGLE,
+    )
+    external_id = serializers.CharField(
+        max_length=255, required=False, allow_blank=True
+    )
     name = serializers.CharField(max_length=255)
-    # city / country_code are denormalized display strings — the model allows
-    # them blank and the service reads them with a default, so don't hard-require
-    # them. Mapbox results other than type "place" may carry no city/country.
+    type = serializers.ChoiceField(
+        choices=Location.Type.choices,
+        required=False,
+        default=Location.Type.PLACE,
+    )
+    # city / state / country / country_code are denormalized display strings —
+    # the model allows them blank and the service reads them with a default, so
+    # don't hard-require them. A venue result outside a named locality may carry
+    # no city or country at all.
     city = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    state = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    country = serializers.CharField(
+        max_length=100, required=False, allow_blank=True
+    )
     country_code = serializers.CharField(
         max_length=5, required=False, allow_blank=True
     )
-    latitude = serializers.FloatField()
-    longitude = serializers.FloatField()
+    # Nullable now: a place is identified by its id, and its coordinates are a
+    # cache that can be absent or expired.
+    latitude = serializers.FloatField(required=False, allow_null=True)
+    longitude = serializers.FloatField(required=False, allow_null=True)
 
 
 # CREATE RECRUITMENT SERIALIZER
