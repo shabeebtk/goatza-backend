@@ -42,6 +42,7 @@ class ExplorePlayersTests(APITestCase):
             username=username,
             role=role,
         )
+        accept_current_terms(user)
         if with_profile:
             UserProfile.objects.create(
                 user=user,
@@ -244,6 +245,7 @@ class ExploreOrganizationsTests(APITestCase):
         self.me = User.objects.create_user(
             email="me@example.com", password="pass1234", username="me"
         )
+        accept_current_terms(self.me)
         UserProfile.objects.create(
             user=self.me, name="Me", latitude=BASE_LAT, longitude=BASE_LNG
         )
@@ -333,6 +335,7 @@ class ExploreOrganizationsTests(APITestCase):
         flat = User.objects.create_user(
             email="flat@example.com", password="pass1234", username="flat"
         )
+        accept_current_terms(flat)
         UserProfile.objects.create(user=flat, name="Flat")  # no coords
 
         lo = self._org("lo", "Lo FC", followers=2)
@@ -355,6 +358,7 @@ class ExploreOrganizationsTests(APITestCase):
         flat = User.objects.create_user(
             email="f2@example.com", password="pass1234", username="f2"
         )
+        accept_current_terms(flat)
         UserProfile.objects.create(user=flat, name="F2")
 
         club = self._org("club1", "Club One", type=Organization.Type.CLUB)
@@ -379,6 +383,7 @@ class ExploreOrganizationsTests(APITestCase):
         flat = User.objects.create_user(
             email="f3@example.com", password="pass1234", username="f3"
         )
+        accept_current_terms(flat)
         UserProfile.objects.create(user=flat, name="F3")
 
         active = self._org("active", "Active FC", followers=5)
@@ -409,6 +414,7 @@ class ExploreOrganizationsTests(APITestCase):
         flat = User.objects.create_user(
             email="f4@example.com", password="pass1234", username="f4"
         )
+        accept_current_terms(flat)
         UserProfile.objects.create(user=flat, name="F4")
         created = [self._org(f"o{i}", f"O{i}", followers=i) for i in range(23)]
 
@@ -444,6 +450,7 @@ class ExploreTrendingPostsTests(APITestCase):
             password="pass1234",
             username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(
             user=user, name=name,
             profile_photo=f"https://cdn.example.com/{username}.jpg",
@@ -696,6 +703,7 @@ class ExplorePlayersFilterTests(APITestCase):
             username=username,
             role=User.Role.PLAYER,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(
             user=user,
             name=name,
@@ -918,6 +926,7 @@ class ExploreOrganizationsFilterTests(APITestCase):
         self.me = User.objects.create_user(
             email="me@example.com", password="pass1234", username="me"
         )
+        accept_current_terms(self.me)
         UserProfile.objects.create(
             user=self.me, name="Me", latitude=BASE_LAT, longitude=BASE_LNG
         )
@@ -1046,6 +1055,7 @@ from django.core.cache import cache
 from feed.models import ActorAffinity, PostImpression
 from feed.services.feed_services import MAX_POSTS_PER_AUTHOR_PER_PAGE, PAGE_SIZE
 from feed.services.ranking_services import FeedRankingService
+from legal.testing import accept_current_terms
 
 FEED_URL = "/feed/list"
 IMPRESSIONS_URL = "/feed/impressions"
@@ -1068,6 +1078,7 @@ class FeedTestBase(APITestCase):
             password="pass1234",
             username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(
             user=user, name=name,
             profile_photo=f"https://cdn.example.com/{username}.jpg",

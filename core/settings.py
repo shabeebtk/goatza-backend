@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'matches',
     'waitlist',
     'moderation',
+    'legal',
     # Google Places (New) proxy. No models — it owns the API key and the daily
     # spend guard, nothing else.
     'places',
@@ -165,6 +166,16 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    # The floor for a view that declares nothing. NOT the enforcement point:
+    # a view's own permission_classes REPLACES this list rather than adding to
+    # it, and every view in this app declares one (directly or through
+    # core.views.base_views.BaseAPIView, which carries the same pair). This is
+    # here so a view added tomorrow without a permission_classes line is closed
+    # and gated by default instead of open.
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+        'legal.permissions.HasAcceptedCurrentTerms',
+    ],
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle',
@@ -207,6 +218,11 @@ REST_FRAMEWORK = {
         # this budget is calling it for the whole list.
         'places_details': '20/min',
         'places_details_anon': '10/min',
+        # Recording legal consent (legal.throttles.LegalAcceptThrottle). Per
+        # USER, and a day's budget: signup records consent server-side without
+        # touching this endpoint, so a legitimate caller only arrives here on a
+        # version bump.
+        'legal_accept': '10/day',
     }
 }
 

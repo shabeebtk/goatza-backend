@@ -10,6 +10,7 @@ from organization.models import (
 )
 from connections.models import Follow
 from usernames.services.username_service import UsernameService
+from legal.testing import accept_current_terms
 
 LIST_URL = "/connections/user/follow/list"
 
@@ -45,6 +46,7 @@ class FollowListAPITests(APITestCase):
             email=f"{username}@example.com",
             password="pass1234",
         )
+        accept_current_terms(user)
         # Through the service, not straight onto the column: the handle only
         # resolves once UsernameRegistry holds it, and these tests fetch lists
         # BY username.

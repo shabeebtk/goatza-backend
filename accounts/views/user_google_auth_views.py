@@ -31,6 +31,11 @@ class GoogleLoginUrlView(APIView):
     """
     generates a Google OAuth2 login URL 
     """
+    # Explicit, and load-bearing. This was the ONE view in the app relying on
+    # an unset DEFAULT_PERMISSION_CLASSES (i.e. AllowAny). Now that the
+    # default is IsAuthenticated, leaving it implicit would demand a token to
+    # fetch the URL you log in WITH.
+    permission_classes = [AllowAny]
     def get(self, request):        
         # Build the Google OAuth2 authorization URL
         state = secrets.token_urlsafe(16)
@@ -129,6 +134,18 @@ class GoogleAuthCallbackView(APIView):
                     # the one-time role-selection step before they reach the app.
                     user.is_role_confirmed = False
                     user.save()
+
+                    # DELIBERATELY NO record_acceptance HERE. Unlike the email
+                    # form, nothing in the Google flow has asked this person
+                    # anything yet — they clicked a button on Google's screen.
+                    # Recording consent here would file an agreement they were
+                    # never shown, which is worse than no record at all.
+                    #
+                    # They are created pending instead, and the role step that
+                    # every new Google user must complete carries the checkbox
+                    # and posts the acceptance (SetUserRoleAPIView). /user/role
+                    # is on the gate's exempt list precisely so a pending user
+                    # can reach it.
 
                     logger.info(f"New Google user created: {email}")
 

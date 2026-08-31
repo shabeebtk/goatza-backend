@@ -2,10 +2,18 @@ import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 from asgiref.sync import sync_to_async
 
+from legal.permissions import TERMS_REQUIRED_CODE, TERMS_REQUIRED_MESSAGE
+from legal.selectors.acceptance_selectors import get_pending_documents
 from messaging.models import Conversation, ConversationParticipant
 from messaging.services.exceptions import BlockedParticipantError
 from messaging.services.message_service import MessageService
 from moderation.services.block_guard import BLOCKED_MESSAGE
+
+# Application close code for "you have not accepted the current terms". The
+# 4000-4999 range is reserved for the application, and 4403 is chosen to read
+# as the 403 the REST half of the gate returns — the client branches on it to
+# raise the same re-consent modal instead of retrying the socket forever.
+WS_CLOSE_TERMS_REQUIRED = 4403
 
 
 class ChatConsumer(AsyncWebsocketConsumer):
@@ -26,6 +34,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         if not is_allowed:
             await self.close()
+            return
+
+        # The chat socket exists to SEND. Unlike the REST surface, where the
+        # gate can let reads through and refuse writes on the same connection,
+        # there is one socket here and its purpose is the write half — so a
+        # gated user is refused it and reads history over REST instead, where
+        # GET is never gated. The notifications socket is untouched: it is
+        # server-to-client only, so there is nothing there to gate.
+        if await self._has_pending_documents():
+            await self.close(code=WS_CLOSE_TERMS_REQUIRED)
             return
 
         await self.channel_layer.group_add(
@@ -50,6 +68,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
             message_text = data.get("message")
 
             if not message_text:
+                return
+
+            # Checked again per message, not only on connect. A socket opened
+            # before a version bump stays open across it, and a connect-time
+            # check alone would let exactly the long-lived sessions we most
+            # want to stop keep writing until they happen to reconnect.
+            pending = await self._has_pending_documents()
+            if pending:
+                await self.send(json.dumps({
+                    "type": "error",
+                    "code": TERMS_REQUIRED_CODE,
+                    "message": TERMS_REQUIRED_MESSAGE,
+                    "pending_documents": pending,
+                }))
+                await self.close(code=WS_CLOSE_TERMS_REQUIRED)
                 return
 
             conversation = await sync_to_async(Conversation.objects.get)(
@@ -175,4 +208,20 @@ class ChatConsumer(AsyncWebsocketConsumer):
             user=self.actor.user if self.actor.is_user else None,
             org=self.actor.organization if self.actor.is_org else None
         ).exists()
+
+    @sync_to_async
+    def _has_pending_documents(self):
+        """
+        The documents this socket's USER still owes, or [].
+
+        Always the user, never the actor: consent is given by a person, and an
+        org actor is that same person wearing a different hat. Refreshed from
+        the database rather than read off self.user, because the scope's user
+        was loaded when the socket opened and a socket can outlive both a
+        version bump and the acceptance that clears it.
+        """
+        self.user.refresh_from_db(
+            fields=["terms_version", "privacy_version"]
+        )
+        return get_pending_documents(self.user)
 

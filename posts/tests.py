@@ -16,6 +16,7 @@ from posts.models import (
     Post, PostMedia, Like, Comment, Hashtag, PostHashtag, PostMention, SavedPost,
 )
 from sports.models import Sport
+from legal.testing import accept_current_terms
 
 SEARCH_URL = "/posts/search"
 LIST_URL = "/posts/list"
@@ -42,6 +43,7 @@ class PostSearchTests(APITestCase):
             password="pass1234",
             username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(
             user=user, name=name,
             profile_photo=f"https://cdn.example.com/{username}.jpg",
@@ -268,6 +270,7 @@ class PostUpdateTests(APITestCase):
         user = User.objects.create_user(
             email=f"{username}@example.com", password="pass1234", username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=name)
         return user
 
@@ -378,6 +381,7 @@ class CommentDeleteTests(APITestCase):
         user = User.objects.create_user(
             email=f"{username}@example.com", password="pass1234", username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=name)
         return user
 
@@ -490,6 +494,7 @@ class PostHashtagTests(APITestCase):
         self.me = User.objects.create_user(
             email="me@example.com", password="pass1234", username="me",
         )
+        accept_current_terms(self.me)
         UserProfile.objects.create(user=self.me, name="Me")
         self.client.force_authenticate(user=self.me)
 
@@ -636,6 +641,7 @@ class PostMentionTests(APITestCase):
         user = User.objects.create_user(
             email=f"{username}@example.com", password="pass1234", username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=name)
         return user
 
@@ -983,6 +989,7 @@ class SavedPostTests(APITestCase):
         user = User.objects.create_user(
             email=f"{username}@example.com", password="pass1234", username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=name)
         return user
 

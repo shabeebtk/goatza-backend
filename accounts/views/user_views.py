@@ -12,6 +12,13 @@ from utils.response import response_data
 from utils.cache import cache_set, cache_get, cache_delete
 from utils.cache_keys import CacheKeys
 from connections.services.follow_services import FollowService
+from legal.selectors.acceptance_selectors import (
+    get_pending_documents,
+    legal_status,
+)
+from legal.services.acceptance_service import record_acceptance
+from utils.request_meta import client_ip, client_user_agent
+from legal.permissions import HasAcceptedCurrentTerms
 from moderation.selectors.profile_visibility import (
     hide_if_blocked,
     profile_block_state,
@@ -97,7 +104,7 @@ class GetUserDetails(BaseAPIView):
 
 
 class GetUserDetailsByID(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     LIST_TYPE_MINI = 'mini'
     LIST_TYPE_FULL = 'full'
@@ -120,6 +127,13 @@ class GetUserDetailsByID(APIView):
                 serializer = UserSerializer(user)
 
             data = serializer.data
+
+            # Rides along on the call the client already makes at every session
+            # start, rather than a second request the gate would have to wait
+            # for. Costs nothing: get_pending_documents reads the denormalized
+            # columns on the user already loaded above and queries nothing.
+            data["legal"] = legal_status(user)
+
             return response_data(success=True, data=data)
         
         except Exception as e:
@@ -132,7 +146,7 @@ class GetUserDetailsByID(APIView):
 
 
 class CheckUsernameAvailabilityAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     def get(self, request):
         try:
@@ -208,7 +222,7 @@ class UpdateUserMediaAPIView(APIView):
         "is_delete_cover": true
     }
     '''
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     def post(self, request):
         try:
@@ -298,7 +312,7 @@ class UpdateUserMediaAPIView(APIView):
 
 
 class UpdateUserProfileAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     def patch(self, request):
         TAG = "[PROFILE UPDATE]"
@@ -494,7 +508,7 @@ class SetUserRoleAPIView(APIView):
     confirmed the endpoint rejects further changes, and role is deliberately absent
     from UpdateUserProfileSerializer so it can't be edited elsewhere.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     def post(self, request):
         TAG = "[SET ROLE]"
@@ -511,6 +525,34 @@ class SetUserRoleAPIView(APIView):
         if user.is_role_confirmed and user.is_onboarding_completed:
             logger.warning(f"{TAG} Role locked (onboarding complete) user={user.id}")
             return response_data(False, "Role already set", status_code=400)
+
+        # THE CONSENT STEP FOR GOOGLE SIGNUPS.
+        #
+        # An email signup accepted at the form and arrives here with nothing
+        # pending, so this is a no-op for them. A Google user was created
+        # without being asked anything, so this — the step they cannot skip —
+        # is where the checkbox lives and where the agreement is filed.
+        #
+        # Required, not optional: the client showing a checkbox is a UI
+        # promise, and a UI promise is not a consent record. If documents are
+        # pending, the role does not get set without one.
+        pending = get_pending_documents(user)
+        if pending:
+            if request.data.get("accepted_terms") is not True:
+                logger.warning(f"{TAG} Consent missing user={user.id}")
+                return response_data(
+                    False,
+                    "You must accept the terms and privacy policy",
+                    status_code=400,
+                )
+
+            record_acceptance(
+                user=user,
+                documents=pending,
+                ip_address=client_ip(request),
+                user_agent=client_user_agent(request),
+            )
+            logger.info(f"{TAG} Consent recorded user={user.id}")
 
         user.role = role
         user.is_role_confirmed = True
@@ -533,7 +575,7 @@ class CompleteOnboardingAPIView(APIView):
     success. After this succeeds the user's role becomes permanently locked (see
     SetUserRoleAPIView).
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     def post(self, request):
         TAG = "[COMPLETE ONBOARDING]"

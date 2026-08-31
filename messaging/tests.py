@@ -19,6 +19,7 @@ from organization.models import Organization, OrganizationMember
 from posts.models import Post, PostMedia
 from recruitments.models import Recruitment, RecruitmentMedia
 from sports.models import Sport
+from legal.testing import accept_current_terms
 
 SHARE_URL = "/conversations/share"
 MESSAGES_URL = "/conversations/messages/list"
@@ -106,6 +107,7 @@ class MessagingShareTestCase(APITestCase):
             password="pass1234",
             username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=username.title())
         return user
 
@@ -1630,6 +1632,7 @@ class ChatUploadSignatureTests(APITestCase):
         self.user = User.objects.create_user(
             email="sig@example.com", password="pass1234", username="siguser",
         )
+        accept_current_terms(self.user)
         UserProfile.objects.create(user=self.user, name="Sig User")
         self.org = Organization.objects.create(
             name="Sig FC", username="sigfc", type=Organization.Type.CLUB,
