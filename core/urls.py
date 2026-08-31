@@ -47,6 +47,12 @@ urlpatterns = [
 
     path('moderation/', include('moderation.urls')),
 
+    # Terms/privacy versions and the consent write. 'versions' is AllowAny but
+    # not under 'public/' for the same reason places is not: that prefix is an
+    # allow-list of anonymous reads of OUR data, and this returns four
+    # published constants. The signup form needs it before an account exists.
+    path('legal/', include('legal.urls')),
+
     # Google Places proxy. AllowAny, but deliberately NOT under 'public/':
     # core.public_urls is an allow-list of anonymous reads of OUR data, and
     # these two endpoints read none of it — they spend money at Google. The

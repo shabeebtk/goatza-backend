@@ -57,9 +57,9 @@ USERNAME_CHARSET_RE = re.compile(r"^[a-z0-9_]+$")
 # page. WHEN A ROUTE IS ADDED TO THE FRONTEND, ADD IT HERE.
 RESERVED_USERNAMES = frozenset({
     # ── frontend route segments (src/app/**) ──────────────────
-    "auth", "card", "chat", "coaching", "cv", "explore", "highlights",
-    "home", "join", "matches", "messages", "notifications", "organization",
-    "posts", "recruitments", "scouting", "search",
+    "auth", "card", "chat", "coaching", "cv", "explore", "guidelines",
+    "highlights", "home", "join", "matches", "messages", "notifications",
+    "organization", "posts", "recruitments", "safety", "scouting", "search",
 
     # ── pre-existing entries (kept) ───────────────────────────
     "admin", "root", "support", "help", "api", "system",

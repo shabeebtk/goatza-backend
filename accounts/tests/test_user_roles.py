@@ -1,10 +1,12 @@
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import User, UserProfile
 from accounts.serializers.user_serializers import UserSerializer, UserFullSerializer
+from legal.testing import accept_current_terms
 
 # accounts.urls is mounted under /user/ (see core/urls.py)
 SIGNUP_URL = "/user/signup"
@@ -15,6 +17,11 @@ class SignupRoleTests(TestCase):
     """Role must be captured (and validated) at email/OTP signup time."""
 
     def setUp(self):
+        # SignupThrottle is 5/min and DRF counts in the shared cache, so this
+        # class inherits whatever budget the tests before it spent — including
+        # the signup consent tests in legal/. Without the clear, the four-role
+        # loop below 429s depending only on test ORDER.
+        cache.clear()
         self.client = APIClient()
 
     @patch("accounts.views.user_auth_views.send_email_async")
@@ -29,6 +36,9 @@ class SignupRoleTests(TestCase):
                     "email": email,
                     "password": "password123",
                     "role": role,
+                    # Required since consent moved server-side — see
+                    # legal/tests/test_legal_api.py for the rejection case.
+                    "accepted_terms": True,
                 },
                 format="json",
             )
@@ -102,6 +112,7 @@ class SetUserRoleTests(TestCase):
             is_role_confirmed=is_role_confirmed,
             is_onboarding_completed=is_onboarding_completed,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name="OAuth User")
         return user
 
@@ -198,6 +209,7 @@ class UserSerializerRoleTests(TestCase):
             password="password123",
             role=User.Role.SCOUT,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name="Ser User")
 
         data = UserSerializer(user).data
@@ -213,6 +225,7 @@ class UserSerializerRoleTests(TestCase):
             username="onbuser",
             password="password123",
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name="Onb User")
 
         data = UserSerializer(user).data
@@ -228,6 +241,7 @@ class UserSerializerRoleTests(TestCase):
             username="genderuser",
             password="password123",
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name="Gender User", gender="female")
 
         data = UserFullSerializer(user).data
@@ -252,6 +266,7 @@ class CompleteOnboardingTests(TestCase):
             password="password123",
             is_onboarding_completed=is_onboarding_completed,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name="Onb User")
         return user
 

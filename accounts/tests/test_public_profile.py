@@ -42,6 +42,7 @@ from sports.models import (
     UserAttributeValue,
     UserSport,
 )
+from legal.testing import accept_current_terms
 
 PROFILE_URL = "/public/profile/{}"
 PROFILE_POSTS_URL = "/public/profile/{}/posts"
@@ -79,6 +80,7 @@ class PublicProfileTestCase(APITestCase):
             username=username,
             role=role or User.Role.PLAYER,
         )
+        accept_current_terms(user)
         if not is_active:
             user.is_active = False
             user.save(update_fields=["is_active"])
@@ -375,6 +377,7 @@ class PublicProfileNotFoundTests(PublicProfileTestCase):
         user = User.objects.create_user(
             email="nousername@example.com", password="pass1234",
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name="No Handle")
 
         self.assertIsNone(user.username)
@@ -568,10 +571,12 @@ class FollowServiceAnonymousTests(APITestCase):
         alice = User.objects.create_user(
             email="a@example.com", password="pass1234", username="alice",
         )
+        accept_current_terms(alice)
         UserProfile.objects.create(user=alice, name="Alice")
         bob = User.objects.create_user(
             email="b@example.com", password="pass1234", username="bob",
         )
+        accept_current_terms(bob)
         UserProfile.objects.create(user=bob, name="Bob")
 
         Follow.objects.create(follower_user=alice, following_user=bob)

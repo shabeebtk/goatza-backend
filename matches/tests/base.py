@@ -31,6 +31,7 @@ from organization.models import (
     OrganizationProfile,
 )
 from sports.models import Sport, SportPosition
+from legal.testing import accept_current_terms
 
 BASE_URL = "/matches"
 CREATE_URL = f"{BASE_URL}/create"
@@ -141,6 +142,7 @@ class MatchDiaryTestCase(APITestCase):
             username=username,
             role=role,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=username.title())
         return user
 

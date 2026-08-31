@@ -31,6 +31,7 @@ from utils.validations import (
     USERNAME_MAX_LENGTH,
     validate_username_format,
 )
+from legal.testing import accept_current_terms
 
 CHECK_URL = "/user/check/username/availability"
 UPDATE_PROFILE_URL = "/user/update/profile/data"
@@ -39,6 +40,7 @@ ORG_UPDATE_URL = "/organizations/update"
 
 def make_user(email, username=None, name="Player"):
     user = User.objects.create_user(email=email, password="password123")
+    accept_current_terms(user)
     UserProfile.objects.create(user=user, name=name)
     if username:
         UsernameService.claim(username, user=user)
@@ -92,9 +94,10 @@ class ValidatorTests(TestCase):
         # /[username] sits directly beside these; a user holding one shadows
         # the real page.
         for segment in (
-            "auth", "card", "chat", "coaching", "cv", "explore", "highlights",
-            "home", "join", "matches", "messages", "notifications",
-            "organization", "posts", "recruitments", "scouting", "search",
+            "auth", "card", "chat", "coaching", "cv", "explore", "guidelines",
+            "highlights", "home", "join", "matches", "messages",
+            "notifications", "organization", "posts", "recruitments", "safety",
+            "scouting", "search",
         ):
             self.assertIn(segment, RESERVED_USERNAMES, segment)
 
@@ -558,6 +561,7 @@ class BackfillMigrationTests(TestCase):
         self.user = User.objects.create_user(
             email="backfill@example.com", password="password123", username="playerone"
         )
+        accept_current_terms(self.user)
         UserProfile.objects.create(user=self.user, name="Player One")
         self.org = Organization.objects.create(
             name="Backfill FC",
@@ -583,6 +587,7 @@ class BackfillMigrationTests(TestCase):
         handleless = User.objects.create_user(
             email="nohandle@example.com", password="password123"
         )
+        accept_current_terms(handleless)
 
         backfill(django_apps, None)
 

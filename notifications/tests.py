@@ -26,6 +26,7 @@ from organization.models import Organization, OrganizationProfile
 from posts.models import Post
 from recruitments.models import Recruitment
 from sports.models import Sport
+from legal.testing import accept_current_terms
 
 
 @override_settings(
@@ -61,6 +62,7 @@ class NotificationDeepLinkTests(TestCase):
             password="pass1234",
             username=username,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=username.title())
         return user
 

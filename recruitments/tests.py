@@ -38,6 +38,7 @@ from recruitments.services.match_score_service import (
     MATCH_WEIGHTS, MatchScoreService,
 )
 from notifications.models import Notification
+from legal.testing import accept_current_terms
 
 SIGNATURE_URL = "/user/get/upload/signature"
 CREATE_URL = "/recruitments/create"
@@ -54,11 +55,13 @@ class RecruitmentMediaPipelineTests(APITestCase):
             password="pass1234",
             username="owner",
         )
+        accept_current_terms(self.user)
         self.other_user = User.objects.create_user(
             email="stranger@example.com",
             password="pass1234",
             username="stranger",
         )
+        accept_current_terms(self.other_user)
 
         self.org = Organization.objects.create(
             name="Dream FC",
@@ -321,6 +324,7 @@ class RecruitmentValidationTests(APITestCase):
             password="pass1234",
             username="owner2",
         )
+        accept_current_terms(self.user)
         self.org = Organization.objects.create(
             name="Kite FC",
             username="kitefc",
@@ -640,6 +644,7 @@ class RecruitmentValidationTests(APITestCase):
         follower = User.objects.create_user(
             email="fan@example.com", password="pass1234", username="fan"
         )
+        accept_current_terms(follower)
         Follow.objects.create(follower_user=follower, following_org=self.org)
         follower_actor = Actor(actor_type="user", user=follower)
 
@@ -665,6 +670,7 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         self.owner = User.objects.create_user(
             email="own_l@example.com", password="pass1234", username="owner_l"
         )
+        accept_current_terms(self.owner)
         self.org = Organization.objects.create(
             name="Lion FC", username="lionfc", type=Organization.Type.CLUB
         )
@@ -675,9 +681,11 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         self.player = User.objects.create_user(
             email="p1_l@example.com", password="pass1234", username="player1_l"
         )
+        accept_current_terms(self.player)
         self.other = User.objects.create_user(
             email="p2_l@example.com", password="pass1234", username="player2_l"
         )
+        accept_current_terms(self.other)
         self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
         self.recruitment = Recruitment.objects.create(
             organization=self.org, sport=self.sport,
@@ -949,6 +957,7 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         third = User.objects.create_user(
             email="p3_l@example.com", password="pass1234", username="player3_l"
         )
+        accept_current_terms(third)
         a_nochange = self._make_app(third, "shortlisted")
         missing = str(uuid.uuid4())
 
@@ -1126,10 +1135,12 @@ class RecruitmentDiscoveryTests(APITestCase):
             email="disc_p@example.com", password="pass1234",
             username="disc_player",
         )
+        accept_current_terms(self.player)
         self.owner = User.objects.create_user(
             email="disc_o@example.com", password="pass1234",
             username="disc_owner",
         )
+        accept_current_terms(self.owner)
         self.org = Organization.objects.create(
             name="Falcon Academy", username="falconacademy",
             type=Organization.Type.CLUB,
@@ -1298,6 +1309,7 @@ class RecruitmentDiscoveryTests(APITestCase):
         other = User.objects.create_user(
             email="disc_x@example.com", password="pass1234", username="disc_x"
         )
+        accept_current_terms(other)
         self._make_app(r1, applicant=other)
 
         resp = self._my_apps()
@@ -1387,6 +1399,7 @@ class RecruitmentEligibilityTests(APITestCase):
             email="elig_o@example.com", password="pass1234",
             username="elig_owner",
         )
+        accept_current_terms(self.owner)
         self.org = Organization.objects.create(
             name="Eagle FC", username="eaglefc", type=Organization.Type.CLUB,
         )
@@ -1398,10 +1411,12 @@ class RecruitmentEligibilityTests(APITestCase):
             email="elig_p@example.com", password="pass1234",
             username="elig_player",
         )
+        accept_current_terms(self.player)
         self.other_player = User.objects.create_user(
             email="elig_p2@example.com", password="pass1234",
             username="elig_player2",
         )
+        accept_current_terms(self.other_player)
         self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
 
     # ── helpers ──────────────────────────────────────────────────
@@ -2143,6 +2158,7 @@ class RecruitmentMatchScoreTests(APITestCase):
             email="score_p@example.com", password="pass1234",
             username="score_player",
         )
+        accept_current_terms(self.player)
         today = timezone.now().date()
         self.profile = UserProfile.objects.create(
             user=self.player, name="Striker",
@@ -2374,6 +2390,7 @@ class RecruitmentDiscoverAPITests(APITestCase):
             email="disc_api@example.com", password="pass1234",
             username="disc_api_player",
         )
+        accept_current_terms(self.player)
         today = timezone.now().date()
         self.profile = UserProfile.objects.create(
             user=self.player, name="Player",
@@ -2386,6 +2403,7 @@ class RecruitmentDiscoverAPITests(APITestCase):
             email="disc_api_o@example.com", password="pass1234",
             username="disc_api_owner",
         )
+        accept_current_terms(self.owner)
         self.org = Organization.objects.create(
             name="Coastal FC", username="coastalfc",
             type=Organization.Type.CLUB,
@@ -2649,6 +2667,7 @@ class RecruitmentAllTabFilterTests(APITestCase):
             email="all_tab@example.com", password="pass1234",
             username="all_tab_player",
         )
+        accept_current_terms(self.player)
         today = timezone.now().date()
         self.profile = UserProfile.objects.create(
             user=self.player, name="Player",
@@ -2659,6 +2678,7 @@ class RecruitmentAllTabFilterTests(APITestCase):
             email="all_tab_o@example.com", password="pass1234",
             username="all_tab_owner",
         )
+        accept_current_terms(self.owner)
         self.org = Organization.objects.create(
             name="Harbour FC", username="harbourfc",
             type=Organization.Type.CLUB,
@@ -2854,6 +2874,7 @@ class RecruitmentApplyFlowIsolationTests(APITestCase):
             email="iso_p@example.com", password="pass1234",
             username="iso_player",
         )
+        accept_current_terms(self.player)
         today = timezone.now().date()
         UserProfile.objects.create(
             user=self.player, name="Player",

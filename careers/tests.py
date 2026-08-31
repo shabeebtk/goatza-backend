@@ -48,6 +48,7 @@ from recruitments.models import (
 )
 from recruitments.services.application_service import ApplicationService
 from sports.models import Sport, SportPosition
+from legal.testing import accept_current_terms
 
 
 @override_settings(
@@ -82,6 +83,7 @@ class CareerEntryServiceTestCase(TestCase):
             username=username,
             role=role,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=username.title())
         return user
 

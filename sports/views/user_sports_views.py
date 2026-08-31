@@ -13,11 +13,12 @@ from sports.serializers.user_sports_serializers import (
     UserSportFullSerializer, UserSportMiniSerializer
 )
 from accounts.models import User
+from legal.permissions import HasAcceptedCurrentTerms
 
 logger = logging.getLogger(__name__)
 
 class UserSportListAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     LIST_TYPE_All = "all"
 
@@ -79,7 +80,7 @@ class UserSportCreateAPIView(APIView):
         ]
         }
     '''
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     @transaction.atomic
     def post(self, request):
@@ -188,7 +189,7 @@ class UserSportUpsertAPIView(APIView):
     }
     '''
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     @transaction.atomic
     def post(self, request):
@@ -310,7 +311,7 @@ class UserSportDeleteAPIView(APIView):
     Expected request: DELETE /user/sport/delete?sport_id=uuid
     or DELETE with JSON body {"sport_id": "uuid"}
     '''
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     @transaction.atomic
     def delete(self, request):

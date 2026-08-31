@@ -63,6 +63,17 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
 
+    # Denormalized copy of the latest legal acceptance per gating document. The
+    # system of record is legal.LegalAcceptance, which is append-only; these are
+    # a cache of its newest row per document so the consent gate is a field read
+    # on the already-loaded user, not a query on every request. Written ONLY by
+    # legal.services.acceptance_service.record_acceptance, and rebuildable from
+    # that table. NULL means never accepted, which reads as pending.
+    terms_version = models.CharField(max_length=20, null=True, blank=True)
+    terms_accepted_at = models.DateTimeField(null=True, blank=True)
+    privacy_version = models.CharField(max_length=20, null=True, blank=True)
+    privacy_accepted_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

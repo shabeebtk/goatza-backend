@@ -17,6 +17,8 @@ from rest_framework_simplejwt.token_blacklist.models import (
 )
 from accounts.serializers.user_serializers import UserSerializer
 from accounts.services.login_service import on_successful_login
+from legal.constants import REQUIRED_DOCUMENTS
+from legal.services.acceptance_service import record_acceptance
 from usernames.services.username_service import UsernameService
 from utils.response import response_data
 from utils.validations import is_valid_email, is_valid_password
@@ -27,6 +29,8 @@ from accounts.throttles import (
     ChangePasswordThrottle
 )
 from utils.cookies import set_refresh_key_cookie, delete_refresh_key_cookie
+from utils.request_meta import client_ip, client_user_agent
+from legal.permissions import HasAcceptedCurrentTerms
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,7 @@ class UserSignupAPIView(APIView):
         password = request.data.get("password")
         name = request.data.get("name")
         role = request.data.get("role")
+        accepted_terms = request.data.get("accepted_terms")
 
         if not email or not password:
             return response_data(False, "Email and password are required", status_code=400)
@@ -56,6 +61,18 @@ class UserSignupAPIView(APIView):
 
         if role not in User.Role.values:
             return response_data(False, "Invalid role", status_code=400)
+
+        # CONSENT IS A PRECONDITION OF THE ACCOUNT, not a step after it. The
+        # user is anonymous until they verify the OTP, so there is no window in
+        # which the client could call legal/accept for them — if this were
+        # optional here, an account could exist with nothing on file at all.
+        # Strictly True: a missing key, "", "false" and 0 are all not-consent.
+        if accepted_terms is not True:
+            return response_data(
+                False,
+                "You must accept the terms and privacy policy",
+                status_code=400
+            )
 
         if not name:
             name = email.split("@")[0]
@@ -76,6 +93,17 @@ class UserSignupAPIView(APIView):
                 UsernameService.generate_and_claim(name, user=user)
 
                 UserProfile.objects.create(user=user, name=name)
+
+                # Same transaction as the user row, so the two can never
+                # disagree: no account exists without its acceptance on file,
+                # and no acceptance exists for an account that was rolled back.
+                # Version comes from the registry, never from the client.
+                record_acceptance(
+                    user=user,
+                    documents=list(REQUIRED_DOCUMENTS),
+                    ip_address=client_ip(request),
+                    user_agent=client_user_agent(request),
+                )
 
                 otp = generate_otp(email)
 
@@ -328,7 +356,7 @@ class ChangePasswordAPIView(APIView):
       400 {"code": "invalid_new_password"}
       400 {"code": "same_password"}
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
     throttle_classes = [ChangePasswordThrottle]
 
     def post(self, request):

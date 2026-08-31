@@ -9,6 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import User, UserProfile
 from accounts.views.user_auth_views import GRACE_CACHE_KEY
+from legal.testing import accept_current_terms
 
 # accounts.urls is mounted under /user/ (see core/urls.py)
 REFRESH_URL = "/user/token/refresh"
@@ -33,6 +34,7 @@ class TokenRefreshTests(TestCase):
             password="password123",
             role=User.Role.PLAYER,
         )
+        accept_current_terms(self.user)
         UserProfile.objects.create(user=self.user, name="Refresh User")
 
     def _issue_refresh(self, user=None):

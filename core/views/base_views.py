@@ -2,12 +2,22 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from core.mixins.actor_mixin import ActorMixin
 from core.throttles import PublicReadThrottle
+from legal.permissions import HasAcceptedCurrentTerms
 
 '''
 handles user and organization - request.actor
 '''
 class BaseAPIView(ActorMixin, APIView):
-    permission_classes = [IsAuthenticated]
+    # HasAcceptedCurrentTerms is HERE, not only in DEFAULT_PERMISSION_CLASSES:
+    # a class attribute REPLACES the setting, and almost every view in the
+    # app reaches DRF through this class. Left to the setting alone, the gate
+    # would apply to nothing that posts a post, sends a message, applies to a
+    # recruitment or logs a match.
+    #
+    # Safe to inherit blindly: reads pass, anonymous callers pass, and every
+    # recovery route is exempt by PATH (legal.permissions.EXEMPT_PATHS), so a
+    # subclass can never lock a user out of clearing the gate.
+    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
 
     @property
     def actor(self):

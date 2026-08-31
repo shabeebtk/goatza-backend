@@ -51,6 +51,7 @@ from organization.models import (
     OrganizationProfile,
 )
 from sports.models import Sport
+from legal.testing import accept_current_terms
 
 
 @override_settings(
@@ -79,6 +80,7 @@ class AchievementServiceTestCase(TestCase):
             username=username,
             role=role,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=username.title())
         return user
 

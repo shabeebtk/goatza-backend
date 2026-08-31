@@ -5,6 +5,7 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import User, UserProfile
+from legal.testing import accept_current_terms
 
 # accounts.urls is mounted under /user/ (see core/urls.py)
 CHANGE_PASSWORD_URL = "/user/change/password"
@@ -32,6 +33,7 @@ class ChangePasswordTests(TestCase):
             password=OLD_PASSWORD,
             role=User.Role.PLAYER,
         )
+        accept_current_terms(self.user)
         UserProfile.objects.create(user=self.user, name="Change User")
 
         self.client.force_authenticate(user=self.user)

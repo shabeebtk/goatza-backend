@@ -17,6 +17,7 @@ from organization.models import (
     OrganizationProfile,
 )
 from posts.models import Post, PostMedia
+from legal.testing import accept_current_terms
 
 BASE_URL = "/highlights"
 CREATE_URL = f"{BASE_URL}/create"
@@ -77,6 +78,7 @@ class HighlightAPITestCase(APITestCase):
             username=username,
             role=role,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=username.title())
         return user
 

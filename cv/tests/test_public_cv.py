@@ -48,6 +48,7 @@ from sports.models import (
     UserAttributeValue,
     UserSport,
 )
+from legal.testing import accept_current_terms
 
 CV_URL = "/public/cv/{}"
 PROFILE_URL = "/public/profile/{}"
@@ -97,6 +98,7 @@ class CVTestCase(APITestCase):
             phone=phone,
             role=role or User.Role.PLAYER,
         )
+        accept_current_terms(user)
         if not is_active:
             user.is_active = False
             user.save(update_fields=["is_active"])

@@ -63,6 +63,7 @@ from recruitments.models import Recruitment, RecruitmentApplication
 from sports.models import Sport
 from usernames.services.username_service import UsernameService
 from utils.cache_keys import CacheKeys
+from legal.testing import accept_current_terms
 
 BLOCK_URL = "/moderation/block"
 BLOCKED_URL = "/moderation/blocked"
@@ -136,6 +137,7 @@ class BlockTestBase(APITestCase):
             username=username,
             role=role,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=username.title())
         UsernameService.claim(username, user=user)
         return user
@@ -1256,6 +1258,7 @@ class BlockWebSocketTests(APITransactionTestCase):
             email=f"{username}@example.com", password="pass1234",
             username=username, role=User.Role.PLAYER,
         )
+        accept_current_terms(user)
         UserProfile.objects.create(user=user, name=username.title())
         UsernameService.claim(username, user=user)
         return user
