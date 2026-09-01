@@ -20,6 +20,7 @@ from core.views.public_profile_views import (
     PublicUserProfileAPIView,
 )
 from cv.views.public_cv_views import PublicCVAPIView
+from support.views.problem_report_views import PublicProblemReportAPIView
 from waitlist.views.signup_views import (
     PlayerSignupCardAPIView,
     PlayerSignupCreateAPIView,
@@ -57,4 +58,18 @@ urlpatterns = [
     path('waitlist/players', PlayerSignupCreateAPIView.as_view()),
     path('waitlist/stats', WaitlistStatsAPIView.as_view()),
     path('waitlist/players/<str:ref_code>', PlayerSignupCardAPIView.as_view()),
+
+    # "Report a problem", filed without a session — the SECOND anonymous WRITE
+    # on this surface after the waitlist, and it carries its own throttle for
+    # the same reason: PublicAPIView's default is a 60/min read budget, which
+    # is not a limit on a write (support.throttles
+    # .PublicProblemReportThrottle, 3/hour per IP).
+    #
+    # The screens most likely to be broken are the ones somebody hits before
+    # they have a session — login, signup, OTP — so this route has to exist.
+    # It is TEXT ONLY: no screenshots, deliberately. A presigned upload handed
+    # to an anonymous caller is a write path into the bucket from the open
+    # internet, and it would need its own quarantine prefix and an orphan
+    # sweeper before it were worth having.
+    path('support/problem-report', PublicProblemReportAPIView.as_view()),
 ]

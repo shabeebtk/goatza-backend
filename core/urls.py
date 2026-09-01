@@ -47,6 +47,11 @@ urlpatterns = [
 
     path('moderation/', include('moderation.urls')),
 
+    # "Report a problem" — the app is broken, not somebody's behaviour. Abuse
+    # reporting is 'moderation/' above; the two share nothing but the word.
+    # The logged-out half of this is in core/public_urls.py.
+    path('support/', include('support.urls')),
+
     # Terms/privacy versions and the consent write. 'versions' is AllowAny but
     # not under 'public/' for the same reason places is not: that prefix is an
     # allow-list of anonymous reads of OUR data, and this returns four

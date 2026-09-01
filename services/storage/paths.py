@@ -90,6 +90,22 @@ def build_folder(actor, upload_type: str, temp_id: str = None) -> str:
         raise ValueError("Invalid actor for chat upload")
 
     # -----------------------------------------
+    # PROBLEM REPORT SCREENSHOTS  (user or org)
+    # -----------------------------------------
+    # Same per-actor shape as chat above, for the same reason: the create
+    # endpoint re-validates that a submitted key sits under the CALLER's own
+    # prefix before trusting it, and that check only means something if the
+    # folder is scoped per actor. Here it lands under the standard
+    # ``users/<id>/`` / ``organizations/<id>/`` roots, which is what
+    # services/storage/validators.py (validate_public_id) already checks.
+    if upload_type == "support":
+        if actor.is_user:
+            return f"users/{actor.user.id}/support"
+        if actor.is_org:
+            return f"organizations/{actor.organization.id}/support"
+        raise ValueError("Invalid actor for support upload")
+
+    # -----------------------------------------
     # ACHIEVEMENTS · MATCHES · HIGHLIGHTS  (user only)
     # -----------------------------------------
     # One file per award / match / clip, so a random name per upload — unlike

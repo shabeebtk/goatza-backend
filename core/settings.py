@@ -59,6 +59,9 @@ INSTALLED_APPS = [
     'waitlist',
     'moderation',
     'legal',
+    # "Report a problem" — app breakage, NOT abuse. Abuse reporting stays
+    # in 'moderation'; the two share nothing but the word "report".
+    'support',
     # Google Places (New) proxy. No models — it owns the API key and the daily
     # spend guard, nothing else.
     'places',
@@ -118,7 +121,7 @@ DATABASES = {
                 'sslmode': os.getenv('DB_SSL_MODE', 'disable'),
             },
         },
-}
+    }
 DATABASES['default']['CONN_MAX_AGE'] = 60
 DATABASES['default']['CONN_HEALTH_CHECKS'] = True
 
@@ -208,6 +211,14 @@ REST_FRAMEWORK = {
         # moderation.throttles.ReportThrottle) — an actor-scoped bucket would
         # give one person a fresh ten for every org they belong to.
         'moderation_report': '10/hour',
+        # "Report a problem" — app breakage, not abuse. Per USER for the same
+        # reason moderation_report is (support.throttles.ProblemReportThrottle).
+        'support_report': '5/hour',
+        # The logged-out half, per IP and tighter: nobody legitimately files
+        # three bugs an hour without a session, and everything behind that
+        # route is unauthenticated and permanent
+        # (support.throttles.PublicProblemReportThrottle).
+        'support_report_public': '3/hour',
         # Google Places proxy (places.throttles, doc section 4.3). TWO scopes
         # per endpoint, not one: DRF resolves a single rate per scope name, so
         # the authenticated and anonymous halves of the doc's table each need
