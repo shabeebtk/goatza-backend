@@ -1,0 +1,291 @@
+"""
+The problem-report queue.
+
+Structured like ``moderation/admin.py`` and for the same reason: admin.py IS
+the tool for now, so this list page is a working surface rather than a
+debugging convenience. What differs is what is worth showing. A moderation row
+is decided by WHO and WHAT; a bug report is decided by whether it is
+reproducible, so the columns that earn their place are the reporter's own words
+and the number of screenshots attached.
+
+The submitted half of the record is READ-ONLY. It is somebody's account of what
+happened to them, and an admin who can retype the description has a record that
+no longer says what was reported. Only the triage half — status, note, who
+resolved it and when — is writable.
+"""
+
+import json
+
+from django.contrib import admin, messages
+from django.utils import timezone
+from django.utils.html import format_html, format_html_join
+
+from .models import ProblemReport, ProblemStatus
+
+# Colour per status, so the queue is scannable without reading it. New stands
+# out, the three "closed without a fix" outcomes are muted, and spam is the
+# only red — it is the one state that says the row is not worth reading.
+STATUS_COLOURS = {
+    ProblemStatus.NEW: "#0b6bcb",
+    ProblemStatus.TRIAGED: "#8a6d00",
+    ProblemStatus.RESOLVED: "#1f7a3d",
+    ProblemStatus.WONT_FIX: "#777777",
+    ProblemStatus.DUPLICATE: "#777777",
+    ProblemStatus.SPAM_SUSPECT: "#a12b2b",
+}
+
+# How much of the description the list page shows. Long enough that most
+# reports are readable without opening the row, short enough that the column
+# does not push everything else off screen.
+DESCRIPTION_PREVIEW_CHARS = 80
+
+
+@admin.register(ProblemReport)
+class ProblemReportAdmin(admin.ModelAdmin):
+
+    list_display = (
+        "reference",
+        "category",
+        "status_badge",
+        "reporter_display",
+        "short_description",
+        "screenshot_count",
+        "created_at",
+    )
+
+    list_filter = (
+        "status",
+        "category",
+        "created_at",
+    )
+
+    # ``reference`` first: the overwhelmingly common lookup is somebody pasting
+    # the code from a support email. The rest is for the second question —
+    # finding the other reports from the same person.
+    search_fields = (
+        "reference",
+        "description",
+        "contact_email",
+        "reported_by__username",
+        "reported_by__email",
+    )
+
+    # Everything the reporter and the client sent. See the module docstring.
+    readonly_fields = (
+        "reference",
+        "reported_by",
+        "acting_org",
+        "category",
+        "description",
+        "screenshots",
+        "contact_email",
+        "client_context",
+        "ip_address",
+        "user_agent",
+        "created_at",
+        # Rendered views of the two JSON columns — the raw fields above stay in
+        # the fieldsets because the blob is the record; these are how it is
+        # actually read.
+        "screenshot_preview",
+        "client_context_pretty",
+    )
+
+    ordering = ("-created_at",)
+
+    date_hierarchy = "created_at"
+
+    list_select_related = (
+        "reported_by",
+        "acting_org",
+    )
+
+    # A user picker, not a 100k-row <select>. UserAdmin defines search_fields,
+    # which is what autocomplete needs.
+    autocomplete_fields = ("resolved_by",)
+
+    fieldsets = (
+        ("Report", {
+            "fields": (
+                "reference",
+                "category",
+                "description",
+                "created_at",
+            ),
+        }),
+        ("Reporter", {
+            "description": (
+                "A blank reporter with a blank contact email means the account "
+                "was deleted after the report was filed — reported_by is "
+                "SET_NULL. It does not mean the report was anonymous."
+            ),
+            "fields": (
+                "reported_by",
+                "acting_org",
+                "contact_email",
+            ),
+        }),
+        ("Screenshots", {
+            "fields": (
+                "screenshot_preview",
+                "screenshots",
+            ),
+        }),
+        ("Client", {
+            "classes": ("collapse",),
+            "description": (
+                "What the client knew when it broke. Usually the difference "
+                "between a report that can be reproduced and one that cannot."
+            ),
+            "fields": (
+                "client_context_pretty",
+                "client_context",
+                "user_agent",
+                "ip_address",
+            ),
+        }),
+        ("Triage", {
+            "fields": (
+                "status",
+                "internal_note",
+                "resolved_by",
+                "resolved_at",
+            ),
+        }),
+    )
+
+    actions = ("mark_triaged", "mark_resolved")
+
+    # Reports arrive from the client. There is no such thing as a hand-written
+    # one, and with ``reference`` read-only and generated by the service the
+    # add form could only ever produce a row with a blank unique column.
+    def has_add_permission(self, request):
+        return False
+
+    # =================================================================
+    # DISPLAY
+    # =================================================================
+
+    @admin.display(description="Status", ordering="status")
+    def status_badge(self, obj):
+        colour = STATUS_COLOURS.get(obj.status, "#777777")
+
+        return format_html(
+            '<span style="color:{};font-weight:600">{}</span>',
+            colour,
+            obj.get_status_display(),
+        )
+
+    @admin.display(description="Reporter")
+    def reporter_display(self, obj):
+        """
+        Three distinct states, and the third is the one worth spelling out.
+
+        A null ``reported_by`` WITH a contact email is an anonymous report —
+        somebody who hit a broken login screen and never had a session. A null
+        ``reported_by`` with no email is a report that WAS authenticated until
+        the account was hard-deleted; SET_NULL took the link, and there is no
+        way left to reach whoever filed it.
+        """
+        if obj.reported_by_id:
+            return f"@{obj.reported_by.username}"
+
+        if obj.contact_email:
+            return obj.contact_email
+
+        return format_html('<span style="color:#999">{}</span>', "[deleted account]")
+
+    @admin.display(description="Description")
+    def short_description(self, obj):
+        text = (obj.description or "").strip()
+
+        if len(text) <= DESCRIPTION_PREVIEW_CHARS:
+            return text
+
+        return f"{text[:DESCRIPTION_PREVIEW_CHARS].rstrip()}…"
+
+    @admin.display(description="Shots")
+    def screenshot_count(self, obj):
+        """A count in the queue is the cheap signal for "this one is diagnosable"."""
+        return len(obj.screenshots or [])
+
+    @admin.display(description="Screenshots")
+    def screenshot_preview(self, obj):
+        """
+        The stored URLs as clickable thumbnails.
+
+        This is the entire point of collecting screenshots. A JSON array of
+        Cloudinary URLs is unreadable — nobody copies six of them into address
+        bars one at a time, so unrendered they may as well not have been
+        uploaded.
+
+        ``format_html``/``format_html_join`` and never ``mark_safe``: these
+        strings arrive from a client, and the placeholder is what escapes them.
+        """
+        urls = [url for url in (obj.screenshots or []) if isinstance(url, str)]
+
+        if not urls:
+            return "—"
+
+        return format_html(
+            '<div style="display:flex;flex-wrap:wrap;gap:8px">{}</div>',
+            format_html_join(
+                "",
+                '<a href="{}" target="_blank" rel="noopener noreferrer">'
+                '<img src="{}" alt="screenshot" style="height:160px;width:auto;'
+                'border:1px solid #ddd;border-radius:4px;object-fit:contain"></a>',
+                ((url, url) for url in urls),
+            ),
+        )
+
+    @admin.display(description="Client context")
+    def client_context_pretty(self, obj):
+        """Indented JSON, the same trick ``moderation/admin.py`` uses for the snapshot."""
+        if not obj.client_context:
+            return "—"
+
+        pretty = json.dumps(
+            obj.client_context, indent=2, ensure_ascii=False, sort_keys=True
+        )
+
+        return format_html(
+            '<pre style="white-space:pre-wrap;word-break:break-word;'
+            'background:#f6f6f6;border:1px solid #ddd;border-radius:4px;'
+            'padding:12px;max-height:480px;overflow:auto">{}</pre>',
+            pretty,
+        )
+
+    # =================================================================
+    # ACTIONS
+    # =================================================================
+    #
+    # Bulk ``update`` rather than a save loop: nothing on this model has a
+    # save() override or a signal to fire, and triage is done a screenful at a
+    # time.
+
+    @admin.action(description="Mark as triaged")
+    def mark_triaged(self, request, queryset):
+        changed = queryset.update(status=ProblemStatus.TRIAGED)
+
+        self.message_user(
+            request,
+            f"{changed} marked triaged.",
+            messages.SUCCESS if changed else messages.WARNING,
+        )
+
+    @admin.action(description="Mark as resolved")
+    def mark_resolved(self, request, queryset):
+        """
+        Resolving STAMPS who and when — a resolved report with no reviewer is
+        a report nobody can follow up on three months later.
+        """
+        changed = queryset.update(
+            status=ProblemStatus.RESOLVED,
+            resolved_by=request.user,
+            resolved_at=timezone.now(),
+        )
+
+        self.message_user(
+            request,
+            f"{changed} marked resolved.",
+            messages.SUCCESS if changed else messages.WARNING,
+        )

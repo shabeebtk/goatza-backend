@@ -116,6 +116,26 @@ POLICY = {
         "exclusive": True,
         "image_thumbs": True,
     },
+
+    # ---- support ----
+    # Screenshots on a "report a problem" submission. No thumbs: a bug
+    # screenshot is opened once, by a human, in the Django admin — it never
+    # renders in a feed, so there is nothing for a preview to make faster, and
+    # a second signed PUT per file would buy nothing.
+    #
+    # Three is a ceiling on EVIDENCE, not a gallery limit. Past three shots of
+    # the same broken screen the extra ones stop adding anything a fix depends
+    # on.
+    #
+    # Deliberately absent from USER_ONLY_TYPES and ORG_ONLY_TYPES below: either
+    # actor can hit a bug, and a club that cannot attach a screenshot files a
+    # worse report.
+    "support": {
+        "images": {"min": 1, "max": 3, "max_bytes": 5 * MB},
+        "video": {"min": 0, "max": 0, "max_bytes": 0},
+        "exclusive": False,
+        "image_thumbs": False,
+    },
 }
 
 # Actor restrictions, shared with the GET handler's guards below. An achievement
