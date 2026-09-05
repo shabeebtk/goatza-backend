@@ -182,7 +182,7 @@ class SignupConsentTests(TestCase):
         payload.update(overrides)
         return self.client.post(SIGNUP_URL, payload, format="json")
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_signup_records_both_documents(self, _mock_email):
         res = self._signup()
 
@@ -201,7 +201,7 @@ class SignupConsentTests(TestCase):
         self.assertEqual(get_pending_documents(user), [])
         self.assertEqual(user.terms_version, TERMS_VERSION)
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_signup_captures_the_request_context(self, _mock_email):
         self.client.post(
             SIGNUP_URL,
@@ -221,7 +221,7 @@ class SignupConsentTests(TestCase):
         self.assertEqual(row.ip_address, "203.0.113.9")
         self.assertEqual(row.user_agent, "Mozilla/5.0 (Android)")
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_signup_without_consent_is_rejected(self, mock_email):
         res = self._signup(accepted_terms=False)
 
@@ -232,7 +232,7 @@ class SignupConsentTests(TestCase):
         self.assertFalse(LegalAcceptance.objects.exists())
         mock_email.assert_not_called()
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_a_missing_or_falsy_consent_flag_is_rejected(self, _mock_email):
         # Strictly True. A client that forgets the field, or sends the string
         # "false" (which is truthy), must not create an account.
@@ -257,7 +257,7 @@ class SignupConsentTests(TestCase):
 
         self.assertFalse(User.objects.filter(email="new@example.com").exists())
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_role_is_still_validated_before_consent(self, _mock_email):
         # Order matters for the message the form shows: an unset role is the
         # earlier problem, and reporting consent first would send the user

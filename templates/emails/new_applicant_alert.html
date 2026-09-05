@@ -1,0 +1,22 @@
+{% extends "emails/base.html" %}
+{% comment %}
+The org-side alert, in both of its modes. `is_rollup` is what separates them,
+and it is derived from new_count > 1 in the service rather than passed by the
+caller, so the heading, the "and N more" line and the button label can never
+disagree with the count they describe.
+
+Rollup exists because of the tiered throttle
+(recruitments/services/applicant_alert_service.py): applications that arrived
+during a quiet gap are not dropped, they are counted into `new_count` here.
+That is why the card shows the LATEST applicant and the copy says "latest to
+apply" — one alert stands for several people.
+
+Context: is_rollup, new_count, more_count (new_count - 1), total_count,
+organization_id, recruitment_title, org_name, plus the applicant-card values.
+{% endcomment %}
+{% block preheader %}{% if is_rollup %}{{ player_name }} and {{ more_count }} more applied.{% else %}{{ player_name }} just applied.{% endif %}{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">{% if is_rollup %}{{ new_count }} new applicants{% else %}New application received{% endif %}</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">{% if is_rollup %}Latest to apply to{% else %}A player just applied to{% endif %} <b style='color:#111111;'>{{ recruitment_title }}</b>:</p>{% include "emails/_applicant_card.html" %}{% if is_rollup %}<p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">&hellip;and <b style='color:#111111;'>{{ more_count }} more</b> since your last alert.</p>{% endif %}<p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">{{ total_count }} applications so far for this recruitment.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#00B562;border-radius:10px;">
+    <a href="{{ frontend_base_url }}/organization/admin/{{ organization_id }}" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#ffffff;text-decoration:none;letter-spacing:0.4px;">{% if is_rollup %}Review all applicants{% else %}Review applicant{% endif %}</a>
+  </td></tr></table>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because you&rsquo;re a member of {{ org_name }} on Goatza.{% endblock %}

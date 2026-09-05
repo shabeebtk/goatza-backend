@@ -1,0 +1,52 @@
+{% comment %}
+Shared shell for every transactional email — header, footer and the card the
+body sits in. Per-email templates extend this and fill three blocks:
+
+  preheader      the one-line teaser inbox lists show next to the subject
+  content        the body cell — the only visually per-email part
+  footer_reason  the "You're receiving this because…" line
+
+Hard constraints (email-template-reference/README.md), do not relax:
+table layout + inline styles only, Arial,Helvetica,sans-serif everywhere,
+brand hex values verbatim. No <style> block: Gmail strips them.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ subject }}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#e9efe9;">
+<!-- SUBJECT: {{ subject }} -->
+<div style="display:none;max-height:0px;overflow:hidden;mso-hide:all;">{% block preheader %}{% endblock %}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#e9efe9;">
+  <tr><td align="center" style="padding:36px 12px;">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background-color:#ffffff;border-radius:14px;border-top:4px solid #00B562;">
+
+      <!-- ===== header (shared / base.html) ===== -->
+      <tr><td style="padding:20px 28px;border-bottom:1px solid #eef2ee;">
+        <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+          <td width="28"><img src="{{ logo_url }}" width="28" height="28" alt="" style="display:block;border:0;"></td>
+          <td style="padding-left:9px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:19px;letter-spacing:3px;color:#111111;">GOATZA</td>
+        </tr></table>
+      </td></tr>
+
+      <!-- ===== body (per-email content block) ===== -->
+      <tr><td style="padding:28px 28px 10px 28px;">
+{% block content %}{% endblock %}
+      </td></tr>
+
+      <!-- ===== footer (shared / base.html) ===== -->
+      <tr><td style="padding:20px 28px 24px 28px;border-top:1px solid #eef2ee;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#999999;line-height:1.7;">
+        {% block footer_reason %}{% endblock %}<br>
+        <a href="{{ frontend_base_url }}/report-problem" style="color:#7a9480;text-decoration:none;font-weight:bold;">Help</a>
+        &nbsp;&middot;&nbsp;<a href="{{ frontend_base_url }}/privacy" style="color:#7a9480;text-decoration:none;font-weight:bold;">Privacy</a>
+        &nbsp;&middot;&nbsp;<a href="{{ frontend_base_url }}/terms" style="color:#7a9480;text-decoration:none;font-weight:bold;">Terms</a>
+        &nbsp;&middot;&nbsp;&copy; {{ year }} Goatza
+      </td></tr>
+
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>

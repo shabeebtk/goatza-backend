@@ -1,0 +1,16 @@
+{% extends "emails/base.html" %}
+{% comment %}
+Confirmation to the player that their application landed. The button is the
+ghost variant (white, bordered) rather than the solid green one: nothing here
+needs doing, so it must not compete with the status emails that do.
+
+Every value below is user- or org-supplied and stays autoescaped. The one
+exception is `card_meta_tail`, which the service escapes segment by segment
+before joining — see utils/transactional_emails.meta_tail.
+{% endcomment %}
+{% block preheader %}{{ org_name }} has your application.{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">Your application is in</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Hi <b style='color:#111111;'>{{ player_name }}</b>, you applied to:</p>{% include "emails/_recruitment_card.html" %}<p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">The club is reviewing applications. We&rsquo;ll email you the moment your status changes.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#ffffff;border:1.5px solid #d6dfd6;border-radius:10px;">
+    <a href="{{ frontend_base_url }}/recruitments/{{ recruitment_id }}" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#111111;text-decoration:none;letter-spacing:0.4px;">View application</a>
+  </td></tr></table>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because you applied to a recruitment on Goatza.{% endblock %}

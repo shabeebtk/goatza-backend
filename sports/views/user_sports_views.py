@@ -3,7 +3,6 @@ from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from utils.response import response_data
-from utils.emails import send_email
 from django.core.exceptions import ValidationError
 from sports.models import (
     Sport, UserSport, SportPosition, UserAttributeValue, UserSportPosition, 

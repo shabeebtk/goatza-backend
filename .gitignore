@@ -17,3 +17,6 @@ __pycache__/
 !.env.example
 staticfiles/
 .DS_Store
+
+# Local email preview output (python manage.py preview_emails)
+email_previews/

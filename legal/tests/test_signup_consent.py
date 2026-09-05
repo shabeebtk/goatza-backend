@@ -175,7 +175,7 @@ class SignupPayloadTests(TestCase):
         cache.clear()
         self.client = APIClient()
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_signup_requires_the_flag_before_creating_anything(self, mock_email):
         res = self.client.post(
             "/user/signup",

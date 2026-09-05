@@ -1,0 +1,32 @@
+{% extends "emails/base.html" %}
+{% comment %}
+Sent once, when signup OTP verification flips the account to verified.
+
+Unlike emails/otp.html this layout serves exactly one email, so its copy lives
+here rather than arriving as context — only `name` and the link base vary.
+utils/transactional_emails.send_welcome_email owns the plain-text twin; the two
+have to be edited together.
+
+`name` is user-supplied and stays autoescaped — never mark it safe.
+{% endcomment %}
+{% block preheader %}Your email is verified — here's how to get started.{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">You&rsquo;re in, {{ name }}</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Your email is verified. Goatza is where players get seen and clubs find talent &mdash; here&rsquo;s how to get started:</p><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:2px 0 12px 0;"><tr>
+      <td width="30" valign="top" style="padding:9px 0;">
+        <div style="width:26px;height:26px;border:1.5px solid #7fd4ac;border-radius:999px;color:#00B562;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:13px;line-height:26px;text-align:center;">1</div>
+      </td>
+      <td valign="top" style="padding:9px 0 9px 12px;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#555555;line-height:1.55;"><b style="color:#111111;">Complete your profile</b> — add your photo, position and playing history so clubs know who you are.</td>
+    </tr><tr>
+      <td width="30" valign="top" style="padding:9px 0;">
+        <div style="width:26px;height:26px;border:1.5px solid #7fd4ac;border-radius:999px;color:#00B562;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:13px;line-height:26px;text-align:center;">2</div>
+      </td>
+      <td valign="top" style="padding:9px 0 9px 12px;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#555555;line-height:1.55;"><b style="color:#111111;">Explore recruitments</b> — open trials from verified clubs, filtered for you.</td>
+    </tr><tr>
+      <td width="30" valign="top" style="padding:9px 0;">
+        <div style="width:26px;height:26px;border:1.5px solid #7fd4ac;border-radius:999px;color:#00B562;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:13px;line-height:26px;text-align:center;">3</div>
+      </td>
+      <td valign="top" style="padding:9px 0 9px 12px;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#555555;line-height:1.55;"><b style="color:#111111;">Build your network</b> — follow players and clubs, post your highlights.</td>
+    </tr></table><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#00B562;border-radius:10px;">
+    <a href="{{ frontend_base_url }}/profile" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#ffffff;text-decoration:none;letter-spacing:0.4px;">Complete your profile</a>
+  </td></tr></table>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because you just created a Goatza account.{% endblock %}

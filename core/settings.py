@@ -160,7 +160,9 @@ ROOT_URLCONF = 'core.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        # Project-level templates/ holds the transactional email templates
+        # (templates/emails/). APP_DIRS stays on for admin and per-app ones.
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -443,6 +445,21 @@ RESEND_API_KEY = os.getenv('RESEND_API_KEY')
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL')
 
 
+# Origin every link inside a transactional email is built against. Stored
+# without a trailing slash so templates can concatenate "/privacy" directly —
+# a stray slash in the env var would otherwise produce "//privacy".
+FRONTEND_BASE_URL = (
+    os.getenv("FRONTEND_BASE_URL") or "https://goatza.com"
+).rstrip("/")
+
+# The wordmark logo in the email header. Overridable because the asset may be
+# served from the media CDN rather than the site itself; email clients need an
+# absolute URL either way.
+EMAIL_LOGO_URL = (
+    os.getenv("EMAIL_LOGO_URL") or f"{FRONTEND_BASE_URL}/brand/goatza-logo.png"
+)
+
+
 # ------- GOOGLE LOGIN ---------
 GOOGLE_AUTH_CLIENT_ID = os.getenv('GOOGLE_AUTH_CLIENT_ID')
 GOOGLE_AUTH_CLIENT_SECRET = os.getenv('GOOGLE_AUTH_CLIENT_SECRET')
@@ -534,6 +551,27 @@ MODERATION_ALERT_EMAIL = os.getenv("MODERATION_ALERT_EMAIL", "")
 # environment.
 SITE_ADMIN_BASE_URL = os.getenv("SITE_ADMIN_BASE_URL", "")
 # ------ MODERATION END ------/
+
+# ------ RECRUITMENT APPLICANT ALERTS ------/
+# How often an organization may be emailed about new applicants, by how many
+# applications the recruitment has in total. Early applications feel instant;
+# a recruitment that goes viral gets batched instead of one mail per applicant.
+#
+# (max_total_applications, min_seconds_since_last_alert), evaluated TOP-DOWN —
+# the first tier whose bound the count fits under wins. None = no upper bound.
+#
+# The gap is measured from the last alert EMAIL, not the last application:
+# measuring from the application would let a steady trickle re-arm the timer
+# forever and never batch anything. Applications that arrive inside a gap are
+# not dropped — they are counted into the next alert's "and N more".
+#
+# Tune freely; recruitments/services/applicant_alert_service.py reads this and
+# hardcodes nothing.
+APPLICANT_ALERT_TIERS = [
+    (3, 0),        # applicants 1-3: alert instantly
+    (7, 3600),     # applicants 4-7: at most one alert per hour
+    (None, 14400), # applicants 8+ : at most one alert per 4 hours
+]
 
 # ------ GOOGLE PLACES (city + venue search) ------/
 # The proxy in places/ is the ONLY thing that talks to Google. The key is
