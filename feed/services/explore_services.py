@@ -12,6 +12,9 @@ from django.utils.timezone import now
 from services.geo import haversine
 
 from accounts.models import User
+from accounts.selectors.visibility_selectors import (
+    active_users, exclude_inactive_authors,
+)
 from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
 from organization.models import Organization, OrganizationLocation
 from posts.models import Post
@@ -227,6 +230,11 @@ class ExploreService:
             profile__isnull=False,
         )
 
+        # DEACTIVATED ACCOUNTS — deletion pending, unverified signup or
+        # suspended. Explore is the app's discovery surface; an account that
+        # cannot be logged into must not be one of the people it suggests.
+        queryset = active_users(queryset)
+
         # Always hide the actor's own account.
         if actor.is_user:
             queryset = queryset.exclude(id=actor.user.id)
@@ -408,6 +416,10 @@ class ExploreService:
         # BLOCK EXCLUSION — before scoring, so a blocked author's post cannot
         # occupy a slot in the diversified page.
         queryset = exclude_blocked(queryset, actor)
+
+        # DEACTIVATED AUTHORS — same stage and same reason. Org-authored posts
+        # are kept: the club still exists (see exclude_inactive_authors).
+        queryset = exclude_inactive_authors(queryset)
 
         # 2. EXCLUDE the actor's own posts.
         if actor.is_user:

@@ -17,6 +17,10 @@ from accounts.views.user_views import (
     GetUserDetails, GetUserDetailsByID, UpdateUserMediaAPIView, UpdateUserProfileAPIView,
     CheckUsernameAvailabilityAPIView, SetUserRoleAPIView, CompleteOnboardingAPIView
 )
+from accounts.views.account_deletion_views import (
+    AccountDeleteInitiateAPIView,
+    AccountDeleteConfirmAPIView
+)
 from accounts.views.user_privacy_views import UserPublicProfilePrivacyAPIView
 from accounts.views.user_upload_signature_views import GetUploadConfigAPIView
 # base url - /user/
@@ -46,6 +50,14 @@ urlpatterns = [
 
     # privacy
     path('privacy/public-profile', UserPublicProfilePrivacyAPIView.as_view()),
+
+    # account deletion (30-day purge)
+    #
+    # ABOVE '<str:username>/details' would not matter — these are two segments
+    # deep and that route is one — but they are grouped here with the other
+    # account-lifecycle writes rather than with the by-handle reads.
+    path('account/delete/initiate', AccountDeleteInitiateAPIView.as_view()),
+    path('account/delete/confirm', AccountDeleteConfirmAPIView.as_view()),
 
     # user upload media signature
     path('get/upload/signature', GetUploadConfigAPIView.as_view()),

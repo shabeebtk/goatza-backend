@@ -63,6 +63,16 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
 
+    # When the OWNER asked for this account to be deleted. NULL for every
+    # account that has not, which is what separates a user-initiated deletion
+    # from the other two things is_active=False already means: an unverified
+    # signup, and a staff suspension. The purge job
+    # (accounts/management/commands/purge_deleted_accounts.py) selects on
+    # is_active=False AND this timestamp, so neither of those is ever swept up.
+    #
+    # Indexed because that job's only query filters and orders on it.
+    deletion_requested_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
     # Denormalized copy of the latest legal acceptance per gating document. The
     # system of record is legal.LegalAcceptance, which is append-only; these are
     # a cache of its newest row per document so the consent gate is a field read

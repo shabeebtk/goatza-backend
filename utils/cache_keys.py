@@ -4,7 +4,22 @@ class CacheKeys:
         return f"user:{username}:list_type:{list_type}"
 
     @staticmethod
-    def email_otp(email):
+    def email_otp(email, purpose=None):
+        """
+        The one-time code sent to an address.
+
+        ``purpose`` is optional and DEFAULTS TO THE ORIGINAL KEY, so signup,
+        login-verification and forgot-password keep the exact key they have
+        always used and keep sharing one code per address — changing that would
+        break a code already in flight at deploy time.
+
+        A purpose-scoped key exists for flows where a code must not be
+        interchangeable with those. Account deletion is the first: without it a
+        forgot-password code, which arrives by mail for the asking, would also
+        confirm the deletion of a Google-only account.
+        """
+        if purpose:
+            return f"otp:{purpose}:{email}"
         return f"otp:{email}"
 
     @staticmethod

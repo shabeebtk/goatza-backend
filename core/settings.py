@@ -264,6 +264,12 @@ REST_FRAMEWORK = {
         'otp': '5/min',
         'forgot_password': '3/hour',
         'change_password': '5/hour',
+        # Account deletion, shared by BOTH /user/account/delete/ endpoints
+        # (see accounts.throttles.AccountDeleteThrottle). Per USER: the account
+        # belongs to the person, not to whichever actor header is on the
+        # request. Tight because the honest flow is two calls and nobody
+        # deletes their account twice.
+        'account_delete': '3/hour',
         'message_share': '30/min',   # per actor — see messaging.throttles
         'chat_media': '30/min',      # per actor — chat photo uploads
         # Feed impression flushes (see feed.throttles). Its own scope so a long

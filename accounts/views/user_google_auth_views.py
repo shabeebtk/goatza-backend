@@ -154,7 +154,29 @@ class GoogleAuthCallbackView(APIView):
                         user.is_email_verified = True
                         user.save(update_fields=["is_email_verified"])
                     
+                    # Reactivating on sign-in is right for an account that
+                    # never finished its email OTP — Google has just verified
+                    # the address, which is the thing that was missing.
+                    #
+                    # It is WRONG for an account whose owner asked us to delete
+                    # it: deletion_requested_at is set, the 30-day purge is
+                    # counting down, and silently switching is_active back on
+                    # would undo a deliberate decision because somebody tapped
+                    # "Sign in with Google". Refuse instead, with the same
+                    # message the password path gives.
                     if not user.is_active:
+                        if user.deletion_requested_at is not None:
+                            logger.info(
+                                "Google login refused for deleted account: "
+                                f"{email}"
+                            )
+                            return response_data(
+                                False,
+                                "This account has been deactivated",
+                                {"code": "account_deactivated"},
+                                status_code=403
+                            )
+
                         user.is_active = True
                         user.save(update_fields=["is_active"])
 

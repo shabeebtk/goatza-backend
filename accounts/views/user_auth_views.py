@@ -199,6 +199,27 @@ class UserLoginAPIView(APIView):
         # Authenticate user
         user = authenticate(request, email=email, password=password)
         if user is None:
+            # authenticate() returns None for a DEACTIVATED user exactly as it
+            # does for a wrong password (ModelBackend.user_can_authenticate),
+            # so somebody who deleted their account would be told their own
+            # password is wrong. Say what actually happened instead.
+            #
+            # Gated on the password matching, deliberately. Answering on the
+            # email alone would turn this endpoint into an account-existence
+            # oracle for anyone typing addresses at it; requiring the correct
+            # password means only the owner ever sees the difference.
+            deactivated = User.objects.filter(
+                email=email, is_active=False
+            ).first()
+
+            if deactivated is not None and deactivated.check_password(password):
+                return response_data(
+                    success=False,
+                    message="This account has been deactivated",
+                    data={"code": "account_deactivated"},
+                    status_code=403
+                )
+
             return response_data(
                 success=False,
                 message="Invalid email or password",
