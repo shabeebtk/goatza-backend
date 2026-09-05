@@ -170,6 +170,11 @@ class Recruitment(BaseUUIDModel):
     shortlisted_count = models.PositiveIntegerField(default=0)
     selected_count = models.PositiveIntegerField(default=0)
 
+    # When the org was last EMAILED about new applicants. The applicant-alert
+    # throttle measures its gap from this, never from the last application —
+    # see settings.APPLICANT_ALERT_TIERS. Null means never alerted.
+    last_applicant_alert_at = models.DateTimeField(null=True, blank=True)
+
     # Flags
     is_featured = models.BooleanField(default=False)
     is_deleted = models.BooleanField(default=False)

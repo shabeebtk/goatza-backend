@@ -1,0 +1,28 @@
+{% comment %}
+The applicant card — the latest player to apply, shown identically in both
+modes of new_applicant_alert.html (single and rollup).
+
+Same avatar box as the recruitment card but fully round (border-radius:999px):
+a person, not an organization. Kept as its own partial so that distinction
+cannot be lost in an edit.
+
+Context it reads:
+  applicant_initials  up to two uppercase letters
+  player_name         application.shared_name
+  player_username     applicant's handle, without the "@"
+  applicant_meta      "Striker &middot; 17 &middot; Trivandrum" — pre-joined
+                      and marked safe by the service; unknown segments are
+                      dropped rather than rendered empty
+{% endcomment %}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:6px 0 16px 0;">
+  <tr><td style="border:1px solid #e4eae4;border-radius:12px;padding:15px 16px;">
+    <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+      <td width="46" valign="top">
+        <div style="width:46px;height:46px;background-color:#eef2ee;border-radius:999px;color:#007a3d;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:16px;line-height:46px;text-align:center;">{{ applicant_initials }}</div>
+      </td>
+      <td style="padding-left:13px;" valign="middle">
+        <div style="font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#111111;line-height:1.3;">{{ player_name }}{% if player_username %} <span style="color:#999999;font-weight:normal;">@{{ player_username }}</span>{% endif %}</div>
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#555555;margin-top:3px;">{{ applicant_meta }}</div>
+        
+      </td>
+    </tr></table>
+  </td></tr></table>

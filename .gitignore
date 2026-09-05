@@ -6,3 +6,17 @@ venv/
 celerybeat-schedule.*
 goatza-dev-firebase-adminsdk-fbsvc-272fa51808.json
 CLAUDE.md
+
+# --- added: local db, caches, env files, collected static ---
+db.sqlite3
+*.sqlite3
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+staticfiles/
+.DS_Store
+
+# Local email preview output (python manage.py preview_emails)
+email_previews/

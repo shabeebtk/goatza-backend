@@ -24,7 +24,7 @@ class SignupRoleTests(TestCase):
         cache.clear()
         self.client = APIClient()
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_signup_with_each_valid_role(self, _mock_email):
         for role in User.Role.values:
             email = f"{role}@example.com"
@@ -51,7 +51,7 @@ class SignupRoleTests(TestCase):
             # Email/OTP signups pick their role explicitly, so it's confirmed.
             self.assertTrue(user.is_role_confirmed)
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_signup_missing_role_is_rejected(self, mock_email):
         res = self.client.post(
             SIGNUP_URL,
@@ -70,7 +70,7 @@ class SignupRoleTests(TestCase):
         self.assertFalse(User.objects.filter(email="norole@example.com").exists())
         mock_email.assert_not_called()
 
-    @patch("accounts.views.user_auth_views.send_email_async")
+    @patch("accounts.views.user_auth_views.send_signup_otp_email")
     def test_signup_invalid_role_is_rejected(self, mock_email):
         # "team"/"academy" are org TYPES, not user roles; "admin" is never valid.
         for bad_role in ["team", "academy", "admin", ""]:

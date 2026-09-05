@@ -1,0 +1,23 @@
+{% extends "emails/base.html" %}
+{% comment %}
+All four status emails a player can get: selected, shortlisted, invited,
+rejected. One template rather than four because the layout is identical and
+only the badge, the heading, one sentence of copy and the button differ — four
+files would drift, and this is the email a player reads most carefully.
+
+The copy branches live HERE rather than arriving as context strings because
+each variant interpolates a name or an org name inside markup. Keeping the
+markup in the template keeps those values autoescaped; building the same
+strings in Python would mean hand-escaping org-supplied text on every branch.
+
+`rejected` copy is deliberately soft and deliberately still shows the club
+name: a rejection people can read without flinching is one they come back from.
+Context: to_status, player_name, org_name, badge_label, badge_style (a static
+literal, marked safe), plus the shared recruitment-card values.
+{% endcomment %}
+{% block preheader %}{% if to_status == "selected" %}{{ org_name }} selected you.{% elif to_status == "shortlisted" %}You made the shortlist at {{ org_name }}.{% elif to_status == "invited" %}{{ org_name }} invited you.{% else %}An update from {{ org_name }}.{% endif %}{% endblock %}
+{% block content %}<span style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:11px;letter-spacing:1px;text-transform:uppercase;border-radius:999px;padding:5px 12px;{{ badge_style }}">{{ badge_label }}</span><div style="height:12px;line-height:12px;">&nbsp;</div><div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">{% if to_status == "selected" %}Congratulations, {{ player_name }}{% elif to_status == "shortlisted" %}You made the shortlist, {{ player_name }}{% elif to_status == "invited" %}You&rsquo;re invited, {{ player_name }}{% else %}An update on your application{% endif %}</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">{% if to_status == "selected" %}<b style="color:#007a3d;">{{ org_name }}</b> selected you for:{% elif to_status == "shortlisted" %}<b style="color:#007a3d;">{{ org_name }}</b> shortlisted your application for:{% elif to_status == "invited" %}<b style="color:#007a3d;">{{ org_name }}</b> invited you for:{% else %}Hi <b style='color:#111111;'>{{ player_name }}</b>, this time <b style='color:#111111;'>{{ org_name }}</b> went with other players for:{% endif %}</p>{% include "emails/_recruitment_card.html" %}<p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">{% if to_status == "selected" %}The club may reach out with next steps &mdash; keep an eye on your Goatza messages.{% elif to_status == "shortlisted" %}Final decisions are coming &mdash; stay ready.{% elif to_status == "invited" %}Check the details and be ready.{% else %}New recruitments open every week &mdash; your next trial is out there.{% endif %}</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#00B562;border-radius:10px;">
+    <a href="{% if to_status == "rejected" %}{{ frontend_base_url }}/recruitments{% else %}{{ frontend_base_url }}/recruitments/{{ recruitment_id }}{% endif %}" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#ffffff;text-decoration:none;letter-spacing:0.4px;">{% if to_status == "rejected" %}Explore recruitments{% else %}View details{% endif %}</a>
+  </td></tr></table>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because your application status changed on Goatza.{% endblock %}

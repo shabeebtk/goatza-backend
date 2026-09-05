@@ -3,6 +3,7 @@ from django.db.models import Q, Exists, OuterRef
 from posts.models import Post, PostHashtag
 from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
 from moderation.selectors.blocked_filters import exclude_blocked
+from accounts.selectors.visibility_selectors import exclude_inactive_authors
 
 
 class PostSearchService:
@@ -56,6 +57,11 @@ class PostSearchService:
         # backward compatible, and None (an anonymous or unspecified caller)
         # no-ops inside the helper — but every real caller passes one.
         queryset = exclude_blocked(queryset, actor)
+
+        # DEACTIVATED AUTHORS. Search is a FIND surface, so it is one of the
+        # two places (with explore) a deleted person would otherwise stay
+        # reachable by name. Org-authored posts are kept.
+        queryset = exclude_inactive_authors(queryset)
 
         # Same select_related / prefetch_related shape as the trending feed
         # (ExploreTrendingPostsAPIView) so PostListSerializer needs no extra

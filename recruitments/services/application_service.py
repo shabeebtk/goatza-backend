@@ -1,5 +1,6 @@
 # recruitments/services/application_service.py
 import logging
+from django.conf import settings
 from django.db import transaction, IntegrityError
 from django.db.models import F
 from django.db.models.functions import Greatest
@@ -12,10 +13,19 @@ from recruitments.models import (
     RecruitmentApplicationAnswer,
     RecruitmentApplicationStatusHistory,
 )
+from sports.models import SportPosition
 from connections.services.follow_services import FollowService
 from core.constant import TYPE_ORGANIZATION
 from notifications.services.notification_service import NotificationService
 from moderation.services.block_guard import require_not_blocked
+from recruitments.services.applicant_alert_service import (
+    should_send_applicant_alert,
+)
+from utils.transactional_emails import (
+    send_application_received_email,
+    send_application_status_email,
+    send_new_applicant_alert_email,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -192,6 +202,16 @@ class ApplicationService:
             note=history_note,
         )
 
+        # APPLICANT ALERT — decided here, INSIDE the transaction and under the
+        # recruitment row lock taken at the top of this method. Two people
+        # applying at the same instant would otherwise both read the same
+        # `last_applicant_alert_at`, both decide the gap was up, and both send.
+        # The lock serializes them, so the second one reads the stamp the first
+        # just wrote and stays quiet.
+        alert_payload = ApplicationService._claim_applicant_alert(
+            recruitment, application
+        )
+
         # NOTIFY the owning org AFTER commit — a notification/FCM failure can
         # never fail or roll back the application. (The service dedups per
         # applicant+recruitment, so a reapply won't re-notify.)
@@ -207,9 +227,88 @@ class ApplicationService:
                     f"application_id={application.id} | {exc}"
                 )
 
+            # Email is ADDITIONAL to the in-app/FCM notification above, never a
+            # replacement, and is guarded separately so a mail problem cannot
+            # cost the org the notification it already earned.
+            try:
+                send_application_received_email(application=application)
+            except Exception as exc:
+                logger.warning(
+                    "ApplicationService.apply | received email failed | "
+                    f"application_id={application.id} | {exc}"
+                )
+
+            if alert_payload is None:
+                return
+
+            try:
+                send_new_applicant_alert_email(
+                    recruitment=recruitment,
+                    latest_application=application,
+                    **alert_payload,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ApplicationService.apply | applicant alert failed | "
+                    f"recruitment_id={recruitment.id} | {exc}"
+                )
+
         transaction.on_commit(_notify_org)
 
         return application
+
+    @staticmethod
+    def _claim_applicant_alert(recruitment, application):
+        """Decide whether THIS apply gets to send the org an alert email.
+
+        Returns the alert's counts when it wins the slot, else None. "Claim" is
+        the point: on a True decision it stamps `last_applicant_alert_at`
+        immediately, inside the transaction, so a concurrent apply waiting on
+        the same row lock sees a fresh stamp and stands down.
+
+        Must be called with the recruitment row already locked — apply() takes
+        that lock for its eligibility checks and this rides on it.
+
+        Counts exclude `withdrawn`: a withdrawn application is not somebody the
+        org can review, so counting it would inflate both the tier the
+        recruitment sits in and the number quoted in the mail.
+
+        Accepted trade-off: the stamp advances even if the post-commit send
+        later fails, making delivery at-most-once. The alternative — stamping
+        after a successful send — reopens the double-send race the lock exists
+        to close, and a missed alert costs less than a duplicate one. Every
+        application also produced its own in-app/FCM notification regardless.
+        """
+        live_applications = (
+            RecruitmentApplication.objects
+            .filter(recruitment=recruitment)
+            .exclude(status=RecruitmentApplication.Status.WITHDRAWN)
+        )
+
+        total_count = live_applications.count()
+        last_alert_at = recruitment.last_applicant_alert_at
+
+        # Applications that arrived during a quiet gap are counted into THIS
+        # alert rather than dropped — that is what makes the rollup honest.
+        new_count = (
+            total_count
+            if last_alert_at is None
+            else live_applications.filter(applied_at__gt=last_alert_at).count()
+        )
+
+        now = timezone.now()
+        if not should_send_applicant_alert(
+            total_count=total_count,
+            last_alert_at=last_alert_at,
+            now=now,
+            tiers=settings.APPLICANT_ALERT_TIERS,
+        ):
+            return None
+
+        recruitment.last_applicant_alert_at = now
+        recruitment.save(update_fields=["last_applicant_alert_at"])
+
+        return {"new_count": new_count, "total_count": total_count}
 
     @staticmethod
     def _build_answer_objs(application, answers):
@@ -368,8 +467,26 @@ class ApplicationService:
             applicants = User.objects.in_bulk(
                 [app.applicant_id for app in notify_apps]
             )
+            # One query for the positions the status email's card needs,
+            # instead of one per applicant inside the loop below. They cannot
+            # ride on the select_for_update() above: applied_position is
+            # nullable, and Postgres refuses FOR UPDATE across an outer join.
+            positions = SportPosition.objects.in_bulk(
+                [
+                    app.applied_position_id for app in notify_apps
+                    if app.applied_position_id
+                ]
+            )
+
+            # Pre-populate the relation caches the email reads, so nothing in
+            # the post-commit loop touches the database.
+            for app in notify_apps:
+                app.recruitment = recruitment
+                app.applicant = applicants.get(app.applicant_id)
+                app.applied_position = positions.get(app.applied_position_id)
+
             notify_data = [
-                (app.id, applicants.get(app.applicant_id))
+                (app.id, applicants.get(app.applicant_id), app)
                 for app in notify_apps
             ]
 
@@ -383,7 +500,7 @@ class ApplicationService:
             )
 
             def _notify_applicants():
-                for application_id, applicant in notify_data:
+                for application_id, applicant, application in notify_data:
                     if applicant is None:
                         continue
                     try:
@@ -397,6 +514,22 @@ class ApplicationService:
                     except Exception as exc:
                         logger.warning(
                             "ApplicationService.change_status | notification "
+                            f"failed | application_id={application_id} | {exc}"
+                        )
+
+                    # Email ALONGSIDE the notification, guarded on its own so
+                    # one bad address cannot end the loop and leave the rest of
+                    # a 100-application batch unnotified. The sender ignores
+                    # statuses that are not worth an email, so no filtering
+                    # here.
+                    try:
+                        send_application_status_email(
+                            application=application,
+                            to_status=to_status,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "ApplicationService.change_status | status email "
                             f"failed | application_id={application_id} | {exc}"
                         )
 

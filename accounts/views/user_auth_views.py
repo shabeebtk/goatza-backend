@@ -23,7 +23,13 @@ from usernames.services.username_service import UsernameService
 from utils.response import response_data
 from utils.validations import is_valid_email, is_valid_password
 from utils.otp_validation import generate_otp, verify_otp
-from utils.emails import send_email, send_email_async
+from utils.transactional_emails import (
+    send_signup_otp_email,
+    send_login_otp_email,
+    send_password_reset_otp_email,
+    send_welcome_email,
+    send_password_changed_email,
+)
 from accounts.throttles import (
     SignupThrottle, LoginThrottle, OTPThrottle, ForgotPasswordThrottle,
     ChangePasswordThrottle
@@ -33,6 +39,22 @@ from utils.request_meta import client_ip, client_user_agent
 from legal.permissions import HasAcceptedCurrentTerms
 
 logger = logging.getLogger(__name__)
+
+
+def _send_email_safely(send, **kwargs):
+    """Fire-and-forget wrapper around the transactional email senders.
+
+    They already swallow their own failures, so this is the second line rather
+    than the first. It matters because every call site below sits AFTER the
+    state change it announces — a verified account, a changed password, other
+    sessions already blacklisted — so an exception escaping here would answer
+    500 for something that in fact succeeded, and the client would tell the
+    user to try again.
+    """
+    try:
+        send(**kwargs)
+    except Exception as exc:
+        logger.warning(f"Email send failed after a completed action: {exc}")
 
 GRACE_TTL_SECONDS = 60
 GRACE_CACHE_KEY = "auth:refresh-grace:{jti}"
@@ -107,11 +129,7 @@ class UserSignupAPIView(APIView):
 
                 otp = generate_otp(email)
 
-                send_email_async(
-                    subject="Goatza OTP Verification",
-                    message=f"Hello {name},\n\nYour OTP is: {otp}\nValid for 10 minutes.",
-                    to_email=email
-                )
+                send_signup_otp_email(name=name, email=email, otp=otp)
 
                 logger.info(f"User signup initiated: {email}")
 
@@ -159,6 +177,13 @@ class VerifySignupOTPAPIView(APIView):
         user.is_active = True
         user.save()
 
+        # The one moment an account becomes real. Fire-and-forget: the sender
+        # swallows its own failures, so a welcome mail that never leaves must
+        # not cost the user the session they just earned.
+        _send_email_safely(
+            send_welcome_email, name=user.profile_name, email=user.email
+        )
+
         refresh = RefreshToken.for_user(user)
 
         # A successful OTP verification IS a login — it is the first one a new
@@ -199,6 +224,27 @@ class UserLoginAPIView(APIView):
         # Authenticate user
         user = authenticate(request, email=email, password=password)
         if user is None:
+            # authenticate() returns None for a DEACTIVATED user exactly as it
+            # does for a wrong password (ModelBackend.user_can_authenticate),
+            # so somebody who deleted their account would be told their own
+            # password is wrong. Say what actually happened instead.
+            #
+            # Gated on the password matching, deliberately. Answering on the
+            # email alone would turn this endpoint into an account-existence
+            # oracle for anyone typing addresses at it; requiring the correct
+            # password means only the owner ever sees the difference.
+            deactivated = User.objects.filter(
+                email=email, is_active=False
+            ).first()
+
+            if deactivated is not None and deactivated.check_password(password):
+                return response_data(
+                    success=False,
+                    message="This account has been deactivated",
+                    data={"code": "account_deactivated"},
+                    status_code=403
+                )
+
             return response_data(
                 success=False,
                 message="Invalid email or password",
@@ -210,10 +256,8 @@ class UserLoginAPIView(APIView):
             otp = generate_otp(email)
 
             # Send email
-            send_email_async(
-                subject="Your OTP for GOATZA",
-                message=f"Hello {user.profile_name},\n\nYour OTP is: {otp}\nIt is valid for 10 minutes.",
-                to_email=email
+            send_login_otp_email(
+                name=user.profile_name, email=email, otp=otp
             )
 
             return response_data(
@@ -280,10 +324,8 @@ class ForgotPasswordAPIView(APIView):
         otp = generate_otp(email)
 
         # Send OTP via email
-        send_email_async(
-            subject="Password Reset OTP - LearningMate AI",
-            message=f"Hello {user.profile_name},\n\nYour OTP to reset your password is: {otp}\nIt is valid for 10 minutes.",
-            to_email=email
+        send_password_reset_otp_email(
+            name=user.profile_name, email=email, otp=otp
         )
         
         return response_data(
@@ -336,6 +378,14 @@ class ResetPasswordAPIView(APIView):
         # Update password
         user.password = make_password(new_password)
         user.save()
+
+        # Success path only. A notice sent on a failed OTP would tell an
+        # attacker the address exists and tell the owner nothing true.
+        _send_email_safely(
+            send_password_changed_email,
+            name=user.profile_name,
+            email=user.email,
+        )
 
         return response_data(
             success=True,
@@ -406,6 +456,12 @@ class ChangePasswordAPIView(APIView):
 
         # ...then keep THIS device signed in on a fresh session.
         new_refresh = RefreshToken.for_user(user)
+
+        _send_email_safely(
+            send_password_changed_email,
+            name=user.profile_name,
+            email=user.email,
+        )
 
         logger.info(f"Password changed: {user.email}")
 

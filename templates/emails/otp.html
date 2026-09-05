@@ -1,0 +1,15 @@
+{% extends "emails/base.html" %}
+{% comment %}
+The three OTP emails (signup, login, password reset) are one layout; only the
+copy differs, so it all arrives as context from utils/transactional_emails.py:
+heading, intro, otp, hint, preheader, footer_reason.
+
+`name` is user-supplied and stays autoescaped — never mark it safe.
+{% endcomment %}
+{% block preheader %}{{ preheader }}{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">{{ heading }}</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Hi <b style='color:#111111;'>{{ name }}</b>, {{ intro }}</p><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0 18px 0;">
+  <tr><td align="center" style="background-color:#EAF7F0;border:1px solid #9ADFBE;border-radius:12px;padding:18px 10px 14px 10px;">
+    <div style="font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:38px;letter-spacing:10px;color:#007a3d;">{{ otp }}</div>
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#4c7c5f;margin-top:4px;">Valid for 10 minutes</div>
+  </td></tr></table><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">{{ hint }}</p>{% endblock %}
+{% block footer_reason %}{{ footer_reason }}{% endblock %}

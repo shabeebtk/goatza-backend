@@ -12,6 +12,7 @@ from sports.models import UserSport
 
 from organization.models import OrganizationSport
 from moderation.selectors.blocked_filters import exclude_blocked
+from accounts.selectors.visibility_selectors import exclude_inactive_authors
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -284,6 +285,11 @@ class FeedService:
         # Queryset stage only; the §3.1 ranking below is untouched.
         queryset = exclude_blocked(queryset, actor)
 
+        # DEACTIVATED AUTHORS — the same choke point. A user still following a
+        # deleted account keeps their old posts out of the feed; posts authored
+        # by an ORGANIZATION are unaffected.
+        queryset = exclude_inactive_authors(queryset)
+
         if seen_ids:
             queryset = queryset.exclude(id__in=seen_ids)
 
@@ -368,6 +374,9 @@ class FeedService:
         # BLOCK EXCLUSION — source 3 builds its own queryset instead of
         # going through visible_posts_queryset, so it needs its own call.
         queryset = exclude_blocked(queryset, actor)
+
+        # ...and its own deactivated-author exclusion, for the same reason.
+        queryset = exclude_inactive_authors(queryset)
 
         if seen_ids:
             queryset = queryset.exclude(id__in=seen_ids)

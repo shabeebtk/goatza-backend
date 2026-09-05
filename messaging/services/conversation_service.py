@@ -369,6 +369,16 @@ class ConversationService:
                 return
             if user.id in blocked_user_ids:
                 return
+            # DEACTIVATED ACCOUNT — deletion pending, unverified signup or
+            # suspended. Filtered HERE rather than on each of the three source
+            # querysets because this closure is the one funnel every candidate
+            # passes through, existing conversations included: you cannot start
+            # or resume a chat with someone who has left.
+            #
+            # This is the PICKER only. Existing threads and their history are
+            # untouched — the purge anonymizes the display later.
+            if not user.is_active:
+                return
             seen_users.add(user.id)
             results.append(
                 ConversationService._target_item_user(user, conversation_id, source)

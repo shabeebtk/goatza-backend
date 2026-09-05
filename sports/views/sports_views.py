@@ -4,7 +4,6 @@ from rest_framework.views import APIView
 from django.db.models import Prefetch
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from utils.response import response_data
-from utils.emails import send_email
 from sports.models import Sport, SportAttribute, SportAttributeOption, SportPosition
 from sports.serializers.sports_serializers import SportSerializer, SportFullDetailsSerializer
 
