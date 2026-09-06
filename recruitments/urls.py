@@ -4,6 +4,9 @@ from recruitments.views.recruitment_views import (
     UpdateRecruitmentAPIView, ChangeRecruitmentStatusAPIView,
     DiscoverRecruitmentsAPIView
 )
+from recruitments.views.save_views import (
+    ToggleSaveRecruitmentAPIView, SavedRecruitmentsListAPIView
+)
 from recruitments.views.application_views import (
     ApplyRecruitmentAPIView,
     ListRecruitmentApplicationsAPIView,
@@ -26,6 +29,10 @@ urlpatterns = [
     path('<uuid:recruitment_id>/apply', ApplyRecruitmentAPIView.as_view()),
     path('<uuid:recruitment_id>/applications', ListRecruitmentApplicationsAPIView.as_view()),
     path('<uuid:recruitment_id>/applications/bulk-status', BulkApplicationStatusAPIView.as_view()),
+    # Shortlist. 'saved/list' is listed before the <uuid> routes for
+    # readability only - "saved" can never match a uuid converter.
+    path('saved/list', SavedRecruitmentsListAPIView.as_view()),
+    path('<uuid:recruitment_id>/save', ToggleSaveRecruitmentAPIView.as_view()),
     path('applications/my', MyApplicationsAPIView.as_view()),
     path('applications/<uuid:application_id>/details', RecruitmentApplicationDetailAPIView.as_view()),
     path('applications/<uuid:application_id>/withdraw', WithdrawApplicationAPIView.as_view()),

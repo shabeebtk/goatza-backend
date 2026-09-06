@@ -453,6 +453,9 @@ class DiscoverRecruitmentsAPIView(BaseAPIView):
             )
             cached = RecruitmentDiscoverService.get_cached(cache_key)
             if cached is not None:
+                # The rails tolerate being ten minutes old; the viewer's own
+                # bookmarks do not. Re-read just those, one query.
+                RecruitmentDiscoverService.refresh_saved_state(cached, actor)
                 logger.info(f"{TAG} | Cache hit")
                 return response_data(success=True, data=cached)
 

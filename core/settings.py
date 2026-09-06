@@ -343,6 +343,12 @@ REST_FRAMEWORK = {
         # Filing reports. Per USER, not per actor (see
         # moderation.throttles.ReportThrottle) — an actor-scoped bucket would
         # give one person a fresh ten for every org they belong to.
+        # Toggling a recruitment save (recruitments.throttles
+        # .SaveRecruitmentThrottle). Per ACTOR — the shortlist is per-actor, so
+        # a scout curating the club's list must not spend their own budget.
+        # Its own scope so a burst of bookmarks never drains the shared 'user'
+        # budget that applying to a trial draws on.
+        'recruitment_save': '60/min',
         'moderation_report': '10/hour',
         # "Report a problem" — app breakage, not abuse. Per USER for the same
         # reason moderation_report is (support.throttles.ProblemReportThrottle).

@@ -834,3 +834,63 @@ class RecruitmentApplicationAnswer(BaseUUIDModel):
             models.Index(fields=["application"]),
             models.Index(fields=["question"]),
         ]
+
+class SavedRecruitment(BaseUUIDModel):
+    """
+    A recruitment shortlisted by ONE actor — the player, or the org they act
+    as. Mirrors posts.SavedPost exactly: same dual-actor shape, same partial
+    uniques, and the same privacy rule — a save is counted, notified and shown
+    to nobody but the saver.
+
+    Deliberately no soft delete and no status column: unsaving is the delete,
+    and the saved list keeps closed/cancelled postings on purpose (a shortlist
+    is exactly where a player notices that a deadline passed).
+    """
+
+    # Dual-actor, same shape as SavedPost: a save belongs to the actor who made
+    # it, so a person and an org they run keep separate lists.
+    user = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="saved_recruitments"
+    )
+    org = models.ForeignKey(
+        Organization,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="saved_recruitments"
+    )
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="saved_by"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "saved_recruitments"
+
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(user__isnull=False, org__isnull=True) |
+                    Q(user__isnull=True, org__isnull=False)
+                ),
+                name="saved_recruitment_user_or_org",
+            ),
+            # Partial uniques — NULL never equals NULL, so an unconditional
+            # unique on a nullable column would let duplicates through.
+            models.UniqueConstraint(
+                fields=["user", "recruitment"],
+                condition=Q(user__isnull=False),
+                name="unique_saved_recruitment_user",
+            ),
+            models.UniqueConstraint(
+                fields=["org", "recruitment"],
+                condition=Q(org__isnull=False),
+                name="unique_saved_recruitment_org",
+            ),
+        ]

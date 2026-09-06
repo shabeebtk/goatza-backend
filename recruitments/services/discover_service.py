@@ -31,6 +31,9 @@ from recruitments.selectors.recruitment_selectors import (
     LIST_SELECT_RELATED,
     RecruitmentSelector,
 )
+from recruitments.selectors.saved_recruitment_selectors import (
+    SavedRecruitmentSelector,
+)
 from recruitments.services import eligibility_service
 from recruitments.services.match_score_service import MatchScoreService
 from moderation.selectors.blocked_filters import exclude_blocked
@@ -117,7 +120,7 @@ class RecruitmentDiscoverService:
         candidates = list(
             exclude_blocked(
                 RecruitmentSelector.discover_candidates(
-                    context, context.followed_org_ids, now=now
+                    context, context.followed_org_ids, now=now, actor=actor
                 ),
                 actor,
                 user_field=None,
@@ -215,6 +218,37 @@ class RecruitmentDiscoverService:
     # ------------------------------------------------------------ #
     # CACHE (§4)
     # ------------------------------------------------------------ #
+
+    @classmethod
+    def refresh_saved_state(cls, data, actor):
+        """
+        Re-read ``is_saved`` on an already-serialized payload, in place.
+
+        The sections are cached for ten minutes (per actor, so nothing leaks) —
+        but a bookmark tapped inside that window would otherwise come back
+        empty on the next load, which reads as a lost save. Everything else in
+        the payload is a ranking that tolerates being ten minutes old; this one
+        flag is the user's own action, so it does not.
+
+        One query for the whole page.
+        """
+        rows = [
+            row
+            for section in SECTION_ORDER
+            for row in data.get(section, [])
+        ]
+        if not rows:
+            return
+
+        saved_ids = SavedRecruitmentSelector.saved_ids(
+            actor, [row["id"] for row in rows]
+        )
+
+        for row in rows:
+            # Serialized ids are strings; the query answers in UUIDs.
+            row["is_saved"] = str(row["id"]) in {
+                str(saved_id) for saved_id in saved_ids
+            }
 
     @staticmethod
     def cache_key(actor, max_distance_km):
