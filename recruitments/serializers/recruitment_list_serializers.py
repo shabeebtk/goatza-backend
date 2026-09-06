@@ -99,6 +99,7 @@ class RecruitmentListSerializer(serializers.ModelSerializer):
     # The list selector already prefetches age_categories, so the card's age
     # chip costs no extra query. An empty list means "open to all ages".
     age_categories = RecruitmentAgeCategorySerializer(many=True, read_only=True)
+    is_saved = serializers.SerializerMethodField()
 
     class Meta:
 
@@ -135,7 +136,21 @@ class RecruitmentListSerializer(serializers.ModelSerializer):
             # deliberately does NOT render it — a third value in the age/fee
             # cell costs more scannability than the signal is worth.
             "gender",
+            # The bookmark. Always present so the card never has to guess.
+            "is_saved",
         ]
+
+    def get_is_saved(self, obj):
+        """
+        Whether the CURRENT actor shortlisted this recruitment.
+
+        Supplied by SavedRecruitmentSelector.annotate_is_saved on every
+        queryset that reaches this serializer. The default keeps an
+        un-annotated path rendering an empty bookmark instead of raising — but
+        that is a bug at the call site, not a feature, and it is also what
+        makes the serializer safe to reuse on the anonymous public org profile.
+        """
+        return bool(getattr(obj, "is_saved", False))
 
     def get_cover_media(self, obj):
 
@@ -236,6 +251,28 @@ class RecruitmentDiscoverItemSerializer(RecruitmentListSerializer):
         return match.days_to_deadline if match else None
 
 
+class SavedRecruitmentListSerializer(RecruitmentListSerializer):
+    """
+    A shortlisted card: the ordinary list card plus WHEN it was saved.
+
+    Deliberately flat and deliberately the same card — nesting the recruitment
+    under a save row would have bought the frontend a second shape to render
+    and a second card component to keep in step.
+
+    ``saved_at`` comes off the save row the view stamps onto each instance
+    (the same trick RecruitmentDiscoverItemSerializer uses for ``match``): the
+    ordering lives on the save, so the timestamp has to come from there too.
+    """
+
+    saved_at = serializers.SerializerMethodField()
+
+    class Meta(RecruitmentListSerializer.Meta):
+        fields = RecruitmentListSerializer.Meta.fields + ["saved_at"]
+
+    def get_saved_at(self, obj):
+        return getattr(obj, "saved_at", None)
+
+
 class RecruitmentMediaSerializer(serializers.ModelSerializer):
 
     class Meta:
@@ -325,6 +362,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
     eligibility_criteria = RecruitmentEligibilityCriteriaSerializer(
         many=True, read_only=True
     )
+    is_saved = serializers.SerializerMethodField()
 
     class Meta:
         model = Recruitment
@@ -379,9 +417,17 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
             "can_apply",
             "is_accepting_applications",
             "external_apply_url",
+            # Same bookmark the card carries, so the detail page's toggle has
+            # its initial state without a second request.
+            "is_saved",
 
             "created_at",
         ]
+
+    # BOOKMARK — annotated by SavedRecruitmentSelector.annotate_is_saved on
+    # the detail selector's queryset; see RecruitmentListSerializer.get_is_saved.
+    def get_is_saved(self, obj):
+        return bool(getattr(obj, "is_saved", False))
 
     # PLAYER APPLICATION
     def get_my_application(self, obj):
@@ -434,6 +480,16 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
 class RecruitmentOwnerDetailSerializer(
     RecruitmentDetailSerializer
 ):
+    """
+    The public detail plus the numbers only the posting org may see.
+
+    The owner check is NOT repeated here: RecruitmentDetailAPIView already
+    decides between this serializer and the public one, so membership of this
+    class IS the gate. Every field below inherits that gating for free — which
+    is exactly why a new owner-only field belongs here and nowhere else.
+    """
+
+    saves_count = serializers.SerializerMethodField()
 
     class Meta(RecruitmentDetailSerializer.Meta):
 
@@ -446,7 +502,18 @@ class RecruitmentOwnerDetailSerializer(
             "selected_count",
 
             "views_count",
+            # How many actors shortlisted this posting. An AGGREGATE only — the
+            # shortlist itself stays private to the saver (SavedRecruitment),
+            # so this says how many, never who.
+            "saves_count",
 
             "published_at",
             "updated_at",
         ]
+
+    def get_saves_count(self, obj):
+        # A COUNT on the one row we already fetched, not an annotation on the
+        # detail queryset: the public serializer shares that queryset, and
+        # annotating there would make every viewer pay for a number only the
+        # owner is ever shown.
+        return obj.saved_by.count()

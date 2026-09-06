@@ -147,6 +147,15 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware', # cors 
     'django.middleware.security.SecurityMiddleware',
+    # Serves STATIC_ROOT straight from this process. Render has no separate web
+    # server in front of the app, so without it /static/ 404s and the Django
+    # admin renders as unstyled HTML in production.
+    #
+    # Directly AFTER SecurityMiddleware, which is where WhiteNoise's own docs
+    # put it and the only correct slot: SecurityMiddleware must still get to
+    # issue the https redirect and the security headers first, and every
+    # middleware below this line would otherwise run for every static asset.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -236,7 +245,24 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
-STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.StaticFilesStorage'
+
+# STORAGES, not the STATICFILES_STORAGE string this used to be: that setting was
+# removed in Django 5.1 and is SILENTLY IGNORED on 6.0 — it looked configured
+# and did nothing.
+#
+# CompressedManifestStaticFilesStorage is the production pairing for the
+# WhiteNoise middleware above: collectstatic writes a hashed filename per file
+# plus gzip/brotli copies, so assets are served immutable-cacheable and a
+# deploy can never hand a browser a stale cached CSS under an unchanged URL.
+# It is a MANIFEST storage — a template referencing a file that was not
+# collected raises at render time rather than 404ing quietly, which is the
+# behaviour we want.
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 # ------- REST FRAMEWORK -----------
 
@@ -258,6 +284,24 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle',
     ],
+    # How many trusted proxies sit in front of this process. It is what every
+    # IP-keyed throttle in the app resolves a caller's address through, because
+    # they all inherit DRF's get_ident (nothing overrides it — see
+    # messaging/throttles.py).
+    #
+    # Render terminates TLS at its edge and forwards to us, so exactly ONE hop
+    # appends to X-Forwarded-For. Unset, DRF takes the FIRST address in that
+    # header, which is whatever the client sent — so an attacker sends
+    # "X-Forwarded-For: <random>" and gets a brand new throttle bucket on every
+    # request. With NUM_PROXIES=1, DRF counts one address back from the END and
+    # takes the one Render's proxy appended, which is the real peer and is not
+    # forgeable from outside.
+    #
+    # None locally (no proxy, REMOTE_ADDR is already the real client), and
+    # env-overridable because the count is a property of the deployment, not of
+    # the code: putting Cloudflare in front of Render makes it 2, and a wrong
+    # value fails OPEN into the spoofable case rather than loudly.
+    'NUM_PROXIES': int(os.getenv('DRF_NUM_PROXIES')) if os.getenv('DRF_NUM_PROXIES') else (1 if IS_PROD else None),
     'DEFAULT_THROTTLE_RATES': {
         'anon': '20/min',    # Unauthenticated users
         'user': '100/min',   # Authenticated users
@@ -272,6 +316,16 @@ REST_FRAMEWORK = {
         # request. Tight because the honest flow is two calls and nobody
         # deletes their account twice.
         'account_delete': '3/hour',
+        # Changing the login email, shared by BOTH /user/email/change/
+        # endpoints (see accounts.throttles.EmailChangeThrottle). Per USER.
+        # Tight on two counts: initiate mails a code to an address the CALLER
+        # typed, and confirm is a guess at a 4-digit code.
+        'email_change': '5/hour',
+        # Changing the phone number (accounts.throttles.PhoneChangeThrottle).
+        # Per USER, and looser — no mail leaves and no secret is guarded, but
+        # the unique column would otherwise answer "taken" often enough to
+        # enumerate numbers.
+        'phone_change': '10/hour',
         'message_share': '30/min',   # per actor — see messaging.throttles
         'chat_media': '30/min',      # per actor — chat photo uploads
         # Feed impression flushes (see feed.throttles). Its own scope so a long
@@ -289,6 +343,12 @@ REST_FRAMEWORK = {
         # Filing reports. Per USER, not per actor (see
         # moderation.throttles.ReportThrottle) — an actor-scoped bucket would
         # give one person a fresh ten for every org they belong to.
+        # Toggling a recruitment save (recruitments.throttles
+        # .SaveRecruitmentThrottle). Per ACTOR — the shortlist is per-actor, so
+        # a scout curating the club's list must not spend their own budget.
+        # Its own scope so a burst of bookmarks never drains the shared 'user'
+        # budget that applying to a trial draws on.
+        'recruitment_save': '60/min',
         'moderation_report': '10/hour',
         # "Report a problem" — app breakage, not abuse. Per USER for the same
         # reason moderation_report is (support.throttles.ProblemReportThrottle).
@@ -376,6 +436,35 @@ CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
 
 CORS_ALLOW_CREDENTIALS = True
 
+# Origins allowed to open a WEBSOCKET against this server (core.asgi wraps the
+# router in channels' OriginValidator with this list).
+#
+# OriginValidator with an explicit list, NOT AllowedHostsOriginValidator, and
+# the reason is the deployment shape: the frontend is goatza.com on Vercel and
+# this API answers on api.goatza.com / *.onrender.com. AllowedHostsOriginValidator
+# checks the browser's Origin against ALLOWED_HOSTS, so making cross-origin WS
+# work that way would mean putting goatza.com into DJANGO_ALLOWED_HOSTS — a
+# list that means something completely different (the Host values this process
+# will answer to) and that also guards against Host-header injection. Widening
+# it to make a websocket connect is the wrong lever.
+#
+# CORS_ALLOWED_ORIGINS is the right default because it is already the answer to
+# the same question: "which browser origins may talk to this API". A WS handshake
+# is sent by the same page as the XHRs, so the two lists move together, and
+# keeping one env var means they cannot drift apart and half-break the chat.
+#
+# WEBSOCKET_ALLOWED_ORIGINS overrides it only where they genuinely differ
+# (e.g. allowing a Vercel preview deployment to open a socket without granting
+# it the full CORS surface).
+#
+# NOTE: a connection with NO Origin header is REFUSED. That is every non-browser
+# client — a native app, a wscat debug session. Browsers always send it and
+# cannot be made to lie about it, which is the whole reason this check works;
+# a future native client needs its own decision here, not a wildcard.
+WEBSOCKET_ALLOWED_ORIGINS = (
+    env_list("WEBSOCKET_ALLOWED_ORIGINS") or CORS_ALLOWED_ORIGINS
+)
+
 CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
@@ -432,16 +521,21 @@ MEDIA_PUBLIC_BASE_URL = (
 
 
 # -------- EMAIL CONFIG ----------
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
-
-
+# Every email this app sends goes out over Resend's HTTP API from
+# utils/emails.py — there is no other sender. A grep for django.core.mail,
+# send_mail, EmailMessage and mail_admins across the repo (settings excluded)
+# returns nothing, which is why the Gmail SMTP block that used to sit here is
+# gone rather than parked behind an env var: it was six lines of credentials
+# nothing read, and a set of Gmail app-password variables that looked live.
+#
+# Django's SMTP backend is therefore INTENTIONALLY UNCONFIGURED, and so is
+# DEFAULT_FROM_EMAIL. If something ever does need Django's mail layer (admin
+# error mail is the likely one), configure it from the environment then and
+# point DEFAULT_FROM_EMAIL at the branded RESEND_FROM_EMAIL address — never at
+# a personal Gmail account, which is what it used to be.
 RESEND_API_KEY = os.getenv('RESEND_API_KEY')
+
+# The branded From: on every transactional mail, e.g. "Goatza <no-reply@goatza.com>".
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL')
 
 
@@ -632,8 +726,13 @@ PLACES_ACTIVE_USER_DAYS = int(os.getenv("PLACES_ACTIVE_USER_DAYS") or 30)
 # filesystem is ephemeral and nothing would ever read it.
 #
 # The app loggers (logging.getLogger(__name__) across accounts/, posts/,
-# services/ ...) are deliberately NOT listed: they inherit the root logger, so
-# every existing call starts emitting without a per-app entry here.
+# services/, utils/ ...) are deliberately NOT listed: they inherit the root
+# logger, so every existing call starts emitting without a per-app entry here.
+#
+# That inheritance is what routes utils.emails to the console at WARNING and
+# ERROR — the failed-attempt and permanently-lost-email lines. LOG_LEVEL may be
+# raised to WARNING to quiet a noisy environment; it must never be set above
+# ERROR, or a lost OTP stops being recorded anywhere at all.
 LOGGING = {
     "version": 1,
     # False, so anything configured before this dict is read (Django's own

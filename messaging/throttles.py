@@ -24,6 +24,12 @@ class ActorScopedThrottle(SimpleRateThrottle):
         if not user or not user.is_authenticated:
             # Anonymous callers can't reach these views (IsAuthenticated), but
             # fall back to IP rather than a shared "None" bucket.
+            #
+            # DRF's own get_ident, deliberately NOT a custom one: it is the
+            # single place NUM_PROXIES (core.settings) is honoured, so behind
+            # Render's proxy this reads the address Render appended to
+            # X-Forwarded-For instead of whatever prefix the client sent. An
+            # override here would silently opt this throttle out of that.
             return self.cache_format % {
                 "scope": self.scope,
                 "ident": self.get_ident(request),

@@ -23,6 +23,22 @@ class CacheKeys:
         return f"otp:{email}"
 
     @staticmethod
+    def email_change_pending(user_id):
+        """
+        The address a user is part-way through moving to.
+
+        SERVER-SIDE BINDING, and that is the whole reason it exists: the
+        confirm step takes only a code, never an address. Without this key the
+        client would have to hand the new email back, and a caller who could
+        change what it sent between the two steps would be able to spend a code
+        proved against one inbox on a different one.
+
+        Written by initiate with the OTP's own TTL so the two die together, and
+        deleted the moment the change lands.
+        """
+        return f"email_change:pending:{user_id}"
+
+    @staticmethod
     def google_state(state):
         return f"google:state:{state}"
     
@@ -74,6 +90,21 @@ class CacheKeys:
         toggle silently not working.
         """
         return f"public:cv:{username}"
+
+    @staticmethod
+    def public_sitemap_urls():
+        """
+        The whole /public/sitemap/urls payload under ONE key.
+
+        Not keyed by anything: the response has no inputs. Deliberately NOT
+        invalidated when a profile is hidden either — the sitemap's only reader
+        is a crawler-facing build step, the entry expires within the hour, and
+        a URL that appears in a sitemap it should not be in still 404s when the
+        crawler follows it (the page itself is the enforcement point, see
+        get_public_user). Adding a bust to every profile-visibility write would
+        buy an hour of tidiness in a file nobody reads directly.
+        """
+        return "public:sitemap:urls"
 
     @staticmethod
     def cv_view_counted(username, ident):

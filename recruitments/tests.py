@@ -28,6 +28,7 @@ from recruitments.models import (
     RecruitmentAgeCategory,
     RecruitmentEligibilityCriteria,
     RecruitmentDiscoverImpression,
+    SavedRecruitment,
 )
 from recruitments.selectors.recruitment_selectors import RecruitmentSelector
 from recruitments.selectors.player_context_selectors import (
@@ -2938,3 +2939,468 @@ class RecruitmentApplyFlowIsolationTests(APITestCase):
         recruitment.applications_count = 0
         recruitment.application_deadline = timezone.now() - timedelta(days=1)
         self.assertFalse(recruitment.is_accepting_applications)
+
+
+# =====================================================================
+# SAVED RECRUITMENTS — the shortlist, per ACTOR, private to the saver
+# =====================================================================
+
+SAVED_LIST_URL = "/recruitments/saved/list"
+
+
+class SavedRecruitmentTests(APITestCase):
+    """
+    A save belongs to the actor that made it: a person and an org they run
+    keep completely separate shortlists of the same recruitment.
+
+    The one deliberate difference from saved posts is what the list KEEPS —
+    a closed trial stays, because a shortlist is where a player notices the
+    deadline passed.
+    """
+
+    def setUp(self):
+        cache.clear()  # the discover payload is cached per actor
+
+        self.me = self._user("saver", "Saver")
+        self.other = self._user("stranger", "Stranger")
+
+        self.org = Organization.objects.create(
+            name="Shortlist FC", username="shortlistfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.me,
+            role=OrganizationMember.Role.OWNER,
+        )
+        # The org-scoped list resolves ?username= through UsernameRegistry.
+        UsernameService.claim(self.org.username, organization=self.org)
+
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+
+        self.client.force_authenticate(user=self.me)
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _recruitment(self, title="Trial", **overrides):
+        data = dict(
+            organization=self.org,
+            sport=self.sport,
+            title=title,
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            published_at=timezone.now(),
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _org_headers(self):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(self.org.id),
+        }
+
+    def _toggle(self, recruitment_id, as_org=False):
+        headers = self._org_headers() if as_org else {}
+        return self.client.post(
+            f"/recruitments/{recruitment_id}/save", **headers
+        )
+
+    def _saved_list(self, as_org=False, **params):
+        headers = self._org_headers() if as_org else {}
+        return self.client.get(SAVED_LIST_URL, params, **headers)
+
+    def _list_row(self, recruitment_id, **params):
+        """The card as /recruitments/list serializes it, for the annotation."""
+        resp = self.client.get("/recruitments/list", params)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        rows = [
+            row for row in resp.data["data"]["results"]
+            if row["id"] == str(recruitment_id)
+        ]
+        self.assertEqual(len(rows), 1, resp.data["data"]["results"])
+        return rows[0]
+
+    def _detail(self, recruitment_id):
+        resp = self.client.get(f"/recruitments/{recruitment_id}/details")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp.data["data"]
+
+    # ── toggle as a user ─────────────────────────────────────────
+
+    def test_toggle_as_user_saves_then_unsaves(self):
+        recruitment = self._recruitment()
+
+        on = self._toggle(recruitment.id)
+        self.assertEqual(on.status_code, status.HTTP_200_OK, on.data)
+        self.assertTrue(on.data["data"]["is_saved"])
+        self.assertEqual(
+            on.data["data"]["recruitment_id"], str(recruitment.id)
+        )
+
+        row = SavedRecruitment.objects.get(recruitment=recruitment)
+        self.assertEqual(row.user_id, self.me.id)
+        self.assertIsNone(row.org_id)
+
+        off = self._toggle(recruitment.id)
+        self.assertEqual(off.status_code, status.HTTP_200_OK, off.data)
+        self.assertFalse(off.data["data"]["is_saved"])
+        self.assertFalse(
+            SavedRecruitment.objects.filter(recruitment=recruitment).exists()
+        )
+
+    # ── the two actors are independent ───────────────────────────
+
+    def test_org_save_is_a_separate_row_and_list(self):
+        recruitment = self._recruitment()
+
+        self._toggle(recruitment.id)                 # as me
+        self._toggle(recruitment.id, as_org=True)    # as the org
+
+        self.assertEqual(
+            SavedRecruitment.objects.filter(recruitment=recruitment).count(), 2
+        )
+        self.assertTrue(
+            SavedRecruitment.objects.filter(
+                recruitment=recruitment, user=self.me, org__isnull=True
+            ).exists()
+        )
+        self.assertTrue(
+            SavedRecruitment.objects.filter(
+                recruitment=recruitment, org=self.org, user__isnull=True
+            ).exists()
+        )
+
+        # Unsaving as the org leaves the person's save untouched.
+        self._toggle(recruitment.id, as_org=True)
+        self.assertTrue(
+            SavedRecruitment.objects.filter(
+                recruitment=recruitment, user=self.me
+            ).exists()
+        )
+        self.assertFalse(
+            SavedRecruitment.objects.filter(
+                recruitment=recruitment, org=self.org
+            ).exists()
+        )
+
+    def test_saved_list_is_actor_scoped(self):
+        mine = self._recruitment("Mine")
+        theirs = self._recruitment("The club's")
+
+        self._toggle(mine.id)
+        self._toggle(theirs.id, as_org=True)
+
+        as_user = self._saved_list()
+        self.assertEqual(as_user.status_code, status.HTTP_200_OK, as_user.data)
+        self.assertEqual(
+            [r["id"] for r in as_user.data["data"]["results"]], [str(mine.id)]
+        )
+
+        as_org = self._saved_list(as_org=True)
+        self.assertEqual(as_org.status_code, status.HTTP_200_OK, as_org.data)
+        self.assertEqual(
+            [r["id"] for r in as_org.data["data"]["results"]], [str(theirs.id)]
+        )
+
+    # ── constraints ──────────────────────────────────────────────
+
+    def test_second_save_by_the_same_actor_is_rejected(self):
+        recruitment = self._recruitment()
+        SavedRecruitment.objects.create(recruitment=recruitment, user=self.me)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                SavedRecruitment.objects.create(
+                    recruitment=recruitment, user=self.me
+                )
+
+    def test_row_with_both_user_and_org_is_rejected(self):
+        recruitment = self._recruitment()
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                SavedRecruitment.objects.create(
+                    recruitment=recruitment, user=self.me, org=self.org
+                )
+
+    def test_row_with_neither_user_nor_org_is_rejected(self):
+        recruitment = self._recruitment()
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                SavedRecruitment.objects.create(recruitment=recruitment)
+
+    # ── what cannot be saved ─────────────────────────────────────
+
+    def test_saving_a_deleted_recruitment_returns_404(self):
+        recruitment = self._recruitment(is_deleted=True)
+
+        resp = self._toggle(recruitment.id)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND, resp.data)
+        self.assertFalse(
+            SavedRecruitment.objects.filter(recruitment=recruitment).exists()
+        )
+
+    def test_saving_a_hidden_recruitment_returns_404(self):
+        # A draft and a private posting are both invisible to a stranger, and
+        # saving must not become the way to find out they exist.
+        draft = self._recruitment("Draft", status=Recruitment.Status.DRAFT)
+        private = self._recruitment(
+            "Private", visibility=Recruitment.Visibility.PRIVATE
+        )
+        followers_only = self._recruitment(
+            "Followers", visibility=Recruitment.Visibility.FOLLOWERS_ONLY
+        )
+
+        self.client.force_authenticate(user=self.other)
+
+        for recruitment in (draft, private, followers_only):
+            resp = self._toggle(recruitment.id)
+            self.assertEqual(
+                resp.status_code, status.HTTP_404_NOT_FOUND, resp.data
+            )
+
+        self.assertEqual(SavedRecruitment.objects.count(), 0)
+
+    def test_saving_an_unknown_recruitment_returns_404(self):
+        resp = self._toggle(uuid.uuid4())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND, resp.data)
+
+    # ── the list ─────────────────────────────────────────────────
+
+    def test_saved_list_is_newest_saved_first(self):
+        first = self._recruitment("First")
+        second = self._recruitment("Second")
+        third = self._recruitment("Third")
+
+        # Saved out of creation order — the LIST order follows the saves.
+        self._toggle(second.id)
+        self._toggle(third.id)
+        self._toggle(first.id)
+
+        resp = self._saved_list()
+        self.assertEqual(
+            [r["id"] for r in resp.data["data"]["results"]],
+            [str(first.id), str(third.id), str(second.id)],
+        )
+
+    def test_saved_list_paginates_on_limit_and_offset(self):
+        recruitments = [self._recruitment(f"Trial {i}") for i in range(3)]
+        for recruitment in recruitments:
+            self._toggle(recruitment.id)
+
+        newest_first = [str(r.id) for r in reversed(recruitments)]
+
+        page_one = self._saved_list(limit=2)
+        self.assertEqual(page_one.data["data"]["count"], 3)
+        self.assertEqual(page_one.data["data"]["limit"], 2)
+        self.assertEqual(
+            [r["id"] for r in page_one.data["data"]["results"]],
+            newest_first[:2],
+        )
+
+        page_two = self._saved_list(limit=2, offset=2)
+        self.assertEqual(page_two.data["data"]["count"], 3)
+        self.assertEqual(page_two.data["data"]["offset"], 2)
+        self.assertEqual(
+            [r["id"] for r in page_two.data["data"]["results"]],
+            newest_first[2:],
+        )
+
+    def test_saved_list_carries_the_card_payload(self):
+        recruitment = self._recruitment(city="Kozhikode")
+        self._toggle(recruitment.id)
+
+        row = self._saved_list().data["data"]["results"][0]
+        # The same card the list/discover endpoints ship, so the frontend
+        # renders it with RecruitmentCard unchanged...
+        self.assertEqual(row["title"], recruitment.title)
+        self.assertEqual(row["city"], "Kozhikode")
+        self.assertEqual(row["organization"]["username"], "shortlistfc")
+        # ...plus the timestamp only this list knows...
+        self.assertIsNotNone(row["saved_at"])
+        # ...and the flag that keeps THIS list's own bookmark filled.
+        self.assertTrue(row["is_saved"])
+
+    def test_unsaving_drops_the_recruitment_from_the_list(self):
+        recruitment = self._recruitment()
+        self._toggle(recruitment.id)
+        self._toggle(recruitment.id)
+
+        resp = self._saved_list()
+        self.assertEqual(resp.data["data"]["results"], [])
+        self.assertEqual(resp.data["data"]["count"], 0)
+
+    def test_deleted_recruitment_drops_out_of_the_list(self):
+        kept = self._recruitment("Kept")
+        removed = self._recruitment("Withdrawn")
+        self._toggle(kept.id)
+        self._toggle(removed.id)
+
+        removed.is_deleted = True
+        removed.save(update_fields=["is_deleted"])
+
+        resp = self._saved_list()
+        self.assertEqual(
+            [r["id"] for r in resp.data["data"]["results"]], [str(kept.id)]
+        )
+        self.assertEqual(resp.data["data"]["count"], 1)
+        # The save row itself survives — nothing rewrites history when an org
+        # withdraws a posting; the list just stops showing it.
+        self.assertTrue(
+            SavedRecruitment.objects.filter(recruitment=removed).exists()
+        )
+
+    def test_closed_recruitment_stays_in_the_list_with_its_status(self):
+        recruitment = self._recruitment("Closing")
+        self._toggle(recruitment.id)
+
+        recruitment.status = Recruitment.Status.CLOSED
+        recruitment.save(update_fields=["status"])
+
+        row = self._saved_list().data["data"]["results"][0]
+        self.assertEqual(row["id"], str(recruitment.id))
+        # A shortlist is exactly where someone notices a deadline passed, so
+        # the card stays and wears the badge.
+        self.assertEqual(row["status"], Recruitment.Status.CLOSED)
+
+    def test_recruitment_the_saver_can_no_longer_see_drops_out(self):
+        recruitment = self._recruitment("Went private")
+        self.client.force_authenticate(user=self.other)
+        self._toggle(recruitment.id)
+        self.assertEqual(len(self._saved_list().data["data"]["results"]), 1)
+
+        recruitment.visibility = Recruitment.Visibility.PRIVATE
+        recruitment.save(update_fields=["visibility"])
+
+        resp = self._saved_list()
+        self.assertEqual(resp.data["data"]["results"], [])
+
+    def test_followers_only_save_survives_for_a_follower(self):
+        recruitment = self._recruitment(
+            "Members only", visibility=Recruitment.Visibility.FOLLOWERS_ONLY
+        )
+        Follow.objects.create(follower_user=self.other, following_org=self.org)
+
+        self.client.force_authenticate(user=self.other)
+        self._toggle(recruitment.id)
+
+        resp = self._saved_list()
+        self.assertEqual(
+            [r["id"] for r in resp.data["data"]["results"]], [str(recruitment.id)]
+        )
+
+    # ── is_saved on the existing payloads ────────────────────────
+
+    def test_is_saved_on_the_ranked_list_for_saver_and_non_saver(self):
+        recruitment = self._recruitment()
+
+        self.assertFalse(self._list_row(recruitment.id)["is_saved"])
+
+        self._toggle(recruitment.id)
+        self.assertTrue(self._list_row(recruitment.id)["is_saved"])
+
+        self.client.force_authenticate(user=self.other)
+        self.assertFalse(self._list_row(recruitment.id)["is_saved"])
+
+    def test_is_saved_on_the_org_scoped_list(self):
+        # The username-scoped mount takes the PLAIN list serializer, not the
+        # ranked one — a second code path, and the bookmark has to survive it.
+        recruitment = self._recruitment()
+        self._toggle(recruitment.id)
+
+        row = self._list_row(recruitment.id, username="shortlistfc")
+        self.assertTrue(row["is_saved"])
+
+    def test_is_saved_on_the_detail_for_saver_and_non_saver(self):
+        recruitment = self._recruitment()
+
+        self.assertFalse(self._detail(recruitment.id)["is_saved"])
+
+        self._toggle(recruitment.id)
+        self.assertTrue(self._detail(recruitment.id)["is_saved"])
+
+        self.client.force_authenticate(user=self.other)
+        self.assertFalse(self._detail(recruitment.id)["is_saved"])
+
+    def test_discover_reflects_a_save_made_after_the_payload_was_cached(self):
+        recruitment = self._recruitment()
+
+        first = self.client.get("/recruitments/discover")
+        self.assertEqual(first.status_code, status.HTTP_200_OK, first.data)
+        rows = first.data["data"]["recommended"]
+        self.assertEqual([r["id"] for r in rows], [str(recruitment.id)])
+        self.assertFalse(rows[0]["is_saved"])
+
+        self._toggle(recruitment.id)
+
+        # Served from the 10-minute cache, but the bookmark is the viewer's own
+        # action and is re-read rather than remembered.
+        second = self.client.get("/recruitments/discover")
+        self.assertTrue(second.data["data"]["recommended"][0]["is_saved"])
+
+    # ── saves_count (owner-only) ─────────────────────────────────
+
+    def _detail_as_org(self, recruitment_id):
+        """The detail payload the OWNING org sees (owner serializer)."""
+        resp = self.client.get(
+            f"/recruitments/{recruitment_id}/details", **self._org_headers()
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp.data["data"]
+
+    def test_owner_detail_exposes_saves_count(self):
+        recruitment = self._recruitment()
+
+        # Two different actors shortlist it: the user, and the org itself. Both
+        # are real rows, so the aggregate is 2 — the count is of SAVES, not of
+        # people, which is the same rule the dual-actor shortlist is built on.
+        SavedRecruitment.objects.create(recruitment=recruitment, user=self.other)
+        SavedRecruitment.objects.create(recruitment=recruitment, org=self.org)
+
+        self.assertEqual(self._detail_as_org(recruitment.id)["saves_count"], 2)
+
+    def test_owner_detail_saves_count_is_zero_not_missing(self):
+        # A posting nobody saved must still carry the key, so the stats tile
+        # renders a 0 rather than an empty cell.
+        recruitment = self._recruitment()
+
+        self.assertEqual(self._detail_as_org(recruitment.id)["saves_count"], 0)
+
+    def test_non_owner_detail_has_no_saves_count_key(self):
+        recruitment = self._recruitment()
+        SavedRecruitment.objects.create(recruitment=recruitment, user=self.other)
+
+        # A plain viewer gets the PUBLIC serializer, which never declares the
+        # field — asserted as an absent key, not a falsy value, because "0" and
+        # "not yours to see" must not be the same answer on the wire.
+        self.client.force_authenticate(user=self.other)
+        self.assertNotIn("saves_count", self._detail(recruitment.id))
+
+    def test_other_org_detail_has_no_saves_count_key(self):
+        # Acting as a DIFFERENT org is still not the owner.
+        recruitment = self._recruitment()
+        rival = Organization.objects.create(
+            name="Rival FC", username="rivalfc", type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=rival, user=self.other,
+            role=OrganizationMember.Role.OWNER,
+        )
+
+        self.client.force_authenticate(user=self.other)
+        resp = self.client.get(
+            f"/recruitments/{recruitment.id}/details",
+            HTTP_X_ACTOR_TYPE="organization",
+            HTTP_X_ACTOR_ID=str(rival.id),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertNotIn("saves_count", resp.data["data"])

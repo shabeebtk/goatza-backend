@@ -8,6 +8,9 @@ from organization.services.user_organization_services import (
 from core.constant import TYPE_ORGANIZATION
 from connections.services.follow_services import FollowService
 from connections.models import Follow
+from recruitments.selectors.saved_recruitment_selectors import (
+    SavedRecruitmentSelector
+)
 from services.geo import haversine
 
 # Relations every recruitment card needs. Named once so the "All" tab and the
@@ -261,6 +264,13 @@ class RecruitmentSelector:
         if position_id:
             queryset = queryset.filter(positions__position_id=position_id)
 
+        # BOOKMARK. Annotated on the candidate set itself so every consumer
+        # of this queryset — the plain "All" tab, the ranked one, the org
+        # profile — carries `is_saved` without a per-row lookup. One Exists
+        # subquery, and Django drops it again from the .count() that
+        # list_recruitments takes off the same queryset.
+        queryset = SavedRecruitmentSelector.annotate_is_saved(queryset, actor)
+
         # SECTION DEEP-LINKS. §5 gives every discover rail a "See all" that
         # opens the "All" tab with the rail's own rule pre-applied; these two
         # are what "Closing soon" and "New this week" mean as a filter. Without
@@ -334,10 +344,14 @@ class RecruitmentSelector:
     # ------------------------------------------------------------ #
 
     @staticmethod
-    def discover_candidates(context, followed_org_ids, now=None):
+    def discover_candidates(context, followed_org_ids, now=None, actor=None):
         """
         Every recruitment the discover sections may rank: active, live, visible
         to this viewer, and still open.
+
+        ``actor`` is only ever read for the bookmark annotation — the
+        VISIBILITY answer comes from ``context``/``followed_org_ids``, which
+        the caller has already resolved.
 
         Two deliberate differences from the "All" tab's candidate set:
 
@@ -371,6 +385,9 @@ class RecruitmentSelector:
             queryset = RecruitmentSelector.annotate_distance(
                 queryset, context.center
             )
+
+        # Same bookmark the "All" tab carries — the rails render the same card.
+        queryset = SavedRecruitmentSelector.annotate_is_saved(queryset, actor)
 
         return queryset.select_related(
             *LIST_SELECT_RELATED
@@ -407,6 +424,9 @@ class RecruitmentSelector:
             id=recruitment_id,
             is_deleted=False
         )
+        # BOOKMARK — one Exists subquery on the row we were fetching anyway, so
+        # the detail page's bookmark starts filled without a second request.
+        queryset = SavedRecruitmentSelector.annotate_is_saved(queryset, actor)
         queryset = queryset.select_related(
             "organization",
             "sport",
@@ -488,3 +508,45 @@ class RecruitmentSelector:
                 return recruitment
 
         return None
+    # ------------------------------------------------------------ #
+    # SAVED (shortlist)
+    # ------------------------------------------------------------ #
+
+    @staticmethod
+    def visible_to_actor_queryset(actor):
+        """
+        Every recruitment ``actor`` is still allowed to SEE, regardless of
+        status.
+
+        The visibility clause is the same one ``discover_candidates`` builds —
+        public, plus followers-only from an org the viewer follows, plus the
+        viewer's own listings when acting as the org — with the status and
+        deadline gates deliberately left off. That is the one difference the
+        shortlist needs: a saved trial that closed last week must stay in the
+        list wearing its "Closed" badge, and ``build_list_queryset`` cannot
+        answer that (it pins non-owners to ACTIVE, which is right for a
+        discovery list and wrong for a shortlist).
+
+        Kept in this module, not in the saved-list view, so visibility keeps
+        having exactly one home.
+        """
+        followed_org_ids = FollowService.get_following_ids(actor)["org_ids"]
+
+        visibility = Q(visibility=Recruitment.Visibility.PUBLIC)
+
+        if followed_org_ids:
+            visibility |= Q(
+                visibility=Recruitment.Visibility.FOLLOWERS_ONLY,
+                organization_id__in=followed_org_ids,
+            )
+
+        # An org actor keeps seeing its own postings at every status and
+        # visibility — same owner escape hatch build_list_queryset applies.
+        if actor and actor.is_org:
+            visibility |= Q(organization_id=actor.organization.id)
+
+        return Recruitment.objects.filter(
+            visibility,
+            is_deleted=False,
+            organization__is_suspended=False,
+        )

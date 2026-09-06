@@ -29,6 +29,45 @@ def is_valid_password(password: str) -> bool:
 
 
 # ─────────────────────────────────────────────
+# PHONE
+# ─────────────────────────────────────────────
+#
+# Phone is NOT a login identifier — the login view authenticates by email and
+# password only — so this is a format check, not an identity check. Nothing
+# here proves the number belongs to the person who typed it; that arrives with
+# SMS verification.
+
+# accounts.User.phone is CharField(max_length=15), and the "+" counts against
+# it. A number that cannot be stored is not a valid number, so the bound lives
+# here rather than being discovered by the database.
+PHONE_MAX_LENGTH = 15
+
+# E.164-ish: an optional leading "+" and 8-15 digits. Deliberately loose about
+# country prefixes — the app has users in India today and a hard-coded +91
+# would be a rule to unpick the first time it does not.
+PHONE_RE = re.compile(r"^\+?\d{8,15}$")
+
+
+def is_valid_phone(phone: str) -> bool:
+    """
+    True if `phone` is a storable, plausibly-dialable number.
+
+    Callers must strip() and store the SAME string they checked — the length
+    bound is on the stored value, so "+" plus fifteen digits fails here rather
+    than being truncated by the column.
+    """
+    if not phone or not isinstance(phone, str):
+        return False
+
+    phone = phone.strip()
+
+    if len(phone) > PHONE_MAX_LENGTH:
+        return False
+
+    return bool(PHONE_RE.match(phone))
+
+
+# ─────────────────────────────────────────────
 # USERNAMES — the single source of truth
 # ─────────────────────────────────────────────
 #

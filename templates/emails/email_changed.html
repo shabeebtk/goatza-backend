@@ -1,0 +1,22 @@
+{% extends "emails/base.html" %}
+{% comment %}
+Sent to the OLD address after the login email actually changed — the twin of
+password_changed.html, and for the same reason: this is the last mail that
+inbox will ever get from Goatza, so it is the only chance somebody whose
+account was taken over has to find out.
+
+The new address arrives MASKED (mask_email), not whole. The person reading
+this either recognises it or does not; printing it in full would hand an
+attacker who reached this inbox a second address to go after.
+
+Copy lives here rather than in context (this layout serves one email);
+utils/transactional_emails.send_email_changed_notice owns the plain-text twin
+and formats `changed_at` in IST before it gets here.
+
+`name` and `new_email` are user-supplied and stay autoescaped — never mark
+them safe.
+{% endcomment %}
+{% block preheader %}If this was you, no action is needed.{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">Email address changed</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Hi <b style='color:#111111;'>{{ name }}</b>, the email address on your Goatza account was changed on <b style='color:#111111;'>{{ changed_at }}</b> to <b style='color:#111111;'>{{ new_email }}</b>.</p><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">You&rsquo;ll sign in with the new address from now on. If this was you, no action is needed.</p><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;">
+  <tr><td style="border-left:3px solid #e8462a;background-color:#fdf1ee;border-radius:0 8px 8px 0;padding:12px 14px;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#7c2d1c;line-height:1.55;">Wasn&rsquo;t you? <a href="{{ frontend_base_url }}/auth/forgot-password" style="color:#e8462a;font-weight:bold;">Reset your password</a> immediately and contact support &mdash; someone may have access to your account.</td></tr></table>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because of a security change on your Goatza account.{% endblock %}
