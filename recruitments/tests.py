@@ -3346,3 +3346,61 @@ class SavedRecruitmentTests(APITestCase):
         # action and is re-read rather than remembered.
         second = self.client.get("/recruitments/discover")
         self.assertTrue(second.data["data"]["recommended"][0]["is_saved"])
+
+    # ── saves_count (owner-only) ─────────────────────────────────
+
+    def _detail_as_org(self, recruitment_id):
+        """The detail payload the OWNING org sees (owner serializer)."""
+        resp = self.client.get(
+            f"/recruitments/{recruitment_id}/details", **self._org_headers()
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp.data["data"]
+
+    def test_owner_detail_exposes_saves_count(self):
+        recruitment = self._recruitment()
+
+        # Two different actors shortlist it: the user, and the org itself. Both
+        # are real rows, so the aggregate is 2 — the count is of SAVES, not of
+        # people, which is the same rule the dual-actor shortlist is built on.
+        SavedRecruitment.objects.create(recruitment=recruitment, user=self.other)
+        SavedRecruitment.objects.create(recruitment=recruitment, org=self.org)
+
+        self.assertEqual(self._detail_as_org(recruitment.id)["saves_count"], 2)
+
+    def test_owner_detail_saves_count_is_zero_not_missing(self):
+        # A posting nobody saved must still carry the key, so the stats tile
+        # renders a 0 rather than an empty cell.
+        recruitment = self._recruitment()
+
+        self.assertEqual(self._detail_as_org(recruitment.id)["saves_count"], 0)
+
+    def test_non_owner_detail_has_no_saves_count_key(self):
+        recruitment = self._recruitment()
+        SavedRecruitment.objects.create(recruitment=recruitment, user=self.other)
+
+        # A plain viewer gets the PUBLIC serializer, which never declares the
+        # field — asserted as an absent key, not a falsy value, because "0" and
+        # "not yours to see" must not be the same answer on the wire.
+        self.client.force_authenticate(user=self.other)
+        self.assertNotIn("saves_count", self._detail(recruitment.id))
+
+    def test_other_org_detail_has_no_saves_count_key(self):
+        # Acting as a DIFFERENT org is still not the owner.
+        recruitment = self._recruitment()
+        rival = Organization.objects.create(
+            name="Rival FC", username="rivalfc", type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=rival, user=self.other,
+            role=OrganizationMember.Role.OWNER,
+        )
+
+        self.client.force_authenticate(user=self.other)
+        resp = self.client.get(
+            f"/recruitments/{recruitment.id}/details",
+            HTTP_X_ACTOR_TYPE="organization",
+            HTTP_X_ACTOR_ID=str(rival.id),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertNotIn("saves_count", resp.data["data"])

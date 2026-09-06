@@ -480,6 +480,16 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
 class RecruitmentOwnerDetailSerializer(
     RecruitmentDetailSerializer
 ):
+    """
+    The public detail plus the numbers only the posting org may see.
+
+    The owner check is NOT repeated here: RecruitmentDetailAPIView already
+    decides between this serializer and the public one, so membership of this
+    class IS the gate. Every field below inherits that gating for free — which
+    is exactly why a new owner-only field belongs here and nowhere else.
+    """
+
+    saves_count = serializers.SerializerMethodField()
 
     class Meta(RecruitmentDetailSerializer.Meta):
 
@@ -492,7 +502,18 @@ class RecruitmentOwnerDetailSerializer(
             "selected_count",
 
             "views_count",
+            # How many actors shortlisted this posting. An AGGREGATE only — the
+            # shortlist itself stays private to the saver (SavedRecruitment),
+            # so this says how many, never who.
+            "saves_count",
 
             "published_at",
             "updated_at",
         ]
+
+    def get_saves_count(self, obj):
+        # A COUNT on the one row we already fetched, not an annotation on the
+        # detail queryset: the public serializer shares that queryset, and
+        # annotating there would make every viewer pay for a number only the
+        # owner is ever shown.
+        return obj.saved_by.count()
