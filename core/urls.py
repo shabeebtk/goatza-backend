@@ -17,8 +17,20 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 
+from core.views.health_views import healthz
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    # Infra liveness probe, and the ONE anonymous route that is not in
+    # core/public_urls.py — it is a plain Django view precisely so it bypasses
+    # JWT auth, the terms gate and every throttle (see its module docstring).
+    # Render polls it constantly; set Health Check Path = /healthz there.
+    #
+    # No trailing slash: Render's probe requests exactly what is configured and
+    # a 301 from APPEND_SLASH would be a redirect it has to follow on every
+    # poll.
+    path('healthz', healthz),
 
     # The one anonymous-reachable prefix — see core/public_urls.py. Everything
     # outside it stays behind IsAuthenticated.

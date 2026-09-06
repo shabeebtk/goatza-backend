@@ -9,6 +9,13 @@ only the routing is centralised.
 Adding anything here is a deliberate act: the view must extend
 core.views.base_views.PublicAPIView, and its payload must be an explicit
 allow-list (see accounts/serializers/public_profile_serializers.py for why).
+
+ONE deliberate exception to "every anonymous route lives here": /healthz,
+routed straight from core.urls. It is an infra probe, not part of the public
+data surface — it returns two booleans about our own database and Redis, not a
+row of anybody's data — and it has to be a plain Django view so Render's poller
+is not subject to JWT auth, the terms gate or the anon throttle. Anything that
+returns USER data still belongs in this file.
 """
 
 from django.urls import path
@@ -19,6 +26,7 @@ from core.views.public_profile_views import (
     PublicUserPostsAPIView,
     PublicUserProfileAPIView,
 )
+from core.views.sitemap_views import PublicSitemapURLsAPIView
 from cv.views.public_cv_views import PublicCVAPIView
 from support.views.problem_report_views import PublicProblemReportAPIView
 from waitlist.views.signup_views import (
@@ -72,4 +80,16 @@ urlpatterns = [
     # internet, and it would need its own quarantine prefix and an orphan
     # sweeper before it were worth having.
     path('support/problem-report', PublicProblemReportAPIView.as_view()),
+
+    # The handles the frontend's sitemap.xml is built from. JSON, not XML: the
+    # URL shape (/profile/<username>, /organization/profile/<username>) belongs
+    # to Next.js, and this answers only the part that needs the database.
+    #
+    # Read by the frontend's sitemap route once an hour, never by a browser, so
+    # the response is one cached blob on the standard public read throttle.
+    # Handles and timestamps only — the same allow-list rule as everything else
+    # on this surface, and the visibility predicate is shared with the profile
+    # endpoints above (core.selectors.public_profile_selectors) so a hidden
+    # profile can never be advertised here while 404ing there.
+    path('sitemap/urls', PublicSitemapURLsAPIView.as_view()),
 ]

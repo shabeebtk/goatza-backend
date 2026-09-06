@@ -180,11 +180,17 @@ def _send(subject, text_body, html_template, context, to_email):
             {**context, "subject": subject, **shared_email_context()},
         )
 
+        # template + is_otp are LOG METADATA, not content — utils.emails logs
+        # them on every failed attempt and on permanent loss. is_otp is what
+        # makes a lost signup code findable in Sentry as the thing it actually
+        # is: a person who can never finish creating an account.
         send_email_async(
             subject=subject,
             message=text_body,
             to_email=to_email,
             html_message=html,
+            template=html_template,
+            is_otp=html_template == OTP_TEMPLATE,
         )
     except Exception as exc:
         logger.warning(

@@ -22,6 +22,8 @@ A hidden, deactivated or usernameless profile resolves to None here, and the
 view turns that into a 404 — never a 403, which would confirm it exists.
 """
 
+from django.db.models import F
+
 from accounts.models import User
 from achievements.selectors.achievement_selectors import (
     list_for_user as achievements_for_user,
@@ -45,6 +47,71 @@ PUBLIC_POSTS_MAX_LIMIT = 30
 # Active public listings shown on an org's public profile.
 PUBLIC_RECRUITMENTS_LIMIT = 10
 
+# Ceiling on either list in the sitemap feed. A sitemap file may hold 50,000
+# URLs, so this is nowhere near the format's limit — it is a bound on the
+# QUERY, so a table that grows to millions of rows can never turn an hourly
+# crawler refresh into a full scan serialized into memory. Splitting into a
+# sitemap index is the change to make when this cap starts biting, not raising
+# it.
+SITEMAP_MAX_ROWS = 5000
+
+
+# ─────────────────────────────────────────────
+# VISIBILITY
+# ─────────────────────────────────────────────
+# THE definition of "has a public profile", for users and for orgs. Both the
+# by-username lookups below and the sitemap feed build on these, so a rule
+# added here (a new opt-out, a new moderation state) reaches the shareable page
+# and the list of pages we ask Google to crawl in the same edit. Two copies of
+# this predicate would eventually disagree, and the way it would show up is a
+# hidden profile advertised in a sitemap.
+
+def public_users_queryset():
+    """
+    Every user whose profile an anonymous visitor may see.
+
+      * ``is_active`` — excludes deactivated, unverified and staff-suspended
+        accounts, and a soft-deleted one too: confirming a deletion flips this
+        off (accounts.services.account_deletion_service).
+      * ``deletion_requested_at`` — redundant with the above today and stated
+        anyway, because "not soft-deleted" is a rule of this surface and should
+        not depend on another module continuing to set the two together.
+      * ``profile__is_public_profile`` — the owner's opt-out. The join also
+        drops a user with no profile row at all, which is the same None the
+        old explicit check produced.
+      * a username — it is nullable, and a user who never set one has no
+        public URL to be reached at.
+    """
+    return (
+        User.objects
+        .filter(
+            is_active=True,
+            deletion_requested_at__isnull=True,
+            profile__is_public_profile=True,
+        )
+        .exclude(username__isnull=True)
+        .exclude(username="")
+    )
+
+
+def public_organizations_queryset():
+    """
+    Every organization whose profile an anonymous visitor may see.
+
+    ``is_suspended`` mirrors the authenticated lookup in
+    ``OrganizationService.get_organization`` — a suspended club must not be
+    reachable by logging out.
+    """
+    return (
+        Organization.objects
+        .filter(
+            is_active=True,
+            is_suspended=False,
+            profile__is_public_profile=True,
+        )
+        .exclude(username="")
+    )
+
 
 # ─────────────────────────────────────────────
 # RESOLUTION
@@ -54,23 +121,17 @@ def get_public_user(username):
     """
     The user behind a public profile URL, or None.
 
-    Three separate reasons to return None, all of which the view reports as the
-    same 404 — a visitor must not be able to tell a hidden profile from a
-    deactivated one from a typo:
-
-      * no such username
-      * ``is_active`` False (deactivated / suspended)
-      * ``profile.is_public_profile`` False (owner opted out)
-
-    ``User.username`` is nullable, so a user who never set one has no public URL
-    at all. Nothing can match ``username=None`` through this lookup, but the
-    guard is explicit because an empty-string username would otherwise resolve.
+    Several separate reasons to return None — no such username, deactivated,
+    deleted, owner opted out — all of which the view reports as the same 404. A
+    visitor must not be able to tell a hidden profile from a deactivated one
+    from a typo. The reasons themselves live in ``public_users_queryset``, which
+    the sitemap feed reads too so the two can never disagree.
     """
     if not username:
         return None
 
-    user = (
-        User.objects
+    return (
+        public_users_queryset()
         .select_related("profile")
         .prefetch_related(
             "sports__sport",
@@ -83,18 +144,9 @@ def get_public_user(username):
             "attributes__attribute",
             "attributes__option",
         )
-        .filter(username=username, is_active=True)
+        .filter(username=username)
         .first()
     )
-
-    if user is None or not user.username:
-        return None
-
-    profile = getattr(user, "profile", None)
-    if profile is None or not profile.is_public_profile:
-        return None
-
-    return user
 
 
 def get_public_organization(username):
@@ -102,25 +154,49 @@ def get_public_organization(username):
     if not username:
         return None
 
-    organization = (
-        Organization.objects
+    return (
+        public_organizations_queryset()
         .select_related("profile")
         .prefetch_related("sports__sport", "locations")
-        # is_suspended mirrors the authenticated lookup in
-        # OrganizationService.get_organization — a suspended club must not be
-        # reachable by logging out.
-        .filter(username=username, is_active=True, is_suspended=False)
+        .filter(username=username)
         .first()
     )
 
-    if organization is None:
-        return None
 
-    profile = getattr(organization, "profile", None)
-    if profile is None or not profile.is_public_profile:
-        return None
+# ─────────────────────────────────────────────
+# SITEMAP FEED
+# ─────────────────────────────────────────────
+# ``updated_at`` is the PROFILE's, not the User/Organization row's. The account
+# row is touched by things a crawler does not care about — SIMPLE_JWT's
+# UPDATE_LAST_LOGIN saves it on every login — and a <lastmod> that moves every
+# time somebody signs in is a lastmod search engines learn to ignore. The
+# profile row moves when the page's content moves.
 
-    return organization
+def public_user_sitemap_rows():
+    """
+    ``[{"username", "profile_updated_at"}]`` for the sitemap feed, freshest
+    first.
+
+    The alias is ``profile_updated_at``, not ``updated_at``: both User and
+    Organization already HAVE an ``updated_at`` column, and Django refuses an
+    annotation that shadows a real field. The view renames it on the way out.
+    """
+    return list(
+        public_users_queryset()
+        .order_by("-profile__updated_at")
+        .values("username", profile_updated_at=F("profile__updated_at"))
+        [:SITEMAP_MAX_ROWS]
+    )
+
+
+def public_organization_sitemap_rows():
+    """The org twin of ``public_user_sitemap_rows``."""
+    return list(
+        public_organizations_queryset()
+        .order_by("-profile__updated_at")
+        .values("username", profile_updated_at=F("profile__updated_at"))
+        [:SITEMAP_MAX_ROWS]
+    )
 
 
 # ─────────────────────────────────────────────
