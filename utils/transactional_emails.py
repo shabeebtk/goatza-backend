@@ -37,11 +37,13 @@ logger = logging.getLogger(__name__)
 OTP_TEMPLATE = "emails/otp.html"
 WELCOME_TEMPLATE = "emails/welcome.html"
 PASSWORD_CHANGED_TEMPLATE = "emails/password_changed.html"
+EMAIL_CHANGED_TEMPLATE = "emails/email_changed.html"
 
 # Subjects live here, not in the templates, because they are also the
 # <title> and the preview command needs them. The goat is deliberate.
 WELCOME_SUBJECT = "Welcome to Goatza, {name} 🐐"
 PASSWORD_CHANGED_SUBJECT = "Your Goatza password was changed"
+EMAIL_CHANGED_SUBJECT = "Your Goatza email address was changed"
 
 # Users are in India and a security notice is only useful if the time in
 # it is the time they remember. Project TIME_ZONE is UTC, so this is an
@@ -125,6 +127,27 @@ PASSWORD_RESET_OTP_COPY = _copy(
     footer_reason=(
         "You&rsquo;re receiving this because a password reset was requested "
         "for your Goatza account."
+    ),
+)
+
+EMAIL_CHANGE_OTP_COPY = _copy(
+    # A subject of its own, not the signup one: this code lands in an inbox
+    # that has no Goatza account yet, and "verification code" there reads as
+    # somebody signing up with an address that is theirs.
+    subject="Confirm your new Goatza email address",
+    preheader="Confirm this address — valid for 10 minutes.",
+    heading="Confirm your new email",
+    intro=(
+        "this address was entered as the new sign-in email for a Goatza "
+        "account. Enter this code to confirm it:"
+    ),
+    hint=(
+        "If you didn&rsquo;t ask for this, ignore this email &mdash; nothing "
+        "changes and this address is not added to any account."
+    ),
+    footer_reason=(
+        "You&rsquo;re receiving this because this address was entered as the "
+        "new email for a Goatza account."
     ),
 )
 
@@ -260,6 +283,30 @@ def send_password_reset_otp_email(*, name: str, email: str, otp: str) -> None:
     )
 
 
+def send_email_change_otp_email(*, name: str, email: str, otp: str) -> None:
+    """Code proving the caller can read the NEW address.
+
+    `email` is the address being moved TO, never the one on the account — the
+    whole point of the step is that the code lands somewhere the account does
+    not reach yet.
+    """
+    _send(
+        subject=EMAIL_CHANGE_OTP_COPY["subject"],
+        text_body=(
+            f"Hi {name},\n\n"
+            f"This address was entered as the new sign-in email for a Goatza "
+            f"account. Enter this code to confirm it:\n\n"
+            f"{otp}\n\n"
+            f"Valid for 10 minutes.\n\n"
+            f"If you didn't ask for this, ignore this email - nothing changes "
+            f"and this address is not added to any account."
+        ),
+        html_template=OTP_TEMPLATE,
+        context={**EMAIL_CHANGE_OTP_COPY, "name": name, "otp": otp},
+        to_email=email,
+    )
+
+
 # ---------------------------------------------------------------------
 # Lifecycle + security emails
 # ---------------------------------------------------------------------
@@ -314,6 +361,43 @@ def send_password_changed_email(
         ),
         html_template=PASSWORD_CHANGED_TEMPLATE,
         context={"name": name, "changed_at": changed_at},
+        to_email=email,
+    )
+
+
+def send_email_changed_notice(
+    *, name: str, email: str, new_email: str, changed_at=None
+) -> None:
+    """Security notice to the OLD address after the login email moved.
+
+    `email` is the address being left behind and `new_email` is already MASKED
+    by the caller — this mail is the last thing that inbox hears from Goatza,
+    and it must not hand whoever is reading it a fresh address to attack.
+
+    Success path only, same as send_password_changed_email: an alert that fires
+    when nothing happened is an alert people learn to ignore.
+    """
+    changed_at = format_ist_timestamp(changed_at or timezone.now())
+
+    _send(
+        subject=EMAIL_CHANGED_SUBJECT,
+        text_body=(
+            f"Hi {name},\n\n"
+            f"The email address on your Goatza account was changed on "
+            f"{changed_at} to {new_email}.\n\n"
+            f"You'll sign in with the new address from now on. If this was "
+            f"you, no action is needed.\n\n"
+            f"Wasn't you? Reset your password immediately and contact support "
+            f"- someone may have access to your account.\n\n"
+            f"{shared_email_context()['frontend_base_url']}"
+            f"/auth/forgot-password"
+        ),
+        html_template=EMAIL_CHANGED_TEMPLATE,
+        context={
+            "name": name,
+            "new_email": new_email,
+            "changed_at": changed_at,
+        },
         to_email=email,
     )
 

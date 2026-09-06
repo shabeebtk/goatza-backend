@@ -21,6 +21,11 @@ from accounts.views.account_deletion_views import (
     AccountDeleteInitiateAPIView,
     AccountDeleteConfirmAPIView
 )
+from accounts.views.email_change_views import (
+    EmailChangeInitiateAPIView,
+    EmailChangeConfirmAPIView
+)
+from accounts.views.phone_change_views import PhoneChangeAPIView
 from accounts.views.user_privacy_views import UserPublicProfilePrivacyAPIView
 from accounts.views.user_upload_signature_views import GetUploadConfigAPIView
 # base url - /user/
@@ -58,6 +63,16 @@ urlpatterns = [
     # account-lifecycle writes rather than with the by-handle reads.
     path('account/delete/initiate', AccountDeleteInitiateAPIView.as_view()),
     path('account/delete/confirm', AccountDeleteConfirmAPIView.as_view()),
+
+    # changing the sign-in email — password gated, then an OTP to the NEW
+    # address. Beside deletion because they are the same kind of write: the two
+    # things a user can do that decide who owns this account.
+    path('email/change/initiate', EmailChangeInitiateAPIView.as_view()),
+    path('email/change/confirm', EmailChangeConfirmAPIView.as_view()),
+
+    # phone is a contact detail, not a credential — one call, no verification
+    # (see accounts/services/phone_change_service.py).
+    path('phone/change', PhoneChangeAPIView.as_view()),
 
     # user upload media signature
     path('get/upload/signature', GetUploadConfigAPIView.as_view()),

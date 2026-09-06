@@ -316,6 +316,16 @@ REST_FRAMEWORK = {
         # request. Tight because the honest flow is two calls and nobody
         # deletes their account twice.
         'account_delete': '3/hour',
+        # Changing the login email, shared by BOTH /user/email/change/
+        # endpoints (see accounts.throttles.EmailChangeThrottle). Per USER.
+        # Tight on two counts: initiate mails a code to an address the CALLER
+        # typed, and confirm is a guess at a 4-digit code.
+        'email_change': '5/hour',
+        # Changing the phone number (accounts.throttles.PhoneChangeThrottle).
+        # Per USER, and looser — no mail leaves and no secret is guarded, but
+        # the unique column would otherwise answer "taken" often enough to
+        # enumerate numbers.
+        'phone_change': '10/hour',
         'message_share': '30/min',   # per actor — see messaging.throttles
         'chat_media': '30/min',      # per actor — chat photo uploads
         # Feed impression flushes (see feed.throttles). Its own scope so a long

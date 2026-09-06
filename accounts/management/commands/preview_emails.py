@@ -21,6 +21,9 @@ from django.utils.safestring import mark_safe
 from utils.transactional_emails import (
     APPLICATION_RECEIVED_TEMPLATE,
     APPLICATION_STATUS_TEMPLATE,
+    EMAIL_CHANGE_OTP_COPY,
+    EMAIL_CHANGED_SUBJECT,
+    EMAIL_CHANGED_TEMPLATE,
     LOGIN_OTP_COPY,
     NEW_APPLICANT_ALERT_TEMPLATE,
     OTP_TEMPLATE,
@@ -142,6 +145,23 @@ PREVIEWS = [
         {
             "subject": PASSWORD_CHANGED_SUBJECT,
             "name": NAME,
+            "changed_at": format_ist_timestamp(SAMPLE_CHANGED_AT),
+        },
+    ),
+    (
+        "05a-email-change-otp.html",
+        OTP_TEMPLATE,
+        {**EMAIL_CHANGE_OTP_COPY, "name": NAME, "otp": "634018"},
+    ),
+    (
+        "05b-email-changed.html",
+        EMAIL_CHANGED_TEMPLATE,
+        {
+            "subject": EMAIL_CHANGED_SUBJECT,
+            "name": NAME,
+            # Masked exactly as the sender hands it over — the preview must
+            # show what the recipient actually gets, not a whole address.
+            "new_email": "a****n@example.com",
             "changed_at": format_ist_timestamp(SAMPLE_CHANGED_AT),
         },
     ),
