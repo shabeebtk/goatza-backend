@@ -98,7 +98,8 @@ RESERVED_USERNAMES = frozenset({
     # ── frontend route segments (src/app/**) ──────────────────
     "auth", "card", "chat", "coaching", "cv", "explore", "guidelines",
     "highlights", "home", "join", "matches", "messages", "notifications",
-    "organization", "posts", "recruitments", "safety", "scouting", "search",
+    "organization", "posts", "r", "recruitments", "safety", "scouting",
+    "search",
 
     # ── pre-existing entries (kept) ───────────────────────────
     "admin", "root", "support", "help", "api", "system",

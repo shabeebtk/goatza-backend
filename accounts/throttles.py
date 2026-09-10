@@ -9,6 +9,27 @@ class LoginThrottle(UserRateThrottle):
 class OTPThrottle(UserRateThrottle):
     scope = 'otp'
 
+class ResendOTPThrottle(UserRateThrottle):
+    """
+    3/min on ``POST /user/resend/otp`` (``resend_otp`` in
+    DEFAULT_THROTTLE_RATES).
+
+    Its own scope rather than sharing ``otp`` with VerifySignupOTPAPIView: that
+    budget is spent GUESSING a code and this one is spent SENDING one, so
+    pooling them would let a run of resends use up the attempts an honest user
+    needs to type the code they were just sent.
+
+    A UserRateThrottle subclass like its neighbours, which for an AllowAny view
+    means it keys on the caller's IP — nobody is authenticated at this point in
+    the signup. That is the per-CALLER limit; the per-ADDRESS one is the 30s
+    cooldown in the view (CacheKeys.otp_resend_cooldown), and neither replaces
+    the other: this stops one caller pounding many inboxes, the cooldown stops
+    many callers pounding one.
+    """
+
+    scope = 'resend_otp'
+
+
 class ForgotPasswordThrottle(UserRateThrottle):
     scope = 'forgot_password'
 

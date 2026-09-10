@@ -318,6 +318,14 @@ REST_FRAMEWORK = {
         'signup': '5/min',
         'login': '10/min',
         'otp': '5/min',
+        # Re-sending the signup verification code
+        # (accounts.throttles.ResendOTPThrottle). Its OWN scope rather than
+        # sharing 'otp' above: that budget is for guessing a code, this one for
+        # sending one, and pooling them would let a run of resends eat the
+        # attempts needed to type the code just received. Per CALLER — nobody
+        # is authenticated yet, so it keys on IP; the per-ADDRESS limit is the
+        # 30s cooldown in the view.
+        'resend_otp': '3/min',
         'forgot_password': '3/hour',
         'change_password': '5/hour',
         # Account deletion, shared by BOTH /user/account/delete/ endpoints

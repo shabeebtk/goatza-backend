@@ -41,6 +41,9 @@ from core.views.public_profile_views import (
 )
 from core.views.sitemap_views import PublicSitemapURLsAPIView
 from cv.views.public_cv_views import PublicCVAPIView
+from recruitments.views.public_recruitment_views import (
+    PublicRecruitmentDetailAPIView,
+)
 from support.views.problem_report_views import PublicProblemReportAPIView
 from waitlist.views.signup_views import (
     PlayerSignupCardAPIView,
@@ -65,6 +68,23 @@ urlpatterns = [
     path(
         'organization/<str:username>/posts',
         PublicOrganizationPostsAPIView.as_view(),
+    ),
+
+    # A single recruitment. The flagship share: a club posts a trial, the link
+    # lands in a WhatsApp group, and most of that group has no account yet.
+    #
+    # ALWAYS the public serializer — never the owner one, even when the caller
+    # turns out to be the posting org. views_count, saves_count, status and the
+    # applicant numbers are owner-only and stay on the authenticated
+    # /recruitments/<id>/details; an org admin who opens their own share link
+    # is sent there by the client instead.
+    #
+    # Visibility is the selector's, not this route's: an anonymous caller sees
+    # a posting only while it is ACTIVE and public, and a draft, a closed
+    # posting, a followers-only one and a typo'd uuid all answer the same 404.
+    path(
+        'recruitments/<uuid:recruitment_id>',
+        PublicRecruitmentDetailAPIView.as_view(),
     ),
 
     # Pre-launch waitlist. The ONLY write on this surface — the point of the

@@ -23,6 +23,31 @@ class CacheKeys:
         return f"otp:{email}"
 
     @staticmethod
+    def otp_resend_cooldown(email):
+        """
+        The 30-second gap between two "send me the code again" requests for one
+        address (POST /user/resend/otp).
+
+        SEPARATE from the throttle on that view, and not a duplicate of it. The
+        throttle is keyed on the CALLER — one IP, one budget across every
+        address it types — and it is there to stop abuse. This is keyed on the
+        ADDRESS, and it is there so an inbox cannot be made to receive a code
+        every second by a client that keeps asking, however many callers are
+        asking.
+
+        Written on EVERY accepted request, not only on the ones that actually
+        send. The endpoint answers the same generic success whether or not the
+        address has an unverified account behind it, and a cooldown set only on
+        the real sends would undo that in one extra call: 200 then 200 means no
+        account, 200 then 429 means there is one.
+
+        The value stored is the unix timestamp the cooldown lifts at, so the
+        429 can say how many seconds are left rather than just "later" — the
+        TTL itself is not readable back out of the cache API.
+        """
+        return f"otp:resend:cooldown:{email}"
+
+    @staticmethod
     def email_change_pending(user_id):
         """
         The address a user is part-way through moving to.
@@ -130,6 +155,29 @@ class CacheKeys:
         screen followed by "412 joined" on the same page reads as broken.
         """
         return "waitlist:signup:count"
+
+    # ── Recruitments ─────────────────────────────────────────────
+
+    @staticmethod
+    def recruitment_view_counted(recruitment_id, ident):
+        """
+        Marker that this viewer has already been counted against a
+        recruitment's ``views_count``.
+
+        ``ident`` is the VIEWER, not the request: ``user:<id>`` /
+        ``org:<id>`` for a signed-in caller, ``ip:<addr>`` for an anonymous
+        one (see RecruitmentViewService.viewer_ident). Keying on the actor
+        rather than the IP where we have one is what makes the two detail
+        views — the authenticated one and the public one — agree that a
+        person who opened the link logged out and then signed in is the same
+        viewer, on the same posting.
+
+        Same spirit as ``cv_view_counted``: the counter is a rough "how much
+        interest is this getting" the owning org reads off its own dashboard,
+        not analytics, so a refresh loop must count once and nothing here is
+        worth a database row.
+        """
+        return f"recruitment:viewed:{recruitment_id}:{ident}"
 
     # ── Moderation ───────────────────────────────────────────────
 

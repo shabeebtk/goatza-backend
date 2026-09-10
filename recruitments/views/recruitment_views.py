@@ -20,6 +20,9 @@ from recruitments.serializers.recruitment_list_serializers import (
 from recruitments.services.discover_service import (
     RecruitmentDiscoverService, SECTION_ORDER
 )
+from recruitments.services.recruitment_view_service import (
+    RecruitmentViewService
+)
 
 
 logger = logging.getLogger(__name__)
@@ -541,6 +544,15 @@ class RecruitmentDetailAPIView(BaseAPIView):
                 and str(actor.organization.id)
                 == str(recruitment.organization_id)
             )
+
+            # VIEW COUNT. After the fetch — a 404 is not a view, and neither
+            # is a followers-only posting the selector just refused. The
+            # service re-derives ownership itself and returns without counting
+            # for the owner, so this stays a single unconditional call and the
+            # rule keeps living in one place; it can never raise (see
+            # recruitments/services/recruitment_view_service.py), so the GET
+            # below succeeds whatever the cache or the database is doing.
+            RecruitmentViewService.record_view(recruitment, actor, request)
 
             # SERIALIZER
             serializer_class = (
