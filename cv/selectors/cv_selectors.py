@@ -47,13 +47,14 @@ def get_cv_user(username):
     """
     ``(user, settings)`` for a public CV URL, or None.
 
-    Four separate reasons to return None, all of which the view reports as the
+    FIVE separate reasons to return None, all of which the view reports as the
     same 404 — a visitor must not be able to tell a disabled CV from a hidden
     profile from a coach's username from a typo:
 
       * anything ``get_public_user`` refuses (unknown username, deactivated
         account, ``is_public_profile`` off)
       * the user is not a player
+      * **the user is a minor**
       * no settings row exists
       * the settings row exists with ``is_enabled`` False
     """
@@ -62,6 +63,25 @@ def get_cv_user(username):
         return None
 
     if user.role != User.Role.PLAYER:
+        return None
+
+    # A MINOR HAS NO PUBLIC CV, and this is not the same decision as the
+    # stripped profile card above it.
+    #
+    # The card is a deliberate compromise: a child stays findable, because
+    # being findable is the product, and what a stranger gets is a name and two
+    # counts. The CV is the opposite artifact. It is the complete athletic
+    # record — every club, every award, every clip, the physical measurements,
+    # optionally a phone number — assembled into one page that is built to be
+    # printed, QR-scanned at a trial and forwarded on. There is no stripped
+    # version of it worth serving: a CV with the record taken out is not a CV.
+    #
+    # So it sits behind consent entirely, and answers the same 404 as an
+    # unknown username rather than a 403 — telling a prober "this exists but is
+    # protected because the owner is a child" is worse than telling them
+    # nothing. The owner still reaches their own CV through the authenticated
+    # app; only the anonymous URL is closed.
+    if user.is_minor:
         return None
 
     settings = (

@@ -28,12 +28,15 @@ from moderation.selectors.profile_visibility import (
 from usernames.exceptions import UsernameTaken
 from usernames.services.username_service import UsernameService
 from core.constant import TYPE_ORGANIZATION
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 
 logger = logging.getLogger(__name__)
 
 class CreateOrganizationAPIView(APIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def post(self, request):
         try:
@@ -79,7 +82,9 @@ class CreateOrganizationAPIView(APIView):
 
 
 class ListUserOrganizationsAPIView(APIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def get(self, request):
         try:
@@ -113,7 +118,9 @@ class ListUserOrganizationsAPIView(APIView):
         
 
 class OrganizationsDetailsAPIView(BaseAPIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def get(self, request):
         try:
@@ -227,7 +234,9 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
         "is_delete_cover": true
     }
     """
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def post(self, request):
         try:
@@ -362,7 +371,9 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
 
 
 class UpdateOrganizationAPIView(BaseAPIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def patch(self, request):
         TAG = "[ORG UPDATE]"

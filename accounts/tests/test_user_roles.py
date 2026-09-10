@@ -1,3 +1,4 @@
+from datetime import date
 from unittest.mock import patch
 
 from django.core.cache import cache
@@ -39,6 +40,10 @@ class SignupRoleTests(TestCase):
                     # Required since consent moved server-side — see
                     # legal/tests/test_legal_api.py for the rejection case.
                     "accepted_terms": True,
+                    # Required since the age gate landed — see
+                    # accounts/tests/test_age_gate.py for the rejection cases.
+                    "birthdate": "1995-05-20",
+                    "country_code": "IN",
                 },
                 format="json",
             )
@@ -111,9 +116,18 @@ class SetUserRoleTests(TestCase):
             role=role,
             is_role_confirmed=is_role_confirmed,
             is_onboarding_completed=is_onboarding_completed,
+            # An age on file, for the same reason accept_current_terms is
+            # called below: every real path to a user record now captures both
+            # (signup at the form, Google users at this very endpoint), so a
+            # fixture without them is not "a plain user" — it is a user the
+            # role endpoint's age gate will stop before it reaches the role.
+            # The gate itself is tested in test_age_gate.py.
+            country_code="IN",
         )
         accept_current_terms(user)
-        UserProfile.objects.create(user=user, name="OAuth User")
+        UserProfile.objects.create(
+            user=user, name="OAuth User", birthdate=date(1995, 5, 20)
+        )
         return user
 
     def test_unconfirmed_user_can_set_role(self):

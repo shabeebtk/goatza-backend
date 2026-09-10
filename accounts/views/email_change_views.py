@@ -22,6 +22,7 @@ from accounts.services.email_change_service import (
     initiate_email_change,
 )
 from accounts.throttles import EmailChangeThrottle
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 from utils.errors import flatten_validation_error
 from utils.response import response_data
@@ -69,7 +70,9 @@ class EmailChangeInitiateAPIView(APIView):
     until the code sent to it comes back.
     """
 
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
     throttle_classes = [EmailChangeThrottle]
     throttle_scope = "email_change"
 
@@ -103,7 +106,9 @@ class EmailChangeConfirmAPIView(APIView):
     with a password AND a mailed code, so their other devices stay signed in.
     """
 
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
     throttle_classes = [EmailChangeThrottle]
     throttle_scope = "email_change"
 

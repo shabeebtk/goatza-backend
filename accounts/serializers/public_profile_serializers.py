@@ -21,6 +21,30 @@ reasonably ask for:
     identity-theft pair, and it is also the pair that makes a minor's public
     profile a safeguarding problem. ``age_group`` (U17, Senior …) is what a
     scout actually filters on, and it is derived here rather than sent raw.
+
+TWO TIERS: ADULTS AND MINORS
+────────────────────────────
+Everything above is the ADULT payload and is unchanged. A MINOR
+(``User.is_minor`` — birthdate against their own jurisdiction's consent age,
+see ``accounts/constants.py``) gets a strictly smaller one from the same
+serializer, and the model is a private Instagram account in a search result:
+the page still resolves, still renders, and is still indexed, but what a
+logged-out stranger gets is a card rather than a profile.
+
+    shown   name, username, headline, follower/following/connection counts,
+            primary sport, primary position, CITY, created_at
+    hidden  profile photo, cover photo, height, weight, age_group, about,
+            the primary sport's attribute values
+
+Posts, the CV and the network lists are stripped by their own endpoints — see
+``core/views/public_profile_views.py`` and ``cv/selectors/cv_selectors.py``.
+
+KEYS ARE NEVER DROPPED, ONLY EMPTIED. A hidden field comes back as ``None`` or
+``""`` according to its normal type, never as an absent key. Two reasons: the
+client would otherwise have to branch on key PRESENCE, which is a different and
+much easier thing to get wrong than branching on a value; and the allow-list
+test pins the key set exactly, which is the guard that stops a private field
+appearing here — a payload whose shape changes per user cannot be pinned.
 """
 
 from datetime import date
@@ -28,6 +52,28 @@ from datetime import date
 from rest_framework import serializers
 
 from accounts.models import User
+
+
+def minor_photo_allowed(user):
+    """
+    Whether a minor's photos may appear on the anonymous public surface.
+
+    **Always False today, for every minor.** A photograph of a child on a page
+    anyone can scrape is the one item on the hidden list that cannot be undone
+    once it is out — text can be corrected, an image that has been fetched,
+    cached and reposted cannot — so it is withheld until a GUARDIAN has
+    consented to it, not until the child has.
+
+    ``GuardianConsent`` does not exist yet. When that table lands, THIS ONE
+    FUNCTION is the only thing that changes: it grows a lookup and starts
+    returning True for the minors whose guardian has agreed. Every call site
+    below already asks it rather than testing ``is_minor`` directly, so nothing
+    else in this file — or in the card renderer, or in the CV — needs touching.
+
+    Takes the user, not the profile, because that is what the consent lookup
+    will key on.
+    """
+    return False
 
 
 def age_group_badge(birthdate):
@@ -175,10 +221,43 @@ class PublicUserProfileSerializer(serializers.Serializer):
     positions = serializers.SerializerMethodField()
     primary_sport = serializers.SerializerMethodField()
 
+    is_minor = serializers.SerializerMethodField()
+    is_limited_view = serializers.SerializerMethodField()
+
     # ── helpers ──────────────────────────────────────────────
 
     def _profile(self, obj):
         return getattr(obj, "profile", None)
+
+    def _is_minor(self, obj):
+        """
+        Whether this payload must be the stripped one.
+
+        ``getattr`` with a True default rather than a bare ``obj.is_minor``:
+        every gate below is written as "withhold when this is True", so the
+        fallback for an object that somehow has no such property has to be the
+        CAREFUL answer. A missing property returning False would silently
+        publish a full profile, which is the exact failure this whole file
+        exists to make impossible.
+        """
+        return getattr(obj, "is_minor", True)
+
+    def get_is_minor(self, obj):
+        return bool(self._is_minor(obj))
+
+    def get_is_limited_view(self, obj):
+        """
+        Whether the client is looking at a stripped payload.
+
+        Identical to ``is_minor`` today and deliberately a SEPARATE key. They
+        answer different questions — one is a fact about the person, the other
+        a fact about this response — and they will diverge: a minor whose
+        guardian has consented to photos (``minor_photo_allowed``) is still a
+        minor but is no longer fully limited, and a future moderation state
+        could limit an adult. The client renders its "sign in to see more"
+        prompt off THIS one, so that divergence costs it nothing.
+        """
+        return bool(self._is_minor(obj))
 
     def get_updated_at(self, obj):
         """
@@ -216,16 +295,37 @@ class PublicUserProfileSerializer(serializers.Serializer):
         return profile.headline if profile else ""
 
     def get_about(self, obj):
+        """
+        Free text the user wrote about themselves — withheld for a minor.
+
+        The one field on the card whose CONTENT nobody has reviewed. A child
+        writing their own bio puts a school name, a training ground, a team, a
+        parent's business or an Instagram handle into it as often as not, and
+        none of that is anything the allow-list above can filter, because it is
+        one string. "" rather than a dropped key — see the module docstring.
+        """
         profile = self._profile(obj)
-        return profile.about if profile else ""
+        if not profile or self._is_minor(obj):
+            return ""
+        return profile.about
 
     def get_profile_photo(self, obj):
         profile = self._profile(obj)
-        return profile.profile_photo if profile else ""
+        if not profile:
+            return ""
+        # Not `is_minor` directly: photos are the one hidden field with a
+        # consent route out, and minor_photo_allowed is where that will live.
+        if self._is_minor(obj) and not minor_photo_allowed(obj):
+            return ""
+        return profile.profile_photo
 
     def get_cover_photo(self, obj):
         profile = self._profile(obj)
-        return profile.cover_photo if profile else ""
+        if not profile:
+            return ""
+        if self._is_minor(obj) and not minor_photo_allowed(obj):
+            return ""
+        return profile.cover_photo
 
     def get_followers_count(self, obj):
         profile = self._profile(obj)
@@ -240,8 +340,15 @@ class PublicUserProfileSerializer(serializers.Serializer):
         return profile.connections_count if profile else 0
 
     def get_height_cm(self, obj):
+        """
+        Withheld for a minor: it is a physical description of a child, next to
+        their name, their photo's absence, their sport and their city, on a page
+        with no login on it. A scout who needs it can sign in.
+        """
         profile = self._profile(obj)
-        return profile.height_cm if profile else None
+        if not profile or self._is_minor(obj):
+            return None
+        return profile.height_cm
 
     def get_weight_kg(self, obj):
         """
@@ -252,20 +359,57 @@ class PublicUserProfileSerializer(serializers.Serializer):
         profile = self._profile(obj)
         if not profile or profile.weight_kg is None:
             return None
+        # Withheld for a minor, same reasoning as height.
+        if self._is_minor(obj):
+            return None
         return float(profile.weight_kg)
 
     def get_age_group(self, obj):
+        """
+        The badge — and **None for a minor**, which is the opposite of what it
+        looks like this field is for.
+
+        ``age_group_badge`` goes all the way down to "U7". A U-badge printed
+        beside a named child, their sport and their town, on a page with no
+        login in front of it, is an age-targeting signal: it lets anyone
+        scraping the site sort children by year group, which is precisely the
+        query nobody should be able to run against us. It also contradicts our
+        own rules — the signup floor is 13, so "U7" through "U12" describe
+        accounts that are not supposed to exist.
+
+        The badge stays for adults, where it is what a scout actually filters
+        on ("U19", "U23", "Senior") and describes someone old enough to consent
+        to being findable that way.
+        """
         profile = self._profile(obj)
-        return age_group_badge(profile.birthdate) if profile else None
+        if not profile or self._is_minor(obj):
+            return None
+        return age_group_badge(profile.birthdate)
 
     def get_location(self, obj):
-        """City-level only — see the module docstring for why."""
+        """
+        City-level only for everyone — see the module docstring — and for a
+        MINOR, city-level in the ``name`` slot too.
+
+        The stored ``location_name`` is whatever place the user picked, and
+        this platform deliberately keeps sub-district ones: "Panoor",
+        "Kadavathoor", villages of a few thousand people. That precision is
+        genuinely useful in-app, where a coach is looking for players who can
+        actually get to a ground.
+
+        On an anonymous page it is a different thing entirely. A full name,
+        plus a sport, plus a village of a few thousand narrows to a handful of
+        children — often to one. Name plus sport plus "Kannur" does not narrow
+        to anybody. So a minor's ``name`` carries the CITY, the same value as
+        ``city``: the key stays (the client renders one label and must not have
+        to branch), the resolution drops to the district.
+        """
         profile = self._profile(obj)
         if not profile or not profile.city:
             return None
 
         return {
-            "name": profile.location_name,
+            "name": profile.city if self._is_minor(obj) else profile.location_name,
             "city": profile.city,
             "country_code": profile.country_code,
         }
@@ -309,13 +453,28 @@ class PublicUserProfileSerializer(serializers.Serializer):
             "icon_url": primary.sport.icon_url,
             "experience_level": primary.experience_level,
             "primary_position": position.position.name if position else None,
-            "attributes": public_sport_attributes(obj, primary.sport_id),
+            # The SPORT and POSITION stay for a minor — they are what makes the
+            # stripped card worth indexing at all — but the attribute VALUES go.
+            # "Preferred foot", "Batting style", "Height in the nets": a set of
+            # physical and technical measurements of a named child, which is a
+            # scouting profile rather than a search result. Empty list, not a
+            # dropped key, so the client's `.map` needs no guard.
+            "attributes": (
+                []
+                if self._is_minor(obj)
+                else public_sport_attributes(obj, primary.sport_id)
+            ),
         }
 
 
 # The exact key set the public user payload may contain. Imported by the test
 # that fails the build if a private field ever appears — keep it in sync with
 # the declared fields above and nowhere else.
+#
+# ONE set for both tiers, and that is the point: a minor's payload has the same
+# keys as an adult's with emptier values, so this stays an EQUALITY check for
+# every user rather than degrading into a subset check that would no longer
+# catch a leak.
 PUBLIC_USER_PROFILE_KEYS = {
     "id",
     "username",
@@ -337,4 +496,6 @@ PUBLIC_USER_PROFILE_KEYS = {
     "sports",
     "positions",
     "primary_sport",
+    "is_minor",
+    "is_limited_view",
 }

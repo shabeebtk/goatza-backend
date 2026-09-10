@@ -16,7 +16,15 @@ from rest_framework_simplejwt.token_blacklist.models import (
     OutstandingToken, BlacklistedToken,
 )
 from accounts.serializers.user_serializers import UserSerializer
+from accounts.services.age_service import (
+    AgeGateError,
+    parse_birthdate,
+    resolve_country,
+    validate_signup_age,
+)
+from accounts.constants import normalize_country
 from accounts.services.login_service import on_successful_login
+from guardians.services.consent_service import ensure_pending_for_minor
 from legal.constants import REQUIRED_DOCUMENTS
 from legal.services.acceptance_service import record_acceptance
 from usernames.services.username_service import UsernameService
@@ -36,6 +44,7 @@ from accounts.throttles import (
 )
 from utils.cookies import set_refresh_key_cookie, delete_refresh_key_cookie
 from utils.request_meta import client_ip, client_user_agent
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 
 logger = logging.getLogger(__name__)
@@ -71,6 +80,12 @@ class UserSignupAPIView(APIView):
         name = request.data.get("name")
         role = request.data.get("role")
         accepted_terms = request.data.get("accepted_terms")
+        birthdate_input = request.data.get("birthdate")
+        country_input = request.data.get("country_code")
+        # Not a signup field today — the email form has no phone box — but read
+        # anyway so that the day one is added, the dialling-code cross-check in
+        # resolve_country starts working without anybody having to remember it.
+        phone_input = request.data.get("phone")
 
         if not email or not password:
             return response_data(False, "Email and password are required", status_code=400)
@@ -96,6 +111,49 @@ class UserSignupAPIView(APIView):
                 status_code=400
             )
 
+        # AGE AND JURISDICTION, on the same footing as consent above and for
+        # the same reason: they are preconditions of the account, not a step
+        # after it. The user is anonymous until they verify the OTP, so there
+        # is no window in which the client could supply them later — if these
+        # were optional here, an account could exist whose age nobody ever
+        # asked for, and the only correct reading of an unknown age is "child"
+        # (accounts/constants.is_minor), which would be applied to adults
+        # forever.
+        #
+        # Presence is checked before validity so a missing field is never
+        # answered with the neutral under-age message, which would be a lie.
+        if not birthdate_input:
+            return response_data(
+                False, "Date of birth is required", status_code=400
+            )
+
+        if not normalize_country(country_input):
+            return response_data(
+                False, "A valid country is required", status_code=400
+            )
+
+        try:
+            birthdate = parse_birthdate(birthdate_input)
+
+            # The country the account is HELD TO, which is not necessarily the
+            # one the dropdown said — see age_service.resolve_country. Resolved
+            # before validating so that if the floor ever becomes per-country,
+            # it is the resolved country the floor is read from.
+            country_code = resolve_country(country_input, phone_input)
+
+            validate_signup_age(birthdate, country_code)
+        except AgeGateError as age_error:
+            # Deliberately outside the transaction block below, so a refusal
+            # answers 400 with its own message instead of being swallowed by
+            # that block's `except Exception` and returned as a 500 "Server
+            # error". Nothing has been written at this point.
+            return response_data(
+                False,
+                age_error.detail[0] if age_error.detail else "",
+                {"code": age_error.error_code},
+                status_code=400,
+            )
+
         if not name:
             name = email.split("@")[0]
 
@@ -109,12 +167,22 @@ class UserSignupAPIView(APIView):
                     email=email,
                     password=password,
                     role=role,
+                    # The RESOLVED jurisdiction, not the raw declaration.
+                    # Stored on the user, not the profile: this is the legal
+                    # country, and UserProfile.country_code is the derived
+                    # location one (see the field comment on the model).
+                    country_code=country_code,
                     is_active=False
                 )
 
                 UsernameService.generate_and_claim(name, user=user)
 
-                UserProfile.objects.create(user=user, name=name)
+                # Same transaction as the user row, so the two halves of
+                # `User.is_minor` — country here, birthdate there — can never
+                # be written apart. A rollback leaves neither.
+                UserProfile.objects.create(
+                    user=user, name=name, birthdate=birthdate
+                )
 
                 # Same transaction as the user row, so the two can never
                 # disagree: no account exists without its acceptance on file,
@@ -159,8 +227,6 @@ class VerifySignupOTPAPIView(APIView):
         email = request.data.get("email")
         otp_input = request.data.get("otp")
 
-        print(otp_input)
-
         if not email or not otp_input:
             return response_data(False, "Email and OTP required", status_code=400)
 
@@ -176,6 +242,15 @@ class VerifySignupOTPAPIView(APIView):
         user.is_email_verified = True
         user.is_active = True
         user.save()
+
+        # THE MINOR LOCK, at the moment the account becomes real.
+        #
+        # Sited here and not in the signup POST above for one reason: this is
+        # where a session is handed over. Before this the row exists but nobody
+        # can act as it, and after it the client needs to know — on this
+        # response — whether to open the app or the parent screen. Adults get
+        # False and nothing is written.
+        guardian_required = ensure_pending_for_minor(user)
 
         # The one moment an account becomes real. Fire-and-forget: the sender
         # swallows its own failures, so a welcome mail that never leaves must
@@ -198,7 +273,13 @@ class VerifySignupOTPAPIView(APIView):
             "verification successful",
             {
                 "access": str(refresh.access_token),
-                "user": UserSerializer(user).data
+                "user": UserSerializer(user).data,
+                # True means the client opens the parent screen instead of the
+                # app. Its own key rather than something read off the user
+                # payload: "is this account a minor" and "does it still need a
+                # guardian" are different questions, and an approved minor
+                # answers True to the first and False to this.
+                "guardian_required": guardian_required,
             }
         )
         # Set refresh token in cookie
@@ -406,7 +487,9 @@ class ChangePasswordAPIView(APIView):
       400 {"code": "invalid_new_password"}
       400 {"code": "same_password"}
     """
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
     throttle_classes = [ChangePasswordThrottle]
 
     def post(self, request):

@@ -23,6 +23,7 @@ from accounts.services.account_deletion_service import (
     initiate_account_deletion,
 )
 from accounts.throttles import AccountDeleteThrottle
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 from utils.cookies import delete_refresh_key_cookie
 from utils.errors import flatten_validation_error
@@ -63,7 +64,9 @@ class AccountDeleteInitiateAPIView(APIView):
       400 — sole owner of an organization (message names them)
     """
 
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
     throttle_classes = [AccountDeleteThrottle]
     throttle_scope = "account_delete"
 
@@ -90,7 +93,9 @@ class AccountDeleteConfirmAPIView(APIView):
     refresh cookie is cleared, so this device is signed out along with the rest.
     """
 
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
     throttle_classes = [AccountDeleteThrottle]
     throttle_scope = "account_delete"
 

@@ -128,6 +128,9 @@ INSTALLED_APPS = [
     'waitlist',
     'moderation',
     'legal',
+    # Parental consent for under-18 users. Parents live here as CONTACTS, with
+    # no account, no role and no login — see guardians/models.py.
+    'guardians',
     # "Report a problem" — app breakage, NOT abuse. Abuse reporting stays
     # in 'moderation'; the two share nothing but the word "report".
     'support',
@@ -279,6 +282,13 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
         'legal.permissions.HasAcceptedCurrentTerms',
+        # The minor lock, directly after the terms gate because the two are
+        # maintained as a pair: a view's own permission_classes REPLACES this
+        # list, so every hand-rolled list that names one names the other
+        # (guardians/tests/test_gate.py asserts exactly that). Unlike the terms
+        # gate this one blocks reads as well as writes — see its module
+        # docstring for why the two rules differ.
+        'guardians.permissions.HasGuardianConsentIfMinor',
     ],
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
@@ -326,6 +336,21 @@ REST_FRAMEWORK = {
         # the unique column would otherwise answer "taken" often enough to
         # enumerate numbers.
         'phone_change': '10/hour',
+        # Asking a parent for permission (guardians.throttles). Per USER, and
+        # tight for the same reason as email_change above: it mails a link to
+        # an address the CALLER typed, with nothing verifying it first.
+        'guardian_request': '5/hour',
+        # Re-sending that link (guardians.throttles). Tighter still — every
+        # resend nudges somebody who has no account and cannot unsubscribe, and
+        # mints a fresh token that retires the last one.
+        'guardian_resend': '3/hour',
+        # The PARENT's side, and the only anonymous surface outside 'public/'.
+        # Per IP (guardians.throttles) because a parent has no account — the
+        # token in the URL identifies a link, not a person. The read limit is a
+        # token-guessing limit; the write one is shared across approve, decline
+        # and withdraw, which are three answers to one question.
+        'guardian_consent_read': '20/hour',
+        'guardian_consent_write': '10/hour',
         'message_share': '30/min',   # per actor — see messaging.throttles
         'chat_media': '30/min',      # per actor — chat photo uploads
         # Feed impression flushes (see feed.throttles). Its own scope so a long
@@ -446,7 +471,7 @@ CORS_ALLOW_CREDENTIALS = True
 # work that way would mean putting goatza.com into DJANGO_ALLOWED_HOSTS — a
 # list that means something completely different (the Host values this process
 # will answer to) and that also guards against Host-header injection. Widening
-# it to make a websocket connect is the wrong lever.
+# it to make a websocket connect is the wrong               
 #
 # CORS_ALLOWED_ORIGINS is the right default because it is already the answer to
 # the same question: "which browser origins may talk to this API". A WS handshake
@@ -693,13 +718,35 @@ PLACES_DAILY_CAP_DETAILS = int(os.getenv("PLACES_DAILY_CAP_DETAILS") or 1000)
 
 # The city picker's type filter, comma-separated. A SETTING rather than a
 # constant because which small towns Google classifies as a "city" is not
-# stable and widening the list must not need a deploy: `(cities)` (= locality +
-# administrative_area_level_3) covers Thalassery, Panoor and Kuthuparamba, but
-# a village that goes missing is fixed by setting e.g.
-# "locality,sublocality,neighborhood,administrative_area_level_3,administrative_area_level_4".
-# Google allows at most 5 values and refuses to mix a collection like
-# `(cities)` with individual types.
-PLACES_CITY_PRIMARY_TYPES = os.getenv("PLACES_CITY_PRIMARY_TYPES") or "(cities)"
+# stable and widening the list must not need a deploy.
+#
+# Google allows at most FIVE values here and refuses to mix a collection like
+# `(cities)` with individual types, so this is a five-slot budget and every
+# slot has to earn its place. `(cities)` used to hold the whole budget in one
+# value (= locality + administrative_area_level_3), which covers Kannur and
+# Thalassery and misses the panchayats underneath them — Panoor, Kadavathoor —
+# which is most of the district. Spending the five slots individually buys
+# those back:
+#
+#   locality                      towns and cities (Kannur)
+#   administrative_area_level_3   taluks / municipalities (Thalassery)
+#   administrative_area_level_4   panchayats and villages (Kadavathoor)
+#   sublocality_level_1           named quarters of a larger town
+#   postal_town                   the postal-area label some places carry
+#                                 INSTEAD of a locality
+#
+# DELIBERATELY ABSENT: street_address, premise, subpremise, route and
+# postal_code. Those are the doorstep, and a sports profile needs the town —
+# nobody's exact whereabouts is part of playing football. The picker asks for
+# these five; accounts' profile serializer refuses anything that is not a
+# `city` so a crafted request cannot post a doorstep either.
+PLACES_CITY_PRIMARY_TYPES = os.getenv("PLACES_CITY_PRIMARY_TYPES") or (
+    "locality,"
+    "administrative_area_level_3,"
+    "administrative_area_level_4,"
+    "sublocality_level_1,"
+    "postal_town"
+)
 
 # ---- Coordinate lifecycle ("B-lite", doc section 6) ----
 # We may keep a place_id forever but not its coordinates, so a Location's point

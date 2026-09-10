@@ -7,6 +7,20 @@ class BaseUserSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source='profile.name', read_only=True)
     profile_photo = serializers.URLField(source='profile.profile_photo', read_only=True)
 
+    # The derived answer, not the inputs. READ-ONLY and computed server-side:
+    # it is the User.is_minor property, which reads the birthdate off the
+    # profile and the jurisdiction off the user (accounts/constants.is_minor),
+    # so the client branches on one boolean instead of reimplementing a
+    # per-country age table it would immediately get wrong.
+    #
+    # Safe on this serializer because everything using it is either the owner's
+    # own session (login, /user/details) or an authenticated view — the class
+    # already carries `email`, so it was never public output. The logged-out
+    # profile view has its own serializer (public_profile_serializers.py) and
+    # must not gain this field: "is this account a child" is exactly the
+    # question an anonymous scraper should not be able to ask.
+    is_minor = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = User
         fields = [
@@ -18,7 +32,13 @@ class BaseUserSerializer(serializers.ModelSerializer):
             'is_onboarding_completed',
             'name',
             'profile_photo',
-            'is_email_verified'
+            'is_email_verified',
+            # The LEGAL jurisdiction (User.country_code), not the location one
+            # on the profile — see get_location below, which returns that one.
+            # Read-only here in practice: nothing writes through this
+            # serializer, and the profile editor has no field for it at all.
+            'country_code',
+            'is_minor',
         ]
 
 class UserSerializer(BaseUserSerializer):

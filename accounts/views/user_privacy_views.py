@@ -19,6 +19,7 @@ from accounts.serializers.privacy_serializers import (
 from utils.cache import cache_delete
 from utils.cache_keys import CacheKeys
 from utils.response import response_data
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,9 @@ class UserPublicProfilePrivacyAPIView(APIView):
     is unchanged either way (see UserProfile.is_public_profile).
     """
 
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def patch(self, request):
         TAG = "[PRIVACY PUBLIC PROFILE]"

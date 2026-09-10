@@ -12,12 +12,15 @@ from utils.response import response_data
 from utils.cache import cache_set, cache_get, cache_delete
 from utils.cache_keys import CacheKeys
 from connections.services.follow_services import FollowService
+from guardians.selectors.consent_selectors import guardian_status
+from guardians.services.consent_service import ensure_pending_for_minor
 from legal.selectors.acceptance_selectors import (
     get_pending_documents,
     legal_status,
 )
 from legal.services.acceptance_service import record_acceptance
 from utils.request_meta import client_ip, client_user_agent
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 from moderation.selectors.profile_visibility import (
     hide_if_blocked,
@@ -30,6 +33,13 @@ from services.storage.validators import (
     with_cache_buster,
 )
 from accounts.serializers.user_update_serilizer import UpdateUserProfileSerializer
+from accounts.constants import normalize_country
+from accounts.services.age_service import (
+    AgeGateError,
+    parse_birthdate,
+    resolve_country,
+    validate_signup_age,
+)
 from services.location.location_service import LocationService
 from usernames.exceptions import UsernameTaken
 from usernames.services.username_service import UsernameService
@@ -104,7 +114,9 @@ class GetUserDetails(BaseAPIView):
 
 
 class GetUserDetailsByID(APIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     LIST_TYPE_MINI = 'mini'
     LIST_TYPE_FULL = 'full'
@@ -134,6 +146,12 @@ class GetUserDetailsByID(APIView):
             # columns on the user already loaded above and queries nothing.
             data["legal"] = legal_status(user)
 
+            # Same idea as the block above, one gate along: a minor waiting on
+            # a parent needs their waiting screen on the session-start call, not
+            # behind a second request. Free for everybody else — guardian_status
+            # only queries when the status is `pending` (see the selector).
+            data["guardian"] = guardian_status(user)
+
             return response_data(success=True, data=data)
         
         except Exception as e:
@@ -146,7 +164,9 @@ class GetUserDetailsByID(APIView):
 
 
 class CheckUsernameAvailabilityAPIView(APIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def get(self, request):
         try:
@@ -222,7 +242,9 @@ class UpdateUserMediaAPIView(APIView):
         "is_delete_cover": true
     }
     '''
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def post(self, request):
         try:
@@ -312,7 +334,9 @@ class UpdateUserMediaAPIView(APIView):
 
 
 class UpdateUserProfileAPIView(APIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def patch(self, request):
         TAG = "[PROFILE UPDATE]"
@@ -407,6 +431,10 @@ class UpdateUserProfileAPIView(APIView):
                 "weight_kg",
             ]
 
+            # Read BEFORE the loop below overwrites it — the counter increment
+            # underneath depends on knowing what was there.
+            birthdate_before = profile.birthdate
+
             for field in profile_mapping:
                 if field in data:
                     old_value = getattr(profile, field)
@@ -418,6 +446,27 @@ class UpdateUserProfileAPIView(APIView):
                     logger.debug(
                         f"{TAG} {field}: {old_value} → {new_value}"
                     )
+
+            # A birthdate that ACTUALLY CHANGED spends the single self-serve
+            # correction (see UpdateUserProfileSerializer.validate_birthdate,
+            # which reads this counter and refuses the next one). Counted here
+            # rather than in the serializer because a serializer that validates
+            # must not have side effects: is_valid() runs before anything is
+            # saved and can be followed by a rollback, and a counter
+            # incremented by a change that never landed would lock the user out
+            # of a correction they never made.
+            #
+            # The equality check is not redundant with the serializer's — that
+            # one decides whether to ALLOW, this one decides whether to CHARGE,
+            # and a re-save of the same date must do neither.
+            if "birthdate" in data and data["birthdate"] != birthdate_before:
+                user.birthdate_corrections += 1
+                user_fields.append("birthdate_corrections")
+
+                logger.info(
+                    f"{TAG} Birthdate corrected user={user.id}, "
+                    f"corrections={user.birthdate_corrections}"
+                )
 
             # ATOMIC SAVE
             with transaction.atomic():
@@ -507,8 +556,18 @@ class SetUserRoleAPIView(APIView):
     is_role_confirmed=False). This is NOT a general role editor — once the role is
     confirmed the endpoint rejects further changes, and role is deliberately absent
     from UpdateUserProfileSerializer so it can't be edited elsewhere.
+
+    IT IS ALSO THE AGE GATE FOR GOOGLE SIGNUPS, and that is the part that is
+    easy to miss. A Google account is created by GoogleAuthCallbackView without
+    the user ever seeing the signup form — no password, no role, no consent and
+    no date of birth are collected, because the only button they pressed was on
+    Google's own screen. Every one of those gaps is closed here, at the one step
+    a new Google user cannot skip. Leaving the age check to the signup form
+    alone would mean the entire OAuth half of signups walked straight past it.
     """
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def post(self, request):
         TAG = "[SET ROLE]"
@@ -554,16 +613,119 @@ class SetUserRoleAPIView(APIView):
             )
             logger.info(f"{TAG} Consent recorded user={user.id}")
 
-        user.role = role
-        user.is_role_confirmed = True
-        user.save(update_fields=["role", "is_role_confirmed", "updated_at"])
+        # THE AGE STEP FOR GOOGLE SIGNUPS — sited here, beside consent, on
+        # purpose. Both are things the OAuth flow never asked, both are
+        # preconditions of a usable account, and putting them at the same gate
+        # means there is exactly one place to check rather than two that can
+        # drift apart. A user cannot come out of this endpoint with a confirmed
+        # role and no age on file.
+        #
+        # Conditional on the user not already having them, so this is a no-op
+        # for an email signup passing through (it answered both at the form)
+        # and for any Google user who has already been through it once — the
+        # endpoint stays usable for a plain role change during onboarding.
+        profile = getattr(user, "profile", None)
+        needs_birthdate = profile is None or profile.birthdate is None
+        needs_country = not user.country_code
+
+        birthdate = None
+        country_code = user.country_code
+
+        if needs_birthdate or needs_country:
+            if needs_birthdate and not request.data.get("birthdate"):
+                logger.warning(f"{TAG} Birthdate missing user={user.id}")
+                return response_data(
+                    False, "Date of birth is required", status_code=400
+                )
+
+            if needs_country and not normalize_country(
+                request.data.get("country_code")
+            ):
+                logger.warning(f"{TAG} Country missing user={user.id}")
+                return response_data(
+                    False, "A valid country is required", status_code=400
+                )
+
+            try:
+                if needs_country:
+                    # Same cross-check the signup form gets. user.phone is
+                    # normally empty for a Google account, in which case
+                    # resolve_country simply returns the declaration.
+                    country_code = resolve_country(
+                        request.data.get("country_code"), user.phone
+                    )
+
+                if needs_birthdate:
+                    birthdate = parse_birthdate(request.data.get("birthdate"))
+                else:
+                    birthdate = profile.birthdate
+
+                # The SAME validation and the SAME neutral rejection as the
+                # email form. A Google account that fails it is refused a role,
+                # which is what keeps it out of the app.
+                validate_signup_age(birthdate, country_code)
+            except AgeGateError as age_error:
+                return response_data(
+                    False,
+                    age_error.detail[0] if age_error.detail else "",
+                    {"code": age_error.error_code},
+                    status_code=400,
+                )
+
+        # One transaction: the role, the jurisdiction and the birthdate are
+        # written together or not at all, so there is no state in which the
+        # role got confirmed but the age write failed.
+        with transaction.atomic():
+            user.role = role
+            user.is_role_confirmed = True
+
+            user_fields = ["role", "is_role_confirmed", "updated_at"]
+
+            if needs_country:
+                user.country_code = country_code
+                user_fields.insert(2, "country_code")
+
+            user.save(update_fields=user_fields)
+
+            if needs_birthdate:
+                if profile is None:
+                    # Every path that creates a user creates its profile in the
+                    # same transaction, so this should be unreachable — but the
+                    # birthdate has already been validated by now and dropping
+                    # it would leave a confirmed account whose age reads as
+                    # unknown, which is the exact state this endpoint exists to
+                    # prevent. Materialize the row rather than lose the answer.
+                    profile = UserProfile.objects.create(
+                        user=user, name=user.username or ""
+                    )
+
+                profile.birthdate = birthdate
+                profile.save(update_fields=["birthdate", "updated_at"])
 
         logger.info(f"{TAG} Role set user={user.id}, role={role}")
+
+        # THE MINOR LOCK FOR GOOGLE SIGNUPS — the twin of the one in
+        # VerifySignupOTPAPIView, and here for the same reason the age gate
+        # above is: this is the step a new Google user cannot skip, and the
+        # first moment their birthdate is on file.
+        #
+        # Re-read first. The reverse one-to-one cached on `user` may hold the
+        # "no profile" miss from the top of this method, and a stale missing
+        # birthdate reads as a minor (accounts/constants.is_minor) — which
+        # would lock an adult out behind a parent screen.
+        user = User.objects.select_related("profile").get(pk=user.pk)
+        guardian_required = ensure_pending_for_minor(user)
+
+        data = UserSerializer(user).data
+        # Alongside the user payload rather than inside it: this says what the
+        # client should DO next, which is not a property of the account. See
+        # the same key on the OTP verification response.
+        data["guardian_required"] = guardian_required
 
         return response_data(
             success=True,
             message="Role updated successfully",
-            data=UserSerializer(user).data
+            data=data
         )
 
 
@@ -575,7 +737,9 @@ class CompleteOnboardingAPIView(APIView):
     success. After this succeeds the user's role becomes permanently locked (see
     SetUserRoleAPIView).
     """
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def post(self, request):
         TAG = "[COMPLETE ONBOARDING]"

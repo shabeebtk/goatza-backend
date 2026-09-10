@@ -97,6 +97,13 @@ class CVTestCase(APITestCase):
             username=username,
             phone=phone,
             role=role or User.Role.PLAYER,
+            # GB (consent age 13), so the 17-year-old below is not a minor.
+            # Load-bearing: a minor has NO public CV at all — get_cv_user
+            # returns None and every route here would 404 — and that rule is
+            # tested in accounts/tests/test_public_profile_minor.py. With no
+            # country the jurisdiction defaults to 18 and this whole file would
+            # be asserting against 404s.
+            country_code="GB",
         )
         accept_current_terms(user)
         if not is_active:

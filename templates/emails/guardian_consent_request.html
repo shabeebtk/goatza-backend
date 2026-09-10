@@ -1,0 +1,41 @@
+{% extends "emails/base.html" %}
+{% comment %}
+The one email a parent who has no Goatza account ever receives, and the whole
+consent flow rests on it: whoever opens the link can approve a child, so this
+has to be readable by somebody who has never heard of us and is not sure this
+isn't a scam.
+
+Consequences for the copy, all deliberate:
+  * The child is named by their USERNAME, never by their real name — the mail
+    goes to an address a child typed in, and if they typed it wrong it must not
+    tell a stranger a minor's full name.
+  * What we process is listed in full, in plain words, before the button. A
+    parent deciding is a parent who has to know what they are deciding about.
+  * The expiry and the "you can remove this later" line are both here. The
+    second one is a promise the service keeps — withdraw_by_token deliberately
+    ignores link expiry so that it stays true.
+
+utils/transactional_emails.send_guardian_consent_request_email owns the
+plain-text twin; the two have to be edited together. Bump
+GUARDIAN_NOTICE_VERSION in guardians/constants.py whenever this wording changes.
+
+The itemized list comes from guardians.constants.PROCESSED_DATA_ITEMS, which the
+consent API returns verbatim — so the page a parent approves on and this email
+cannot describe different things.
+
+`guardian_name`, `child_username` and `consent_url` are user-supplied and stay
+autoescaped — never mark them safe.
+{% endcomment %}
+{% block preheader %}{{ child_username }} needs a parent's permission to use Goatza.{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">A permission request</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Hi <b style='color:#111111;'>{{ guardian_name }}</b>, someone using the account <b style="color:#111111;">{{ child_username }}</b> has told us you are their parent or guardian, and that they are under 18.</p><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Goatza is a sports network where players build a profile, follow clubs and apply to trials. We need your permission before they can use it.</p><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:18px 0 18px 0;">
+  <tr><td style="background-color:#F7FAF7;border:1px solid #e3ebe3;border-radius:12px;padding:16px 18px;">
+    <div style="font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:13px;letter-spacing:1px;text-transform:uppercase;color:#4c7c5f;margin:0 0 10px 0;">What we would hold about them</div>
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#555555;line-height:1.9;">
+      {% for item in processed_data %}{{ item }}{% if not forloop.last %}<br>{% endif %}
+      {% endfor %}
+    </div>
+  </td></tr></table><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#00B562;border-radius:10px;">
+    <a href="{{ consent_url }}" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#ffffff;text-decoration:none;letter-spacing:0.4px;">Review and decide</a>
+  </td></tr></table><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">This link expires in {{ expiry_days }} days, and it is only for you &mdash; please don&rsquo;t forward it.</p><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">You can say no, and you can remove your permission later from this same link. If you do, the account is locked until a parent approves it again.</p><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">Don&rsquo;t recognise <b style="color:#777777;">{{ child_username }}</b>? Ignore this email &mdash; without your approval the account stays locked.</p>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because this address was given as a parent or guardian&rsquo;s contact on Goatza. We don&rsquo;t create an account for you, and we won&rsquo;t email you again unless it&rsquo;s about this request.{% endblock %}

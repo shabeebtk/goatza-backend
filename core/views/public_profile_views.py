@@ -71,6 +71,44 @@ def _not_found(what):
     )
 
 
+def _empty_posts_page(limit, offset):
+    """
+    A well-formed page with nothing in it — what a minor's public posts are.
+
+    Deliberately NOT a 404. The profile itself still resolves: a minor's
+    stripped card is reachable and indexed on purpose, so answering 404 here
+    would say the person does not exist while the page above says they do, and
+    the client would render an error state for a profile that loaded fine.
+
+    Same shape as ``_serialize_posts``, so no caller branches. ``count`` is 0
+    rather than the real total on purpose — a count of 47 beside an empty list
+    advertises how much is being withheld about a specific child, and a
+    "sign in to see 47 posts" prompt is a better recruitment tactic than it is
+    a safeguarding decision.
+    """
+    return {"count": 0, "limit": limit, "offset": offset, "results": []}
+
+
+def _posts_are_public(user):
+    """
+    Whether this user's posts belong on the anonymous surface at all.
+
+    A minor's do not. Their posts are the largest and least reviewable body of
+    content attached to the account — free text, photographs, video, tagged
+    locations, other named children — and none of it can be filtered field by
+    field the way the profile header can. The profile serializer withholds a
+    dozen known fields; there is no equivalent for a post, so the whole list
+    goes behind the login.
+
+    A signed-in caller reaching this route is NOT exempted, and that is
+    deliberate: this is the shareable, crawlable, cacheable surface, and its
+    answers must not depend on who is asking or the CDN would serve one
+    visitor's answer to another. A signed-in user gets the full list from the
+    authenticated profile endpoint, which is where it has always lived.
+    """
+    return not getattr(user, "is_minor", True)
+
+
 def _serialize_posts(queryset, total, limit, offset):
     """
     The paginated shape both the bundle and the posts endpoint return.
@@ -121,10 +159,20 @@ class PublicUserProfileAPIView(PublicAPIView):
             if user is None:
                 return _not_found("Profile")
 
-            posts, total = public_posts_page(
-                user_profile_ref(user), actor,
-                limit=PUBLIC_POSTS_PAGE_SIZE, offset=0,
-            )
+            # The bundle carries the first page of posts, so the minor rule has
+            # to be applied HERE too — stripping only the paginated endpoint
+            # would leave ten of a child's posts in the page every crawler
+            # fetches, which is the copy that actually gets indexed.
+            if _posts_are_public(user):
+                posts, total = public_posts_page(
+                    user_profile_ref(user), actor,
+                    limit=PUBLIC_POSTS_PAGE_SIZE, offset=0,
+                )
+                posts_page = _serialize_posts(
+                    posts, total, PUBLIC_POSTS_PAGE_SIZE, 0
+                )
+            else:
+                posts_page = _empty_posts_page(PUBLIC_POSTS_PAGE_SIZE, 0)
 
             data = {
                 "type": TYPE_USER,
@@ -143,9 +191,7 @@ class PublicUserProfileAPIView(PublicAPIView):
                 "achievements": AchievementSerializer(
                     public_achievements_for(user), many=True
                 ).data,
-                "posts": _serialize_posts(
-                    posts, total, PUBLIC_POSTS_PAGE_SIZE, 0
-                ),
+                "posts": posts_page,
             }
 
             if actor is None:
@@ -163,7 +209,13 @@ class PublicUserProfileAPIView(PublicAPIView):
 
 
 class PublicUserPostsAPIView(PublicAPIView):
-    """GET /public/profile/<username>/posts?limit&offset — pagination only."""
+    """
+    GET /public/profile/<username>/posts?limit&offset — pagination only.
+
+    Answers an EMPTY page for a minor, not a 404: the profile it belongs to
+    still resolves, so a 404 here would contradict the page that linked to it.
+    See ``_posts_are_public``.
+    """
 
     def get(self, request, username):
         TAG = "PublicUserPostsAPIView"
@@ -177,6 +229,12 @@ class PublicUserPostsAPIView(PublicAPIView):
                 request.query_params.get("limit"),
                 request.query_params.get("offset"),
             )
+
+            if not _posts_are_public(user):
+                return response_data(
+                    success=True,
+                    data=_empty_posts_page(limit, offset),
+                )
 
             posts, total = public_posts_page(
                 user_profile_ref(user), request.actor,
