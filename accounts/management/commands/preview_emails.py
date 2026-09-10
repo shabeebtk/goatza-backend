@@ -18,10 +18,19 @@ from django.core.management.base import BaseCommand
 from django.template.loader import render_to_string
 from django.utils.safestring import mark_safe
 
+from guardians.constants import (
+    PROCESSED_DATA_ITEMS,
+    TOKEN_TTL_DAYS,
+    consent_page_url,
+)
 from utils.transactional_emails import (
     APPLICATION_RECEIVED_TEMPLATE,
     APPLICATION_STATUS_TEMPLATE,
     EMAIL_CHANGE_OTP_COPY,
+    GUARDIAN_CONSENT_REQUEST_SUBJECT,
+    GUARDIAN_CONSENT_REQUEST_TEMPLATE,
+    GUARDIAN_CONSENT_WITHDRAWN_SUBJECT,
+    GUARDIAN_CONSENT_WITHDRAWN_TEMPLATE,
     EMAIL_CHANGED_SUBJECT,
     EMAIL_CHANGED_TEMPLATE,
     LOGIN_OTP_COPY,
@@ -58,6 +67,14 @@ POSITION = "Striker"
 LOCATION = "Thiruvananthapuram, Kerala"
 APPLIED_DATE = "4 Sep 2026"
 PLAYER_FULL_NAME = "Arjun Menon"
+
+# Guardian sample set. The child is a HANDLE and the parent is a name with no
+# account behind it — which is the whole shape of these two emails.
+GUARDIAN_NAME = "Priya Nair"
+CHILD_USERNAME = "arjun_10"
+# A token-shaped placeholder, not a real one. Previews are committed files;
+# a working consent link in one would be a credential in the repo.
+SAMPLE_CONSENT_TOKEN = "sample-token-not-a-real-one"
 PLAYER_USERNAME = "arjunmenon10"
 PLAYER_AGE = 17
 
@@ -183,6 +200,31 @@ PREVIEWS = [
     (
         "08b-new-applicants-rollup.html",
         *_alert_preview(new_count=4, total_count=16),
+    ),
+    (
+        "09a-guardian-consent-request.html",
+        GUARDIAN_CONSENT_REQUEST_TEMPLATE,
+        {
+            "subject": GUARDIAN_CONSENT_REQUEST_SUBJECT.format(
+                child_username=CHILD_USERNAME
+            ),
+            "guardian_name": GUARDIAN_NAME,
+            "child_username": CHILD_USERNAME,
+            "consent_url": consent_page_url(SAMPLE_CONSENT_TOKEN),
+            "expiry_days": TOKEN_TTL_DAYS,
+            "processed_data": PROCESSED_DATA_ITEMS,
+        },
+    ),
+    (
+        "09b-guardian-consent-withdrawn.html",
+        GUARDIAN_CONSENT_WITHDRAWN_TEMPLATE,
+        {
+            "subject": GUARDIAN_CONSENT_WITHDRAWN_SUBJECT.format(
+                child_username=CHILD_USERNAME
+            ),
+            "guardian_name": GUARDIAN_NAME,
+            "child_username": CHILD_USERNAME,
+        },
     ),
 ]
 

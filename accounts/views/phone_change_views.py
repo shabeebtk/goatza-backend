@@ -19,6 +19,7 @@ from rest_framework.views import APIView
 
 from accounts.services.phone_change_service import change_phone
 from accounts.throttles import PhoneChangeThrottle
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 from utils.errors import flatten_validation_error
 from utils.response import response_data
@@ -65,7 +66,9 @@ class PhoneChangeAPIView(APIView):
     carries.
     """
 
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
     throttle_classes = [PhoneChangeThrottle]
     throttle_scope = "phone_change"
 

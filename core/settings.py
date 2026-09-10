@@ -128,6 +128,9 @@ INSTALLED_APPS = [
     'waitlist',
     'moderation',
     'legal',
+    # Parental consent for under-18 users. Parents live here as CONTACTS, with
+    # no account, no role and no login — see guardians/models.py.
+    'guardians',
     # "Report a problem" — app breakage, NOT abuse. Abuse reporting stays
     # in 'moderation'; the two share nothing but the word "report".
     'support',
@@ -279,6 +282,13 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
         'legal.permissions.HasAcceptedCurrentTerms',
+        # The minor lock, directly after the terms gate because the two are
+        # maintained as a pair: a view's own permission_classes REPLACES this
+        # list, so every hand-rolled list that names one names the other
+        # (guardians/tests/test_gate.py asserts exactly that). Unlike the terms
+        # gate this one blocks reads as well as writes — see its module
+        # docstring for why the two rules differ.
+        'guardians.permissions.HasGuardianConsentIfMinor',
     ],
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
@@ -326,6 +336,21 @@ REST_FRAMEWORK = {
         # the unique column would otherwise answer "taken" often enough to
         # enumerate numbers.
         'phone_change': '10/hour',
+        # Asking a parent for permission (guardians.throttles). Per USER, and
+        # tight for the same reason as email_change above: it mails a link to
+        # an address the CALLER typed, with nothing verifying it first.
+        'guardian_request': '5/hour',
+        # Re-sending that link (guardians.throttles). Tighter still — every
+        # resend nudges somebody who has no account and cannot unsubscribe, and
+        # mints a fresh token that retires the last one.
+        'guardian_resend': '3/hour',
+        # The PARENT's side, and the only anonymous surface outside 'public/'.
+        # Per IP (guardians.throttles) because a parent has no account — the
+        # token in the URL identifies a link, not a person. The read limit is a
+        # token-guessing limit; the write one is shared across approve, decline
+        # and withdraw, which are three answers to one question.
+        'guardian_consent_read': '20/hour',
+        'guardian_consent_write': '10/hour',
         'message_share': '30/min',   # per actor — see messaging.throttles
         'chat_media': '30/min',      # per actor — chat photo uploads
         # Feed impression flushes (see feed.throttles). Its own scope so a long

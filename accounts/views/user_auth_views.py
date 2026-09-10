@@ -24,6 +24,7 @@ from accounts.services.age_service import (
 )
 from accounts.constants import normalize_country
 from accounts.services.login_service import on_successful_login
+from guardians.services.consent_service import ensure_pending_for_minor
 from legal.constants import REQUIRED_DOCUMENTS
 from legal.services.acceptance_service import record_acceptance
 from usernames.services.username_service import UsernameService
@@ -43,6 +44,7 @@ from accounts.throttles import (
 )
 from utils.cookies import set_refresh_key_cookie, delete_refresh_key_cookie
 from utils.request_meta import client_ip, client_user_agent
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 
 logger = logging.getLogger(__name__)
@@ -225,8 +227,6 @@ class VerifySignupOTPAPIView(APIView):
         email = request.data.get("email")
         otp_input = request.data.get("otp")
 
-        print(otp_input)
-
         if not email or not otp_input:
             return response_data(False, "Email and OTP required", status_code=400)
 
@@ -242,6 +242,15 @@ class VerifySignupOTPAPIView(APIView):
         user.is_email_verified = True
         user.is_active = True
         user.save()
+
+        # THE MINOR LOCK, at the moment the account becomes real.
+        #
+        # Sited here and not in the signup POST above for one reason: this is
+        # where a session is handed over. Before this the row exists but nobody
+        # can act as it, and after it the client needs to know — on this
+        # response — whether to open the app or the parent screen. Adults get
+        # False and nothing is written.
+        guardian_required = ensure_pending_for_minor(user)
 
         # The one moment an account becomes real. Fire-and-forget: the sender
         # swallows its own failures, so a welcome mail that never leaves must
@@ -264,7 +273,13 @@ class VerifySignupOTPAPIView(APIView):
             "verification successful",
             {
                 "access": str(refresh.access_token),
-                "user": UserSerializer(user).data
+                "user": UserSerializer(user).data,
+                # True means the client opens the parent screen instead of the
+                # app. Its own key rather than something read off the user
+                # payload: "is this account a minor" and "does it still need a
+                # guardian" are different questions, and an approved minor
+                # answers True to the first and False to this.
+                "guardian_required": guardian_required,
             }
         )
         # Set refresh token in cookie
@@ -472,7 +487,9 @@ class ChangePasswordAPIView(APIView):
       400 {"code": "invalid_new_password"}
       400 {"code": "same_password"}
     """
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
     throttle_classes = [ChangePasswordThrottle]
 
     def post(self, request):

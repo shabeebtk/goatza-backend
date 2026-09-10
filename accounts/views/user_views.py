@@ -12,12 +12,15 @@ from utils.response import response_data
 from utils.cache import cache_set, cache_get, cache_delete
 from utils.cache_keys import CacheKeys
 from connections.services.follow_services import FollowService
+from guardians.selectors.consent_selectors import guardian_status
+from guardians.services.consent_service import ensure_pending_for_minor
 from legal.selectors.acceptance_selectors import (
     get_pending_documents,
     legal_status,
 )
 from legal.services.acceptance_service import record_acceptance
 from utils.request_meta import client_ip, client_user_agent
+from guardians.permissions import HasGuardianConsentIfMinor
 from legal.permissions import HasAcceptedCurrentTerms
 from moderation.selectors.profile_visibility import (
     hide_if_blocked,
@@ -111,7 +114,9 @@ class GetUserDetails(BaseAPIView):
 
 
 class GetUserDetailsByID(APIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     LIST_TYPE_MINI = 'mini'
     LIST_TYPE_FULL = 'full'
@@ -141,6 +146,12 @@ class GetUserDetailsByID(APIView):
             # columns on the user already loaded above and queries nothing.
             data["legal"] = legal_status(user)
 
+            # Same idea as the block above, one gate along: a minor waiting on
+            # a parent needs their waiting screen on the session-start call, not
+            # behind a second request. Free for everybody else — guardian_status
+            # only queries when the status is `pending` (see the selector).
+            data["guardian"] = guardian_status(user)
+
             return response_data(success=True, data=data)
         
         except Exception as e:
@@ -153,7 +164,9 @@ class GetUserDetailsByID(APIView):
 
 
 class CheckUsernameAvailabilityAPIView(APIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def get(self, request):
         try:
@@ -229,7 +242,9 @@ class UpdateUserMediaAPIView(APIView):
         "is_delete_cover": true
     }
     '''
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def post(self, request):
         try:
@@ -319,7 +334,9 @@ class UpdateUserMediaAPIView(APIView):
 
 
 class UpdateUserProfileAPIView(APIView):
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def patch(self, request):
         TAG = "[PROFILE UPDATE]"
@@ -548,7 +565,9 @@ class SetUserRoleAPIView(APIView):
     a new Google user cannot skip. Leaving the age check to the signup form
     alone would mean the entire OAuth half of signups walked straight past it.
     """
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def post(self, request):
         TAG = "[SET ROLE]"
@@ -685,10 +704,28 @@ class SetUserRoleAPIView(APIView):
 
         logger.info(f"{TAG} Role set user={user.id}, role={role}")
 
+        # THE MINOR LOCK FOR GOOGLE SIGNUPS — the twin of the one in
+        # VerifySignupOTPAPIView, and here for the same reason the age gate
+        # above is: this is the step a new Google user cannot skip, and the
+        # first moment their birthdate is on file.
+        #
+        # Re-read first. The reverse one-to-one cached on `user` may hold the
+        # "no profile" miss from the top of this method, and a stale missing
+        # birthdate reads as a minor (accounts/constants.is_minor) — which
+        # would lock an adult out behind a parent screen.
+        user = User.objects.select_related("profile").get(pk=user.pk)
+        guardian_required = ensure_pending_for_minor(user)
+
+        data = UserSerializer(user).data
+        # Alongside the user payload rather than inside it: this says what the
+        # client should DO next, which is not a property of the account. See
+        # the same key on the OTP verification response.
+        data["guardian_required"] = guardian_required
+
         return response_data(
             success=True,
             message="Role updated successfully",
-            data=UserSerializer(user).data
+            data=data
         )
 
 
@@ -700,7 +737,9 @@ class CompleteOnboardingAPIView(APIView):
     success. After this succeeds the user's role becomes permanently locked (see
     SetUserRoleAPIView).
     """
-    permission_classes = [IsAuthenticated, HasAcceptedCurrentTerms]
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
 
     def post(self, request):
         TAG = "[COMPLETE ONBOARDING]"

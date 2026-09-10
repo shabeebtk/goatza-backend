@@ -1,0 +1,22 @@
+{% extends "emails/base.html" %}
+{% comment %}
+Confirmation to the parent that their permission was removed and the account is
+locked again. Sent on the success path only, the same rule as
+emails/password_changed.html: a notice that fires when nothing happened is a
+notice people learn to ignore.
+
+Short on purpose. The parent has just done this, deliberately, seconds ago —
+this mail exists so there is a record in their own inbox that it worked, not to
+re-explain the flow or to talk them out of it. It does not carry a link back:
+re-approving is the child's move (they send a fresh request), and inviting a
+parent to undo a decision they just made is the wrong nudge to put in front of
+somebody protecting their own child.
+
+utils/transactional_emails.send_guardian_consent_withdrawn_email owns the
+plain-text twin; the two have to be edited together.
+
+`guardian_name` and `child_username` are user-supplied and stay autoescaped.
+{% endcomment %}
+{% block preheader %}Your permission has been removed and the account is locked.{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">Permission removed</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Hi <b style='color:#111111;'>{{ guardian_name }}</b>, you have removed your permission for the Goatza account <b style="color:#111111;">{{ child_username }}</b>.</p><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">The account is locked from now on. It stays locked unless a parent or guardian approves it again, which has to start from the account itself &mdash; you don&rsquo;t need to do anything else.</p><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">Wasn&rsquo;t you? Reply to this email and we&rsquo;ll look into it.</p>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because you were recorded as the parent or guardian who approved this Goatza account.{% endblock %}

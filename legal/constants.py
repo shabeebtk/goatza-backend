@@ -19,7 +19,19 @@ denormalized columns on ``accounts.User`` (see ``DENORMALIZED_FIELDS``).
 """
 
 TERMS_VERSION = "2026-10-01"
-PRIVACY_VERSION = "2026-10-01"
+
+# Bumped for the guardian-consent release: the policy now describes what is
+# collected about a minor, who may consent on their behalf, and what a guardian
+# is told (guardians/constants.PROCESSED_DATA_ITEMS is the itemized version of
+# that same list). EVERY EXISTING USER RE-ACCEPTS on their next request, which
+# is the intended effect and the whole reason this is a version rather than a
+# quiet edit.
+#
+# Note this string sorts EARLIER than TERMS_VERSION above, which is fine: the
+# gate compares for INEQUALITY, not recency (see get_pending_documents), so it
+# is what makes the re-consent happen either way. The two documents are
+# versioned independently and do not have to move together.
+PRIVACY_VERSION = "2026-09-10"
 
 LEGAL_DOCUMENTS = {
     "terms":      {"version": TERMS_VERSION,   "requires_acceptance": True},

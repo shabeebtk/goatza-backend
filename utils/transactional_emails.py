@@ -766,3 +766,116 @@ def send_new_applicant_alert_email(
         # One call, one mail, every owner and admin on it.
         to_email=recipients,
     )
+
+
+# ---------------------------------------------------------------------
+# Guardian consent emails
+# ---------------------------------------------------------------------
+
+GUARDIAN_CONSENT_REQUEST_TEMPLATE = "emails/guardian_consent_request.html"
+GUARDIAN_CONSENT_WITHDRAWN_TEMPLATE = "emails/guardian_consent_withdrawn.html"
+
+# The only two mails in this file that go to somebody who has NO ACCOUNT and
+# never asked to hear from us. Two rules follow from that and neither is
+# negotiable:
+#
+#   * THE CHILD IS NAMED BY USERNAME, never by their real name. A child types
+#     their parent's address by hand, and a typo sends this mail to a stranger.
+#     A handle in a stranger's inbox is a wasted email; a minor's full name in
+#     one is a disclosure we caused.
+#   * NOTHING HERE IS MARKETING. The subject says what it is, the footer says
+#     we are not creating an account for them, and there is no second mail —
+#     the resend is the same mail, not a nudge campaign.
+GUARDIAN_CONSENT_REQUEST_SUBJECT = "Permission needed for {child_username} on Goatza"
+GUARDIAN_CONSENT_WITHDRAWN_SUBJECT = "You removed permission for {child_username}"
+
+
+def send_guardian_consent_request_email(
+    *, guardian_name: str, email: str, child_username: str, consent_url: str
+) -> None:
+    """The consent link itself — the one thing standing between a minor and a
+    locked account.
+
+    `consent_url` carries the raw token and is built by
+    ``guardians.constants.consent_page_url``. It is the credential: it is not
+    logged here, and the caller has already thrown away its plaintext.
+
+    The expiry is passed as a number rather than written into the copy so that
+    the mail and ``TOKEN_TTL_DAYS`` cannot drift apart — a link that says seven
+    days and dies in three is the kind of detail a parent reads as dishonesty.
+    """
+    # Imported here rather than at module scope: this module is pulled in by
+    # accounts views very early, and it has no other reason to depend on the
+    # guardians app. Same reasoning as new_applicant_alert_recipients.
+    from guardians.constants import PROCESSED_DATA_ITEMS, TOKEN_TTL_DAYS
+
+    # The same tuple the HTML template loops over. One list, two renderings
+    # — a parent reading the text part and a parent reading the HTML part
+    # must be agreeing to the same sentences.
+    processed_list = "\n".join(f"- {item}" for item in PROCESSED_DATA_ITEMS)
+
+    _send(
+        subject=GUARDIAN_CONSENT_REQUEST_SUBJECT.format(
+            child_username=child_username
+        ),
+        text_body=(
+            f"Hi {guardian_name},\n\n"
+            f"Someone using the account {child_username} has told us you are "
+            f"their parent or guardian, and that they are under 18.\n\n"
+            f"Goatza is a sports network where players build a profile, follow "
+            f"clubs and apply to trials. We need your permission before they "
+            f"can use it.\n\n"
+            f"What we would hold about them:\n"
+            f"{processed_list}\n\n"
+            f"Review and decide: {consent_url}\n\n"
+            f"This link expires in {TOKEN_TTL_DAYS} days, and it is only for "
+            f"you - please don't forward it.\n\n"
+            f"You can say no, and you can remove your permission later from "
+            f"this same link. If you do, the account is locked until a parent "
+            f"approves it again.\n\n"
+            f"Don't recognise {child_username}? Ignore this email - without "
+            f"your approval the account stays locked."
+        ),
+        html_template=GUARDIAN_CONSENT_REQUEST_TEMPLATE,
+        context={
+            "guardian_name": guardian_name,
+            "child_username": child_username,
+            "consent_url": consent_url,
+            "expiry_days": TOKEN_TTL_DAYS,
+            "processed_data": PROCESSED_DATA_ITEMS,
+        },
+        to_email=email,
+    )
+
+
+def send_guardian_consent_withdrawn_email(
+    *, guardian_name: str, email: str, child_username: str
+) -> None:
+    """Confirm to the parent that their permission is gone and the account is
+    locked.
+
+    Success path only, like send_password_changed_email. Carries no link back:
+    re-approving starts from the child's account, and offering a parent a
+    one-click undo of the decision they just made is the wrong thing to put in
+    front of them.
+    """
+    _send(
+        subject=GUARDIAN_CONSENT_WITHDRAWN_SUBJECT.format(
+            child_username=child_username
+        ),
+        text_body=(
+            f"Hi {guardian_name},\n\n"
+            f"You have removed your permission for the Goatza account "
+            f"{child_username}.\n\n"
+            f"The account is locked from now on. It stays locked unless a "
+            f"parent or guardian approves it again, which has to start from "
+            f"the account itself - you don't need to do anything else.\n\n"
+            f"Wasn't you? Reply to this email and we'll look into it."
+        ),
+        html_template=GUARDIAN_CONSENT_WITHDRAWN_TEMPLATE,
+        context={
+            "guardian_name": guardian_name,
+            "child_username": child_username,
+        },
+        to_email=email,
+    )

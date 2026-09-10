@@ -16,6 +16,19 @@ data surface — it returns two booleans about our own database and Redis, not a
 row of anybody's data — and it has to be a plain Django view so Render's poller
 is not subject to JWT auth, the terms gate or the anon throttle. Anything that
 returns USER data still belongs in this file.
+
+AND ONE MORE, WHICH DOES RETURN USER DATA: /guardian/consent/<token> and its
+three POSTs (guardians/urls.py, guardians/views/public_consent_views.py). They
+are anonymous — a parent has no account, and the token in the URL is the whole
+identity — so they are named here, because the question this file answers is
+"what can a stranger reach?" and leaving them out would make the answer wrong.
+
+They are routed from /guardian/ rather than from here for one reason: the
+prefix is addressed by a link already sitting in parents' inboxes, and it sits
+beside the child's authenticated endpoints it is the other half of. What keeps
+them honest is not their prefix but their rule — nothing about a child leaves
+without a resolved token, and every kind of failure to resolve one returns the
+same body. Read that module before adding anything under it.
 """
 
 from django.urls import path

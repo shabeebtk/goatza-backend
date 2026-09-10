@@ -70,6 +70,12 @@ urlpatterns = [
     # published constants. The signup form needs it before an account exists.
     path('legal/', include('legal.urls')),
 
+    # The child's side of parental consent. Authenticated but deliberately
+    # OUTSIDE the terms gate (see guardians/views/consent_views.py): these are
+    # the endpoints a locked minor uses to get unlocked, so they must work when
+    # the rest of the account does not.
+    path('guardian/', include('guardians.urls')),
+
     # Google Places proxy. AllowAny, but deliberately NOT under 'public/':
     # core.public_urls is an allow-list of anonymous reads of OUR data, and
     # these two endpoints read none of it — they spend money at Google. The

@@ -45,6 +45,30 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
         SCOUT = "scout", "Scout"
         ORG_USER = "org_user", "Org User"
 
+    class GuardianConsentStatus(models.TextChoices):
+        """
+        Where this account stands with its guardian, in the four states a
+        REQUEST PATH cares about.
+
+        Deliberately not the same list as
+        ``guardians.GuardianConsentEventType``. That one records what happened
+        ("resent", "declined", "expired"); this one answers the only question
+        anything serving a request ever asks — may this account do the things a
+        consented minor may do. Three different ways of failing to have consent
+        collapse into ``pending`` here, and the events table is where the
+        difference between them stays legible.
+
+        ``withdrawn`` is kept apart from ``pending`` because the two are not
+        the same account. Pending has never been consented for; withdrawn was,
+        and a parent who has actively said "stop" must not be asked again by
+        the same nudge that chases a request nobody answered.
+        """
+
+        NOT_NEEDED = "not_needed", "Not needed"
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        WITHDRAWN = "withdrawn", "Withdrawn"
+
     email = models.EmailField(unique=True, null=True, blank=True)
     phone = models.CharField(max_length=15, unique=True, null=True, blank=True)
 
@@ -114,6 +138,29 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     terms_accepted_at = models.DateTimeField(null=True, blank=True)
     privacy_version = models.CharField(max_length=20, null=True, blank=True)
     privacy_accepted_at = models.DateTimeField(null=True, blank=True)
+
+    # Denormalized cache of what the NEWEST guardians.GuardianConsentEvent for
+    # this user means — the same arrangement as terms_version above, and for
+    # the same reason. The system of record is that table, which is append-only;
+    # this column exists so a gate can be a field read on the already-loaded
+    # user instead of a query per request, and it is rebuildable from the events
+    # by taking each child's latest row.
+    #
+    # Written ONLY by the guardians service (landing next). Nothing reads it
+    # yet, and in particular nothing gates on it — is_minor below is still the
+    # only age-based check in the product.
+    #
+    # The default is not_needed rather than pending because MOST accounts are
+    # adults, and a default of pending would put every one of them in a queue
+    # to chase a parent who does not exist. It is the signup path's job to move
+    # a minor to pending; a row nobody has assessed reads as "no obligation
+    # recorded", which is what the backfill (accounts/migrations/0014) writes
+    # for the legacy rows whose birthdate was never collected.
+    guardian_consent_status = models.CharField(
+        max_length=20,
+        choices=GuardianConsentStatus.choices,
+        default=GuardianConsentStatus.NOT_NEEDED,
+    )
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
