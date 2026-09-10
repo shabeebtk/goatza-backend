@@ -35,6 +35,7 @@ from recruitments.selectors.player_context_selectors import (
     PlayerContext, PlayerContextSelector,
 )
 from recruitments.services import eligibility_service
+from recruitments.services.discover_service import SECTION_ORDER
 from recruitments.services.match_score_service import (
     MATCH_WEIGHTS, MatchScoreService,
 )
@@ -3404,3 +3405,376 @@ class SavedRecruitmentTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertNotIn("saves_count", resp.data["data"])
+
+
+class PublicRecruitmentDetailTests(APITestCase):
+    """
+    GET /public/recruitments/<id> — the shareable link.
+
+    Two things are pinned here, and both fail silently if they break: the
+    endpoint answers the SAME 404 for every posting a stranger may not see, and
+    it serializes with the PUBLIC serializer for every caller INCLUDING the
+    posting org. The second is the one an ordinary owner-check refactor would
+    undo without a single test going red anywhere else, because the
+    authenticated twin is supposed to switch serializers on exactly that
+    condition.
+    """
+
+    def setUp(self):
+        # The view-count latch is a cache key, and cache.add is a no-op the
+        # second time inside the window.
+        cache.clear()
+
+        self.owner = self._user("clubowner", "Club Owner")
+        self.player = self._user("publicplayer", "Player One")
+        self.follower = self._user("publicfollower", "Follower")
+
+        self.org = Organization.objects.create(
+            name="Public FC", username="publicfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.recruitment = self._recruitment()
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _recruitment(self, **overrides):
+        data = dict(
+            organization=self.org,
+            sport=self.sport,
+            title="U17 Open Trials",
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            published_at=timezone.now(),
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _public(self, recruitment_id=None, **extra):
+        return self.client.get(
+            f"/public/recruitments/{recruitment_id or self.recruitment.id}",
+            **extra,
+        )
+
+    def _org_headers(self):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(self.org.id),
+        }
+
+    # ── who can read it ──────────────────────────────────────────
+
+    def test_anonymous_reads_an_active_public_recruitment(self):
+        resp = self._public()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data["data"]["id"], str(self.recruitment.id))
+        self.assertEqual(resp.data["data"]["title"], "U17 Open Trials")
+
+    def test_anonymous_gets_404_for_a_draft(self):
+        draft = self._recruitment(
+            title="Not live yet", status=Recruitment.Status.DRAFT
+        )
+        self.assertEqual(
+            self._public(draft.id).status_code, status.HTTP_404_NOT_FOUND
+        )
+
+    def test_anonymous_gets_404_for_followers_only(self):
+        private = self._recruitment(
+            title="Members only",
+            visibility=Recruitment.Visibility.FOLLOWERS_ONLY,
+        )
+        self.assertEqual(
+            self._public(private.id).status_code, status.HTTP_404_NOT_FOUND
+        )
+
+    def test_a_follower_reads_a_followers_only_posting(self):
+        # ActorMixin still runs on the public surface, so a signed-in caller is
+        # resolved normally and keeps the content they are entitled to.
+        private = self._recruitment(
+            title="Members only",
+            visibility=Recruitment.Visibility.FOLLOWERS_ONLY,
+        )
+        Follow.objects.create(
+            follower_user=self.follower, following_org=self.org
+        )
+
+        self.client.force_authenticate(user=self.follower)
+        resp = self._public(private.id)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data["data"]["id"], str(private.id))
+
+    def test_unknown_id_404s_with_the_same_body_as_the_authed_detail(self):
+        missing = uuid.uuid4()
+
+        anon = self._public(missing)
+
+        self.client.force_authenticate(user=self.player)
+        authed = self.client.get(f"/recruitments/{missing}/details")
+
+        self.assertEqual(anon.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(authed.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(anon.data["message"], authed.data["message"])
+        self.assertEqual(anon.data["success"], authed.data["success"])
+
+    # ── what the payload may carry ───────────────────────────────
+
+    OWNER_ONLY_FIELDS = (
+        "views_count", "saves_count", "status", "max_applications",
+        "shortlisted_count", "selected_count", "published_at", "updated_at",
+    )
+
+    def test_anonymous_payload_has_no_owner_only_fields(self):
+        resp = self._public()
+
+        for field in self.OWNER_ONLY_FIELDS:
+            self.assertNotIn(field, resp.data["data"], field)
+
+    def test_the_owner_org_also_gets_the_public_payload_here(self):
+        """
+        The one place the owner deliberately does NOT get the owner serializer.
+
+        This URL is anonymous, cacheable and shareable, and the numbers on the
+        owner payload are exactly the ones that must never appear on it. An org
+        admin who wants them opens the authenticated detail — which the second
+        half of this test proves still hands them over.
+        """
+        self.client.force_authenticate(user=self.owner)
+
+        public = self._public(**self._org_headers())
+        self.assertEqual(public.status_code, status.HTTP_200_OK, public.data)
+        for field in self.OWNER_ONLY_FIELDS:
+            self.assertNotIn(field, public.data["data"], field)
+
+        authed = self.client.get(
+            f"/recruitments/{self.recruitment.id}/details",
+            **self._org_headers(),
+        )
+        self.assertEqual(authed.status_code, status.HTTP_200_OK, authed.data)
+        self.assertIn("views_count", authed.data["data"])
+        self.assertIn("saves_count", authed.data["data"])
+
+
+class RecruitmentViewCountTests(APITestCase):
+    """
+    ``views_count`` — the only number on a recruitment nobody but the posting
+    org ever sees, and until now the only one that never moved.
+
+    Every rule below is one an org would read as a lie if it broke: its own
+    opens counting as interest, one player's refresh loop counting as five, or
+    a cache outage turning the detail page into a 500.
+    """
+
+    def setUp(self):
+        cache.clear()
+
+        self.owner = self._user("countowner", "Count Owner")
+        self.player = self._user("countplayer", "Count Player")
+        self.other = self._user("countother", "Count Other")
+
+        self.org = Organization.objects.create(
+            name="Counted FC", username="countedfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.recruitment = Recruitment.objects.create(
+            organization=self.org,
+            sport=self.sport,
+            title="Counted Trial",
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            published_at=timezone.now(),
+        )
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _org_headers(self):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(self.org.id),
+        }
+
+    def _authed_detail(self, **extra):
+        return self.client.get(
+            f"/recruitments/{self.recruitment.id}/details", **extra
+        )
+
+    def _public_detail(self, **extra):
+        return self.client.get(
+            f"/public/recruitments/{self.recruitment.id}", **extra
+        )
+
+    def _count(self):
+        self.recruitment.refresh_from_db(fields=["views_count"])
+        return self.recruitment.views_count
+
+    # ── the authenticated detail ─────────────────────────────────
+
+    def test_a_non_owner_read_counts(self):
+        self.client.force_authenticate(user=self.player)
+
+        self.assertEqual(self._authed_detail().status_code, status.HTTP_200_OK)
+        self.assertEqual(self._count(), 1)
+
+    def test_the_owner_org_never_counts_its_own_views(self):
+        self.client.force_authenticate(user=self.owner)
+
+        for _ in range(3):
+            self.assertEqual(
+                self._authed_detail(**self._org_headers()).status_code,
+                status.HTTP_200_OK,
+            )
+
+        self.assertEqual(self._count(), 0)
+
+    def test_one_viewer_counts_once_within_the_window(self):
+        self.client.force_authenticate(user=self.player)
+
+        for _ in range(4):
+            self._authed_detail()
+
+        self.assertEqual(self._count(), 1)
+
+    def test_two_viewers_count_twice(self):
+        self.client.force_authenticate(user=self.player)
+        self._authed_detail()
+
+        self.client.force_authenticate(user=self.other)
+        self._authed_detail()
+
+        self.assertEqual(self._count(), 2)
+
+    def test_the_owner_reads_back_the_players_view(self):
+        """The number the org actually sees on its own detail page."""
+        self.client.force_authenticate(user=self.player)
+        self._authed_detail()
+
+        self.client.force_authenticate(user=self.owner)
+        resp = self._authed_detail(**self._org_headers())
+
+        self.assertEqual(resp.data["data"]["views_count"], 1)
+
+    # ── the public detail ────────────────────────────────────────
+
+    def test_an_anonymous_public_read_counts_and_dedupes_by_ip(self):
+        for _ in range(3):
+            self.assertEqual(
+                self._public_detail(REMOTE_ADDR="203.0.113.7").status_code,
+                status.HTTP_200_OK,
+            )
+
+        self.assertEqual(self._count(), 1)
+
+        self._public_detail(REMOTE_ADDR="203.0.113.8")
+        self.assertEqual(self._count(), 2)
+
+    def test_a_viewer_counts_once_across_both_detail_routes(self):
+        """
+        The latch keys on the ACTOR, not the route. Somebody who opens a shared
+        link while signed in and then taps through to the in-app page is one
+        interested person, and an org reading "2" there would be reading a
+        count of page loads dressed up as a count of people.
+        """
+        self.client.force_authenticate(user=self.player)
+
+        self._public_detail()
+        self._authed_detail()
+
+        self.assertEqual(self._count(), 1)
+
+    def test_a_404_is_not_a_view(self):
+        draft = Recruitment.objects.create(
+            organization=self.org,
+            sport=self.sport,
+            title="Draft",
+            recruitment_type="open_trial",
+            status=Recruitment.Status.DRAFT,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+
+        resp = self.client.get(f"/public/recruitments/{draft.id}")
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        draft.refresh_from_db(fields=["views_count"])
+        self.assertEqual(draft.views_count, 0)
+
+    # ── it must never break the read ─────────────────────────────
+
+    def test_a_cache_outage_does_not_break_the_detail_response(self):
+        self.client.force_authenticate(user=self.player)
+
+        with patch(
+            "recruitments.services.recruitment_view_service.cache_add",
+            side_effect=RuntimeError("redis is down"),
+        ):
+            resp = self._authed_detail()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(self._count(), 0)
+
+    def test_a_database_hiccup_does_not_break_the_detail_response(self):
+        self.client.force_authenticate(user=self.player)
+
+        with patch.object(
+            Recruitment.objects, "filter",
+            side_effect=RuntimeError("connection reset"),
+        ):
+            resp = self._authed_detail()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+    # ── and it stays owner-only everywhere else ──────────────────
+
+    def test_views_count_is_on_no_non_owner_serializer(self):
+        UsernameService.claim(self.org.username, organization=self.org)
+        self.client.force_authenticate(user=self.player)
+
+        detail = self._authed_detail()
+        self.assertNotIn("views_count", detail.data["data"])
+
+        public = self._public_detail()
+        self.assertNotIn("views_count", public.data["data"])
+
+        listing = self.client.get(
+            "/recruitments/list", {"username": self.org.username}
+        )
+        self.assertEqual(listing.status_code, status.HTTP_200_OK, listing.data)
+        rows = listing.data["data"]["results"]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertNotIn("views_count", row)
+
+        discover = self.client.get("/recruitments/discover")
+        self.assertEqual(discover.status_code, status.HTTP_200_OK, discover.data)
+        for section in SECTION_ORDER:
+            for row in discover.data["data"].get(section, []):
+                self.assertNotIn("views_count", row)

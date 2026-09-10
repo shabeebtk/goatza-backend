@@ -1,5 +1,6 @@
 import random
 import string
+import time
 import logging
 import jwt as pyjwt
 from django.contrib.auth import authenticate, get_user_model
@@ -39,9 +40,11 @@ from utils.transactional_emails import (
     send_password_changed_email,
 )
 from accounts.throttles import (
-    SignupThrottle, LoginThrottle, OTPThrottle, ForgotPasswordThrottle,
-    ChangePasswordThrottle
+    SignupThrottle, LoginThrottle, OTPThrottle, ResendOTPThrottle,
+    ForgotPasswordThrottle, ChangePasswordThrottle
 )
+from utils.cache import cache_get, cache_set
+from utils.cache_keys import CacheKeys
 from utils.cookies import set_refresh_key_cookie, delete_refresh_key_cookie
 from utils.request_meta import client_ip, client_user_agent
 from guardians.permissions import HasGuardianConsentIfMinor
@@ -285,6 +288,108 @@ class VerifySignupOTPAPIView(APIView):
         # Set refresh token in cookie
         set_refresh_key_cookie(response, refresh_token=refresh)
         return response 
+
+
+RESEND_OTP_COOLDOWN_SECONDS = 30
+
+# The one answer POST /user/resend/otp gives to every address it is handed —
+# no account, an account already verified, or a code genuinely on its way. A
+# module constant because the test asserts the three cases are indistinguishable
+# and would otherwise be asserting against three copies of a sentence.
+RESEND_OTP_GENERIC_MESSAGE = "If the account exists, a new OTP was sent"
+
+
+class ResendSignupOTPAPIView(APIView):
+    """
+    Send the signup verification code again.
+
+    THE RESPONSE NEVER SAYS WHETHER THE ADDRESS HAS AN ACCOUNT. Unknown,
+    already verified and code-on-its-way all answer the same 200 with
+    RESEND_OTP_GENERIC_MESSAGE. This endpoint takes an address and no proof of
+    anything, so any difference between those answers — the message, the status,
+    the timing of a cooldown — is an oracle for whether someone has signed up
+    with a given email, which is exactly what the signup flow itself is careful
+    not to leak.
+
+    The code goes out under the SAME no-purpose key the signup flow uses
+    (generate_otp with no purpose — CacheKeys.email_otp), so a resent code is
+    spendable at /user/verify/otp like any other and the newest one issued wins.
+
+    Two independent limits, because they stop different things: the throttle is
+    per CALLER (ResendOTPThrottle, 3/min) and the 30s cooldown below is per
+    ADDRESS. Neither would do the other's job.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ResendOTPThrottle]
+
+    def post(self, request):
+        email = request.data.get("email")
+
+        if not email:
+            return response_data(False, "Email is required", status_code=400)
+
+        if not is_valid_email(email):
+            return response_data(False, "Invalid email", status_code=400)
+
+        # Lowercased for the cache key only. The lookup below stays exact, to
+        # match every other view here; a case variant therefore shares one
+        # cooldown but finds no user, which is the safe direction — the key
+        # covers more addresses than it needs to, never fewer.
+        cooldown_key = CacheKeys.otp_resend_cooldown(email.strip().lower())
+
+        lifts_at = cache_get(cooldown_key)
+        if lifts_at:
+            remaining = max(1, int(lifts_at - time.time()))
+            return response_data(
+                False,
+                "Please wait before requesting another OTP",
+                {"retry_after": remaining},
+                status_code=429,
+            )
+
+        # Set BEFORE the branch that decides whether anything is sent, and set
+        # on every accepted request. A cooldown written only on the real sends
+        # would give back in one extra call everything the generic message
+        # above withholds: 200 then 200 means no account here, 200 then 429
+        # means there is one.
+        cache_set(
+            cooldown_key,
+            time.time() + RESEND_OTP_COOLDOWN_SECONDS,
+            timeout=RESEND_OTP_COOLDOWN_SECONDS,
+        )
+
+        user = User.objects.filter(email=email).first()
+
+        # Only an account that has not finished signing up gets a new code.
+        # Both columns are checked, not either: they are written together when
+        # the OTP is verified, and a resend for an account that is already in
+        # is at best pointless and at worst a way to mail somebody a code they
+        # did not ask for.
+        if (
+            user is not None
+            and not user.is_email_verified
+            and not user.is_active
+        ):
+            otp = generate_otp(email)
+
+            # Fire-and-forget for the usual reason (see _send_email_safely):
+            # the cooldown above is already written, so an exception escaping
+            # here would answer 500 for a caller who must not be told anything
+            # about this address either way.
+            _send_email_safely(
+                send_signup_otp_email,
+                name=user.profile_name,
+                email=email,
+                otp=otp,
+            )
+
+            logger.info(f"Signup OTP resent: {email}")
+
+        return response_data(
+            True,
+            RESEND_OTP_GENERIC_MESSAGE,
+            {"email": email},
+        )
 
 
 class UserLoginAPIView(APIView):
