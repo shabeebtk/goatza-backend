@@ -16,6 +16,13 @@ from rest_framework_simplejwt.token_blacklist.models import (
     OutstandingToken, BlacklistedToken,
 )
 from accounts.serializers.user_serializers import UserSerializer
+from accounts.services.age_service import (
+    AgeGateError,
+    parse_birthdate,
+    resolve_country,
+    validate_signup_age,
+)
+from accounts.constants import normalize_country
 from accounts.services.login_service import on_successful_login
 from legal.constants import REQUIRED_DOCUMENTS
 from legal.services.acceptance_service import record_acceptance
@@ -71,6 +78,12 @@ class UserSignupAPIView(APIView):
         name = request.data.get("name")
         role = request.data.get("role")
         accepted_terms = request.data.get("accepted_terms")
+        birthdate_input = request.data.get("birthdate")
+        country_input = request.data.get("country_code")
+        # Not a signup field today — the email form has no phone box — but read
+        # anyway so that the day one is added, the dialling-code cross-check in
+        # resolve_country starts working without anybody having to remember it.
+        phone_input = request.data.get("phone")
 
         if not email or not password:
             return response_data(False, "Email and password are required", status_code=400)
@@ -96,6 +109,49 @@ class UserSignupAPIView(APIView):
                 status_code=400
             )
 
+        # AGE AND JURISDICTION, on the same footing as consent above and for
+        # the same reason: they are preconditions of the account, not a step
+        # after it. The user is anonymous until they verify the OTP, so there
+        # is no window in which the client could supply them later — if these
+        # were optional here, an account could exist whose age nobody ever
+        # asked for, and the only correct reading of an unknown age is "child"
+        # (accounts/constants.is_minor), which would be applied to adults
+        # forever.
+        #
+        # Presence is checked before validity so a missing field is never
+        # answered with the neutral under-age message, which would be a lie.
+        if not birthdate_input:
+            return response_data(
+                False, "Date of birth is required", status_code=400
+            )
+
+        if not normalize_country(country_input):
+            return response_data(
+                False, "A valid country is required", status_code=400
+            )
+
+        try:
+            birthdate = parse_birthdate(birthdate_input)
+
+            # The country the account is HELD TO, which is not necessarily the
+            # one the dropdown said — see age_service.resolve_country. Resolved
+            # before validating so that if the floor ever becomes per-country,
+            # it is the resolved country the floor is read from.
+            country_code = resolve_country(country_input, phone_input)
+
+            validate_signup_age(birthdate, country_code)
+        except AgeGateError as age_error:
+            # Deliberately outside the transaction block below, so a refusal
+            # answers 400 with its own message instead of being swallowed by
+            # that block's `except Exception` and returned as a 500 "Server
+            # error". Nothing has been written at this point.
+            return response_data(
+                False,
+                age_error.detail[0] if age_error.detail else "",
+                {"code": age_error.error_code},
+                status_code=400,
+            )
+
         if not name:
             name = email.split("@")[0]
 
@@ -109,12 +165,22 @@ class UserSignupAPIView(APIView):
                     email=email,
                     password=password,
                     role=role,
+                    # The RESOLVED jurisdiction, not the raw declaration.
+                    # Stored on the user, not the profile: this is the legal
+                    # country, and UserProfile.country_code is the derived
+                    # location one (see the field comment on the model).
+                    country_code=country_code,
                     is_active=False
                 )
 
                 UsernameService.generate_and_claim(name, user=user)
 
-                UserProfile.objects.create(user=user, name=name)
+                # Same transaction as the user row, so the two halves of
+                # `User.is_minor` — country here, birthdate there — can never
+                # be written apart. A rollback leaves neither.
+                UserProfile.objects.create(
+                    user=user, name=name, birthdate=birthdate
+                )
 
                 # Same transaction as the user row, so the two can never
                 # disagree: no account exists without its acceptance on file,

@@ -17,6 +17,7 @@ The rule underneath both: an acceptance is recorded only where a human was
 actually shown the sentence they are agreeing to.
 """
 
+from datetime import date
 from unittest.mock import patch
 
 from django.core.cache import cache
@@ -30,6 +31,13 @@ from legal.selectors.acceptance_selectors import get_pending_documents
 from legal.testing import accept_current_terms
 
 ROLE_URL = "/user/role"
+
+# The role step also captures age and jurisdiction for Google users (see
+# SetUserRoleAPIView) — nothing else in the OAuth flow ever asks. Spread into
+# the payloads below so these tests keep being about CONSENT rather than
+# tripping over the newer check; the age gate itself is covered in
+# accounts/tests/test_age_gate.py.
+AGE_FIELDS = {"birthdate": "1995-05-20", "country_code": "IN"}
 
 
 def make_google_user(email="googler@example.com"):
@@ -70,14 +78,18 @@ class RoleStepConsentTests(TestCase):
         # /user/role is on the gate's exempt list. If it were not, a Google
         # user would be blocked from the only step that can unblock them.
         res = self.client.post(
-            ROLE_URL, {"role": "coach", "accepted_terms": True}, format="json"
+            ROLE_URL,
+            {"role": "coach", "accepted_terms": True, **AGE_FIELDS},
+            format="json",
         )
 
         self.assertEqual(res.status_code, 200, res.data)
 
     def test_accepting_at_the_role_step_records_both_documents(self):
         self.client.post(
-            ROLE_URL, {"role": "coach", "accepted_terms": True}, format="json"
+            ROLE_URL,
+            {"role": "coach", "accepted_terms": True, **AGE_FIELDS},
+            format="json",
         )
 
         self.assertEqual(
@@ -125,7 +137,9 @@ class RoleStepConsentTests(TestCase):
         self.assertEqual(blocked.status_code, 403)
 
         self.client.post(
-            ROLE_URL, {"role": "player", "accepted_terms": True}, format="json"
+            ROLE_URL,
+            {"role": "player", "accepted_terms": True, **AGE_FIELDS},
+            format="json",
         )
 
         after = self.client.post(
@@ -141,9 +155,15 @@ class ExistingUserRoleChangeTests(TestCase):
         cache.clear()
         self.client = APIClient()
         self.user = User.objects.create_user(
-            email="player@example.com", password="password123"
+            email="player@example.com",
+            password="password123",
+            # An email signup has both of these on file from the form, so this
+            # user is never asked for them again at the role step.
+            country_code="IN",
         )
-        UserProfile.objects.create(user=self.user, name="Player")
+        UserProfile.objects.create(
+            user=self.user, name="Player", birthdate=date(1995, 5, 20)
+        )
         accept_current_terms(self.user)
         self.client.force_authenticate(user=self.user)
 

@@ -1,8 +1,17 @@
 from rest_framework import serializers
 from django.utils import timezone
 from accounts.models import UserProfile
+from shared.models import Location
 from usernames.services.username_service import UsernameService
 from utils.validations import validate_username_format
+
+# How many times a user may change their own date of birth through the app.
+# One, and the reason is in validate_birthdate below. Counted against
+# User.birthdate_corrections, which the profile-update view increments when a
+# change actually lands.
+MAX_SELF_SERVE_BIRTHDATE_CHANGES = 1
+
+BIRTHDATE_SUPPORT_MESSAGE = "Contact support to change your date of birth."
 
 
 class UpdateUserProfileSerializer(serializers.Serializer):
@@ -21,6 +30,18 @@ class UpdateUserProfileSerializer(serializers.Serializer):
     )
 
     birthdate = serializers.DateField(required=False, allow_null=True)
+
+    # THERE IS NO country_code FIELD HERE, AND THAT IS THE POINT.
+    #
+    # User.country_code is the legal jurisdiction the whole minor regime keys
+    # off. Exposing it on the general profile editor would hand every user a
+    # one-request switch from IN (consent age 18) to GB (13) — the same hole
+    # age_service.resolve_country exists to close at signup, reopened
+    # afterwards on a screen with no age check on it at all. It is set once,
+    # at signup, cross-checked against the dialling code, and changed only by
+    # support. UserProfile.country_code is a different column and IS written
+    # from here, but only as a denormalized part of the location the user
+    # picked — see the field comments on accounts/models.py.
 
     height_cm = serializers.IntegerField(required=False, allow_null=True)
     weight_kg = serializers.DecimalField(
@@ -68,8 +89,58 @@ class UpdateUserProfileSerializer(serializers.Serializer):
         return value
 
     def validate_birthdate(self, value):
-        if value and value > timezone.now().date():
+        """
+        One self-serve correction, then the support route.
+
+        WHY THE LIMIT EXISTS
+
+        The birthdate is collected at signup and decides, through
+        ``User.is_minor``, which country's child-protection rules the account
+        is held to. A freely editable birthdate makes that decision a
+        preference: refused at 12, come back tomorrow as 20. Capping the
+        self-serve path at one change is what turns the signup answer into an
+        answer rather than a first guess.
+
+        WHY THERE IS A SUPPORT ROUTE AT ALL, RATHER THAN A HARD LOCK
+
+        Because people have a legal right to have inaccurate personal data
+        about them corrected — GDPR Art. 16, and the DPDP Act's correction
+        right for Indian users — and a birthdate is personal data like any
+        other. A permanent lock would not be a strict version of this policy;
+        it would remove a right the platform is obliged to provide, on the
+        strength of a fat-fingered year. So the route stays open, it just
+        stops being one click.
+
+        Locking the SELF-SERVE path is what stops age-gaming. It is not meant
+        to stop corrections, and it should not be tightened into something
+        that does.
+        """
+        if value is None:
+            # Clearing it is not a correction, it is a deletion — and it would
+            # put the account back into the "age unknown" state that signup now
+            # refuses to create. Nothing offers this in the UI; refuse it here
+            # so nothing can.
+            raise serializers.ValidationError(
+                "Date of birth can't be removed. " + BIRTHDATE_SUPPORT_MESSAGE
+            )
+
+        if value > timezone.now().date():
             raise serializers.ValidationError("Birthdate cannot be in the future")
+
+        user = self.context["request"].user
+        profile = getattr(user, "profile", None)
+        current = getattr(profile, "birthdate", None)
+
+        # Re-submitting the same date is not a change and must not spend the
+        # one correction. The profile editor PATCHes whatever fields the form
+        # holds, so an unrelated edit — a new headline, a new city — routinely
+        # carries the unchanged birthdate along with it.
+        if current == value:
+            return value
+
+        if user.birthdate_corrections >= MAX_SELF_SERVE_BIRTHDATE_CHANGES:
+            raise serializers.ValidationError(BIRTHDATE_SUPPORT_MESSAGE)
+
         return value
 
     def validate_height_cm(self, value):
@@ -103,6 +174,26 @@ class UpdateUserProfileSerializer(serializers.Serializer):
 
         if not value.get("name"):
             raise serializers.ValidationError("name is required")
+
+        # THE SERVER-SIDE HALF OF THE TOWN-ONLY RULE.
+        #
+        # The picker restricts the UI: it searches in `city` mode, which passes
+        # settings.PLACES_CITY_PRIMARY_TYPES to Google and gets back localities,
+        # taluks and panchayats — never a street address or a building. This
+        # line is what makes that a rule rather than a suggestion, because a
+        # crafted PATCH does not go through the picker and could otherwise put
+        # a precise place_id on a profile.
+        #
+        # It applies to EVERY user, minor and adult alike. A sports profile
+        # needs the town somebody plays in; it has never needed the doorstep,
+        # and an adult's home address is not less theirs for being an adult's.
+        #
+        # Scoped to the PROFILE on purpose — posts and recruitments still name
+        # real venues through `place` mode, because a recruitment that cannot
+        # say which ground it is at is not a recruitment. See the note in
+        # places/services/places_service.py.
+        if value.get("type") != Location.Type.CITY:
+            raise serializers.ValidationError("Please select a town or city.")
 
         has_coords = (
             value.get("latitude") is not None

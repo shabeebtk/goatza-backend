@@ -65,6 +65,33 @@ SITEMAP_MAX_ROWS = 5000
 # and the list of pages we ask Google to crawl in the same edit. Two copies of
 # this predicate would eventually disagree, and the way it would show up is a
 # hidden profile advertised in a sitemap.
+#
+# ─────────────────────────────────────────────────────────────
+# MINORS ARE NOT EXCLUDED HERE, AND THAT IS THE DESIGN. DO NOT "FIX" IT.
+#
+# This will read like an oversight to whoever finds it next: children's
+# profiles are crawlable, listed in the sitemap, and resolve for anonymous
+# visitors. Every one of those is deliberate.
+#
+# The protection is not achieved by hiding the page — it is achieved by
+# emptying it. A minor's public payload is stripped to a name, a headline, two
+# counts, a sport and a city (accounts/serializers/public_profile_serializers
+# .py), their posts come back empty, and their CV 404s. THAT is what makes
+# indexing acceptable, and the two halves are a pair: the stripped card is the
+# price of being listed, and being listed is the point of the platform.
+#
+# Excluding minors from this queryset instead would be strictly worse for the
+# people it is meant to protect. A young player's profile is the thing a scout
+# is supposed to find — it is the entire product for the demographic that most
+# needs it — and de-indexing them would quietly deliver a service that works
+# for adults and not for the players it was built for. It would also not
+# improve their privacy by one field: nothing about the payload changes, only
+# whether anyone can reach it.
+#
+# If minors should genuinely become unlisted, that is a product decision about
+# what this platform is, not a tidy-up of a visibility predicate — and it needs
+# the stripped-card work reconsidered at the same time.
+# ─────────────────────────────────────────────────────────────
 
 def public_users_queryset():
     """

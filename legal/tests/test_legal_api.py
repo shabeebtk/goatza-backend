@@ -178,6 +178,11 @@ class SignupConsentTests(TestCase):
             "password": "password123",
             "role": User.Role.PLAYER,
             "accepted_terms": True,
+            # Required since the age gate landed — see
+            # accounts/tests/test_age_gate.py. Present so these tests keep
+            # testing consent rather than tripping over the newer check.
+            "birthdate": "1995-05-20",
+            "country_code": "IN",
         }
         payload.update(overrides)
         return self.client.post(SIGNUP_URL, payload, format="json")
@@ -211,6 +216,8 @@ class SignupConsentTests(TestCase):
                 "password": "password123",
                 "role": User.Role.PLAYER,
                 "accepted_terms": True,
+                "birthdate": "1995-05-20",
+                "country_code": "IN",
             },
             format="json",
             HTTP_X_FORWARDED_FOR="203.0.113.9",

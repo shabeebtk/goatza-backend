@@ -3,6 +3,10 @@ from django.db.models import Q
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from shared.models import BaseUUIDModel, Location
 from django.core.validators import MinValueValidator, MaxValueValidator
+# Aliased because `User` grows an `is_minor` PROPERTY below and the module
+# exports a function of the same name — importing the name bare would make the
+# two impossible to tell apart at the call site.
+from accounts import constants as account_constants
 
 class UserManager(BaseUserManager):
     def create_user(self, email=None, phone=None, password=None, **extra_fields):
@@ -60,6 +64,33 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     is_email_verified = models.BooleanField(default=False)
     is_phone_verified = models.BooleanField(default=False)
 
+    # THE LEGAL JURISDICTION. Deliberately NOT UserProfile.country_code.
+    #
+    # The two are different questions that happen to share a shape. The profile's
+    # copy is derived from the city the user picked in the location search — it
+    # answers "where is this person right now", it moves when they move, and it
+    # is denormalized from a Google Places row for search and display. This one
+    # answers "whose child-protection law governs this account", it is declared
+    # by the user at signup (cross-checked against their dialling code, see
+    # accounts/services/age_service.resolve_country), and it does not change
+    # because somebody went on tour.
+    #
+    # A player living in Dubai may still be Indian, and the age of digital
+    # consent that applies to them is India's 18, not the UAE's. Collapsing the
+    # two columns would silently switch a minor's protections off the moment
+    # they set their city to somewhere else.
+    #
+    # Blank means "never asked" — every row created before the signup gate.
+    country_code = models.CharField(max_length=2, blank=True)
+
+    # How many times this user has corrected their date of birth through the
+    # app. The self-serve route allows exactly one (see
+    # accounts/serializers/user_update_serilizer.validate_birthdate); after
+    # that, corrections go through support. Counted rather than flagged so the
+    # limit can be loosened, or a pattern of attempts spotted, without a
+    # migration.
+    birthdate_corrections = models.PositiveSmallIntegerField(default=0)
+
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
 
@@ -113,6 +144,29 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     def profile_name(self):
         """Return the name from profile if exists, else fallback to username"""
         return getattr(self.profile, 'name', self.username)
+
+    @property
+    def is_minor(self):
+        """
+        Whether this user is a minor under THEIR OWN jurisdiction's rules.
+
+        The two halves live in different tables — the birthdate on the profile,
+        the legal country on the user — so this is the one place that knows how
+        to put them together. Callers ask the user, never the table.
+
+        **Never raises, and answers True when it cannot tell.** The profile is
+        a separate row created in a second INSERT: signup writes both in one
+        transaction, but a Google account created before that code existed, a
+        staff-made user, or a fixture can all be a User with no profile at all.
+        A RelatedObjectDoesNotExist escaping from a property this cheap-looking
+        would blow up whatever template or serializer touched it, and the
+        answer it would have been blocking is the safe one anyway — an account
+        whose age is unknown is treated as a child (see constants.is_minor).
+        """
+        profile = getattr(self, "profile", None)
+        birthdate = getattr(profile, "birthdate", None)
+
+        return account_constants.is_minor(birthdate, self.country_code)
 
 
 

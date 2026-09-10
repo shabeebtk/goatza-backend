@@ -74,8 +74,31 @@ DEFAULT_CAP_DETAILS = 1000
 
 # section 4.1: the city-mode filter is a SETTING, not code — small towns and
 # villages come and go from `(cities)` depending on how Google classifies them,
-# and widening the list must not need a deploy.
-DEFAULT_CITY_PRIMARY_TYPES = "(cities)"
+# and widening the list must not need a deploy. The default mirrors
+# settings.PLACES_CITY_PRIMARY_TYPES; see city_primary_types() for why these
+# five and not `(cities)`.
+DEFAULT_CITY_PRIMARY_TYPES = (
+    "locality,"
+    "administrative_area_level_3,"
+    "administrative_area_level_4,"
+    "sublocality_level_1,"
+    "postal_town"
+)
+
+# WHERE THIS RESTRICTION APPLIES, AND WHERE IT DOES NOT
+#
+# `city` mode is the USER PROFILE picker, and the filter above is what keeps a
+# person's profile at town level. That scoping is deliberate, not an oversight:
+#
+#   * a PROFILE location says where a person is, so it stops at the town — a
+#     street address on a player's profile is somebody's home address, and no
+#     part of a sports profile needs it;
+#   * a POST or RECRUITMENT location says where an event is, and naming the
+#     actual ground is the entire point of publishing one. That is a venue a
+#     club chose to publish, not a person's whereabouts.
+#
+# So `place` mode passes no filter at all and must keep doing so. Do not
+# "tidy up" by applying the city filter to both.
 
 # The error code the frontend branches on for "search is off right now",
 # whichever of the three reasons caused it (section 4.1).
@@ -141,12 +164,26 @@ def city_primary_types():
     """
     ``PLACES_CITY_PRIMARY_TYPES`` parsed into the list Google wants.
 
-    Comma-separated in the environment; ``(cities)`` (= locality +
-    administrative_area_level_3) by default, which already covers towns like
-    Thalassery and Kuthuparamba. Google caps this at 5 values and refuses to
-    mix a collection like ``(cities)`` with individual types — that is a
-    console-side constraint, so a bad value surfaces as a Google 400, not as a
-    silent narrowing.
+    Comma-separated in the environment. Google caps ``includedPrimaryTypes`` at
+    FIVE values and refuses to mix a collection like ``(cities)`` with
+    individual types — a console-side constraint, so a bad value surfaces as a
+    Google 400, not as a silent narrowing. Five slots is therefore the whole
+    budget, and what goes in them is a choice about who can be found.
+
+    ``(cities)`` used to be the default and spent the entire budget on one
+    value: locality + administrative_area_level_3. That reaches Kannur and
+    Thalassery and stops there. Indian local government does not — a great many
+    players live in a panchayat that Google types as
+    ``administrative_area_level_4`` and in nothing else, so under ``(cities)``
+    Panoor and Kadavathoor simply did not exist to the picker and the nearest
+    truthful answer a player could give was a town they do not live in.
+
+    The five now spent individually — locality, administrative_area_level_3,
+    administrative_area_level_4, sublocality_level_1, postal_town — reach down
+    to panchayat level and no further. What they leave out matters as much:
+    street_address, premise, subpremise, route and postal_code are all absent
+    on purpose, because the answer to "where do you play?" is a town and never
+    a doorstep.
     """
     raw = getattr(settings, "PLACES_CITY_PRIMARY_TYPES", None)
     raw = (raw or DEFAULT_CITY_PRIMARY_TYPES).strip()

@@ -198,6 +198,10 @@ class AuthViewEmailWiringTests(TestCase):
                 "password": PASSWORD,
                 "role": User.Role.PLAYER,
                 "accepted_terms": True,
+                # Required since the age gate landed — see
+                # accounts/tests/test_age_gate.py.
+                "birthdate": "1995-05-20",
+                "country_code": "IN",
             },
             format="json",
         )

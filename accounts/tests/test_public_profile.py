@@ -79,6 +79,16 @@ class PublicProfileTestCase(APITestCase):
             password="pass1234",
             username=username,
             role=role or User.Role.PLAYER,
+            # GB, where the age of digital consent is 13 — so the 17-year-old
+            # built below is NOT a minor and every test in this file keeps
+            # exercising the full adult payload it was written for.
+            #
+            # Load-bearing, not decoration. With no country the jurisdiction
+            # falls back to the strict default of 18 (accounts/constants.py),
+            # this fixture would be a minor, and the allow-list tests would be
+            # asserting against the stripped card instead. The stripped card
+            # has its own file: accounts/tests/test_public_profile_minor.py.
+            country_code="GB",
         )
         accept_current_terms(user)
         if not is_active:
