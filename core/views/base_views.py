@@ -2,8 +2,8 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from core.mixins.actor_mixin import ActorMixin
 from core.throttles import PublicReadThrottle
-from guardians.permissions import HasGuardianConsentIfMinor
-from legal.permissions import HasAcceptedCurrentTerms
+from apps.guardians.permissions import HasGuardianConsentIfMinor
+from apps.legal.permissions import HasAcceptedCurrentTerms
 
 '''
 handles user and organization - request.actor

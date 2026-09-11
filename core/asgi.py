@@ -14,7 +14,7 @@ from channels.security.websocket import OriginValidator
 from django.conf import settings
 
 from core.middlewares.jwt_protocol_auth import JWTProtocolAuthMiddleware
-import messaging.routing
+from apps.messaging import routing as messaging_routing
 
 application = ProtocolTypeRouter({
     "http": django_asgi_app,
@@ -37,7 +37,7 @@ application = ProtocolTypeRouter({
     "websocket": OriginValidator(
         JWTProtocolAuthMiddleware(
             URLRouter(
-                messaging.routing.websocket_urlpatterns
+                messaging_routing.websocket_urlpatterns
             )
         ),
         settings.WEBSOCKET_ALLOWED_ORIGINS,

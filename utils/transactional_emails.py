@@ -673,7 +673,7 @@ def new_applicant_alert_recipients(organization):
     # Imported here rather than at module scope: this module is pulled in by
     # accounts views very early, and it has no other reason to depend on the
     # organization app.
-    from organization.models import OrganizationMember
+    from apps.organization.models import OrganizationMember
 
     emails = (
         organization.members
@@ -807,7 +807,7 @@ def send_guardian_consent_request_email(
     # Imported here rather than at module scope: this module is pulled in by
     # accounts views very early, and it has no other reason to depend on the
     # guardians app. Same reasoning as new_applicant_alert_recipients.
-    from guardians.constants import PROCESSED_DATA_ITEMS, TOKEN_TTL_DAYS
+    from apps.guardians.constants import PROCESSED_DATA_ITEMS, TOKEN_TTL_DAYS
 
     # The same tuple the HTML template loops over. One list, two renderings
     # — a parent reading the text part and a parent reading the HTML part

@@ -1,0 +1,896 @@
+from django.db import models
+from django.db.models import Q, F
+from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.exceptions import ValidationError
+from django.utils import timezone
+from shared.models import BaseUUIDModel, Location
+from apps.organization.models import Organization, OrganizationMember
+from apps.accounts.models import User
+from apps.sports.models import Sport, SportPosition
+# Create your models here.
+
+
+
+class Recruitment(BaseUUIDModel):
+
+    class Type(models.TextChoices):
+        OPEN_TRIAL = "open_trial", "Open Trial"
+        PLAYER_LOOKING = "player_looking", "Player Looking"
+        DIRECT_RECRUITMENT = "direct_recruitment", "Direct Recruitment"
+        SCHOLARSHIP = "scholarship", "Scholarship"
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        ACTIVE = "active", "Active"
+        CLOSED = "closed", "Closed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    class Visibility(models.TextChoices):
+        PUBLIC = "public", "Public"
+        FOLLOWERS_ONLY = "followers_only", "Followers Only"
+        PRIVATE = "private", "Private"
+
+    class Gender(models.TextChoices):
+        MALE = "male", "Male"
+        FEMALE = "female", "Female"
+        ALL = "all", "All"
+
+    class ApplyMethod(models.TextChoices):
+        GOATZA = "goatza", "goatza"
+        EXTERNAL = "external", "External"
+        CONTACT = "contact", "contact"
+        
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="recruitments"
+    )
+    created_by_member = models.ForeignKey(
+        OrganizationMember,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_recruitments"
+    )
+
+    sport = models.ForeignKey(
+        Sport,
+        on_delete=models.CASCADE,
+        related_name="recruitments"
+    )
+
+    title = models.CharField(max_length=255)
+    short_description = models.CharField(
+        max_length=300,
+        blank=True
+    )
+    description = models.TextField(blank=True)
+
+    recruitment_type = models.CharField(
+        max_length=30,
+        choices=Type.choices   
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.DRAFT
+    )
+
+    visibility = models.CharField(
+        max_length=30,
+        choices=Visibility.choices,
+        default=Visibility.PUBLIC
+    )
+
+    gender = models.CharField(
+        max_length=10,
+        choices=Gender.choices,
+        blank=True
+    )
+
+    # Experience / level
+    experience_level = models.CharField(
+        max_length=50,
+        blank=True
+    )
+
+    # Recruitment logistics
+    application_deadline = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    event_date = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    apply_method = models.CharField(
+        max_length=20,
+        choices=ApplyMethod.choices,
+        default=ApplyMethod.GOATZA
+    )
+    external_apply_url = models.URLField(
+        blank=True
+    )
+
+
+    is_remote = models.BooleanField(default=False)
+    max_applications = models.PositiveIntegerField(
+        null=True,
+        blank=True
+    )
+
+    # Optional fee info
+    is_paid = models.BooleanField(default=False)
+    fee_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+    fee_currency = models.CharField(
+        max_length=10,
+        default="INR"
+    )
+    payment_note = models.CharField(
+        max_length=255,
+        blank=True
+    )
+
+    # venue  
+    venue_name = models.CharField(max_length=255, blank=True)
+    venue_link = models.URLField(blank=True, max_length=500)
+
+    # Location - denormalized 
+    location = models.ForeignKey(
+        Location,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="recruitments"
+    )
+    location_name = models.CharField(max_length=255, blank=True)
+    city = models.CharField(
+        max_length=100,
+        blank=True
+    )
+    country_code = models.CharField(
+        max_length=5,
+        blank=True
+    )
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
+
+    # Denormalized analytics
+    views_count = models.PositiveIntegerField(default=0)
+    applications_count = models.PositiveIntegerField(default=0)
+    shortlisted_count = models.PositiveIntegerField(default=0)
+    selected_count = models.PositiveIntegerField(default=0)
+
+    # When the org was last EMAILED about new applicants. The applicant-alert
+    # throttle measures its gap from this, never from the last application —
+    # see settings.APPLICANT_ALERT_TIERS. Null means never alerted.
+    last_applicant_alert_at = models.DateTimeField(null=True, blank=True)
+
+    # Flags
+    is_featured = models.BooleanField(default=False)
+    is_deleted = models.BooleanField(default=False)
+
+    published_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "recruitments"
+
+        indexes = [
+            models.Index(fields=["organization"]),
+            models.Index(fields=["sport"]),
+            models.Index(fields=["published_at"]),
+            models.Index(fields=["event_date"]),
+            models.Index(fields=["latitude", "longitude"]),
+        ]
+
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(is_paid=False, fee_amount__isnull=True) |
+                    Q(is_paid=True, fee_amount__isnull=False)
+                ),
+                name="recruitment_valid_fee"
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(event_date__isnull=True) |
+                    Q(application_deadline__isnull=True) |
+                    Q(application_deadline__lte=F("event_date"))
+                ),
+                name="valid_application_deadline"
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(apply_method="external", external_apply_url__isnull=False) |
+                    ~Q(apply_method="external")
+                ),
+                name="external_apply_url_required"
+            )
+        ]
+
+    def clean(self):
+        if (
+            self.apply_method == self.ApplyMethod.EXTERNAL
+            and not self.external_apply_url
+        ):
+            raise ValidationError(
+                "External apply URL required."
+            )
+
+    @property
+    def is_accepting_applications(self):
+        """
+        True when the recruitment can still receive applications: active,
+        deadline not passed (if set), and under the max cap (if set).
+        Used by the apply flow and surfaced on the public detail serializer.
+        """
+        if self.status != self.Status.ACTIVE:
+            return False
+
+        if (
+            self.application_deadline
+            and self.application_deadline < timezone.now()
+        ):
+            return False
+
+        if (
+            self.max_applications is not None
+            and self.applications_count >= self.max_applications
+        ):
+            return False
+
+        return True
+
+    def __str__(self):
+        return f"{self.title} ({self.organization.name})"
+
+
+
+class RecruitmentAgeCategory(BaseUUIDModel):
+    """
+    One age group a recruitment is open to, expressed in birth YEARS (the way
+    trials are actually posted), never dates.
+
+    Either bound may be null, which makes the group open-ended:
+      min=2011, max=2012 → born 2011-2012 (inclusive range)
+      min=2010, max=None → born 2010 or later ("U17")
+      min=None, max=1991 → born 1991 or earlier ("Veterans 35+")
+    Both null is meaningless — "open to all ages" is expressed by the
+    recruitment having NO age categories at all — so the DB rejects it.
+    """
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="age_categories"
+    )
+    title = models.CharField(max_length=50)
+    min_birth_year = models.PositiveIntegerField(null=True, blank=True)
+    max_birth_year = models.PositiveIntegerField(null=True, blank=True)
+    reporting_time = models.TimeField(null=True, blank=True)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+
+        db_table = "recruitment_age_categories"
+
+        ordering = ["display_order"]
+
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(min_birth_year__isnull=False) |
+                    Q(max_birth_year__isnull=False)
+                ),
+                name="age_category_birth_year_required"
+            )
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+class RecruitmentContact(BaseUUIDModel):
+
+    class ContactType(models.TextChoices):
+        PHONE = "phone", "Phone"
+        EMAIL = "email", "Email"
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="contacts"
+    )
+    name = models.CharField(max_length=255, blank=True)
+    contact_type = models.CharField(max_length=20, choices=ContactType.choices)
+    value = models.CharField(max_length=255)
+
+    class Meta:
+        db_table = "recruitment_contacts"
+        indexes = [
+            models.Index(fields=["recruitment"]),
+            models.Index(fields=["contact_type"]),
+        ]
+
+    def clean(self):
+        if (
+            self.contact_type
+            == self.ContactType.EMAIL
+        ):
+            from django.core.validators import (
+                validate_email
+            )
+
+            validate_email(self.value)
+
+    def __str__(self):
+
+        return (
+            f"{self.contact_type} - {self.value}"
+        )
+
+
+class RecruitmentPosition(BaseUUIDModel):
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="positions"
+    )
+
+    position = models.ForeignKey(
+        SportPosition,
+        on_delete=models.CASCADE,
+        related_name="recruitments"
+    )
+    is_primary = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_positions"
+
+        constraints = [
+            models.UniqueConstraint(
+                fields=["recruitment", "position"],
+                name="unique_recruitment_position"
+            )
+        ]
+
+        indexes = [
+            models.Index(fields=["recruitment"]),
+            models.Index(fields=["position"]),
+        ]
+
+    def clean(self):
+        if self.position.sport_id != self.recruitment.sport_id:
+            raise ValidationError(
+                "Position does not belong to recruitment sport."
+            )
+
+    def __str__(self):
+        return f"{self.recruitment_id} - {self.position.name}"
+
+
+class RecruitmentBenefit(BaseUUIDModel):
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="benefits"
+    )
+    title = models.CharField(
+        max_length=255
+    )
+    icon_name = models.CharField(
+        max_length=50,
+        blank=True
+    )
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_benefits"
+        ordering = ["display_order"]
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+class RecruitmentRequirement(BaseUUIDModel):
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="requirements"
+    )
+    title = models.CharField(max_length=255)
+    is_mandatory = models.BooleanField(default=True)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_requirements"
+        ordering = ["display_order"]
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+class RecruitmentEligibilityCriteria(BaseUUIDModel):
+    """
+    A free-text line the recruiter wrote about who may attend ("Kerala
+    residents only", "District-level experience required"). Displayed only —
+    nothing is ever checked against an applicant's profile.
+    """
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="eligibility_criteria"
+    )
+    title = models.CharField(max_length=255)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_eligibility_criteria"
+        ordering = ["display_order"]
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+
+class RecruitmentMedia(BaseUUIDModel):
+    class MediaType(models.TextChoices):
+        IMAGE = "image", "Image"
+        VIDEO = "video", "Video"
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="media"
+    )
+    media_type = models.CharField(
+        max_length=10,
+        choices=MediaType.choices
+    )
+
+    # Media URLs carry a deep nested folder path
+    # (organizations/<uuid>/recruitments/<uuid>/<uuid>.jpg) that overflows the
+    # 200-char URLField default, so give these headroom.
+    file_url = models.URLField(max_length=500)
+    public_id = models.CharField(max_length=255)
+
+    thumbnail_url = models.URLField(blank=True, max_length=500)
+
+    duration = models.PositiveIntegerField(
+        null=True,
+        blank=True
+    )
+    order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_media"
+        ordering = ["order"]
+
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+
+
+
+class RecruitmentApplication(BaseUUIDModel):
+
+    class Status(models.TextChoices):
+        APPLIED = "applied", "Applied"
+        REVIEWING = "reviewing", "Reviewing"
+        SHORTLISTED = "shortlisted", "Shortlisted"
+        INVITED = "invited", "Invited"
+        SELECTED = "selected", "Selected"
+        REJECTED = "rejected", "Rejected"
+        WITHDRAWN = "withdrawn", "Withdrawn"
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="applications"
+    )
+
+    applicant = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="recruitment_applications"
+    )
+
+    # Contact the applicant chose to share for THIS application. Prefilled from
+    # their profile on the client, but user-editable — so these are stored as
+    # submitted in the request body, NOT re-read from the profile server-side.
+    shared_name = models.CharField(max_length=255)
+    shared_email = models.EmailField(blank=True)
+    shared_phone = models.CharField(max_length=15)
+
+    applied_position = models.ForeignKey(
+        SportPosition,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="applications"
+    )
+
+    # The age group the applicant chose to apply under. Never verified against
+    # their profile — it is what the org filters its pipeline by, and what the
+    # player is shown a reporting time for. SET_NULL so deleting a group on an
+    # edit degrades to "no group" instead of deleting the application.
+    age_category = models.ForeignKey(
+        RecruitmentAgeCategory,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="applications"
+    )
+
+    message = models.TextField(blank=True)
+
+    highlight_video_url = models.URLField(blank=True)
+
+    status = models.CharField(
+        max_length=30,
+        choices=Status.choices,
+        default=Status.APPLIED,
+        db_index=True
+    )
+
+    reviewed_by = models.ForeignKey(
+        OrganizationMember,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_applications"
+    )
+
+    reviewed_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    notes = models.TextField(blank=True)
+
+    applied_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True
+    )
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "recruitment_applications"
+
+        constraints = [
+            models.UniqueConstraint(
+                fields=["recruitment", "applicant"],
+                name="unique_recruitment_application"
+            )
+        ]
+
+        indexes = [
+            models.Index(fields=["recruitment"]),
+            models.Index(fields=["applicant"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["-applied_at"]),
+            models.Index(fields=["recruitment", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.applicant_id} -> {self.recruitment_id}"
+
+
+
+
+class RecruitmentDiscoverImpression(BaseUUIDModel):
+    """
+    What discovery served to whom, and what it scored (§8).
+
+    This exists before anything reads it, on purpose. Weight tuning (§8) and the
+    Phase-3 learning-to-rank work both need outcome history, and history cannot
+    be backfilled — a weight change evaluated against a table that started
+    filling the same week is evaluated against nothing.
+
+    ``applied?`` is NOT a column: it is a join to RecruitmentApplication on
+    (user, recruitment). Storing it would need a write-back from the apply path
+    into a metrics table, which is a coupling the apply flow does not deserve.
+
+    One row per (user, recruitment, section) rather than one per serve, so the
+    table's size tracks the recruitment corpus (hundreds to low thousands, §1)
+    instead of pageview volume. ``match_score`` is the score at FIRST serve —
+    re-stamping it would blur the label the moment §8 retunes the weights, which
+    is exactly when it matters.
+    """
+
+    class Section(models.TextChoices):
+        RECOMMENDED = "recommended", "Recommended"
+        CLOSING_SOON = "closing_soon", "Closing Soon"
+        NEAR_YOU = "near_you", "Near You"
+        NEW_THIS_WEEK = "new_this_week", "New This Week"
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="recruitment_impressions"
+    )
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="discover_impressions"
+    )
+    section = models.CharField(max_length=20, choices=Section.choices)
+
+    match_score = models.FloatField()
+    is_eligible = models.BooleanField(default=True)
+
+    served_count = models.PositiveIntegerField(default=1)
+    first_served_at = models.DateTimeField()
+    last_served_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "recruitment_discover_impressions"
+
+        constraints = [
+            # Unconditional (all three columns are NOT NULL), which is also what
+            # lets the write path lean on ON CONFLICT for a race-free upsert.
+            models.UniqueConstraint(
+                fields=["user", "recruitment", "section"],
+                name="unique_discover_impression"
+            ),
+        ]
+
+        indexes = [
+            # The two analysis shapes: "how did this recruitment do" and
+            # "what did we show this player".
+            models.Index(fields=["recruitment", "section"]),
+            models.Index(fields=["user", "last_served_at"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.user_id} saw {self.recruitment_id} "
+            f"in {self.section} @{self.match_score}"
+        )
+
+
+class RecruitmentApplicationStatusHistory(BaseUUIDModel):
+
+    application = models.ForeignKey(
+        RecruitmentApplication,
+        on_delete=models.CASCADE,
+        related_name="status_history"
+    )
+
+    from_status = models.CharField(
+        max_length=30,
+        blank=True
+    )
+
+    to_status = models.CharField(
+        max_length=30
+    )
+
+    changed_by = models.ForeignKey(
+        OrganizationMember,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL
+    )
+
+    note = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True
+    )
+
+    class Meta:
+        db_table = "recruitment_application_status_history"
+
+        indexes = [
+            models.Index(fields=["application"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+
+# CUSTOM QUESTIONS
+class RecruitmentQuestion(BaseUUIDModel):
+
+    class FieldType(models.TextChoices):
+        SHORT_TEXT = "short_text", "Short Text"
+        LONG_TEXT = "long_text", "Long Text"
+        SELECT = "select", "select"
+        RADIO = "radio", "Radio"
+        CHECKBOX = "checkbox", "Checkbox"
+        NUMBER = "number", "Number"
+
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="questions"
+    )
+
+    question = models.CharField(max_length=255)
+
+    field_type = models.CharField(
+        max_length=30,
+        choices=FieldType.choices
+    )
+
+    is_required = models.BooleanField(default=False)
+
+    placeholder = models.CharField(
+        max_length=255,
+        blank=True
+    )
+
+    help_text = models.CharField(
+        max_length=255,
+        blank=True
+    )
+
+    display_order = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_questions"
+
+        ordering = ["display_order"]
+
+        indexes = [
+            models.Index(fields=["recruitment"]),
+        ]
+
+
+# QUESTION OPTIONS
+class RecruitmentQuestionOption(BaseUUIDModel):
+
+    question = models.ForeignKey(
+        RecruitmentQuestion,
+        on_delete=models.CASCADE,
+        related_name="options"
+    )
+    value = models.CharField(max_length=255)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_question_options"
+
+        ordering = ["display_order"]
+
+        indexes = [
+            models.Index(fields=["question"]),
+        ]
+
+
+# APPLICATION ANSWERS
+class RecruitmentApplicationAnswer(BaseUUIDModel):
+
+    application = models.ForeignKey(
+        RecruitmentApplication,
+        on_delete=models.CASCADE,
+        related_name="answers"
+    )
+
+    question = models.ForeignKey(
+        RecruitmentQuestion,
+        on_delete=models.CASCADE,
+        related_name="answers"
+    )
+
+    answer_text = models.TextField(blank=True)
+
+    selected_option = models.ForeignKey(
+        RecruitmentQuestionOption,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "recruitment_application_answers"
+
+        indexes = [
+            models.Index(fields=["application"]),
+            models.Index(fields=["question"]),
+        ]
+
+class SavedRecruitment(BaseUUIDModel):
+    """
+    A recruitment shortlisted by ONE actor — the player, or the org they act
+    as. Mirrors posts.SavedPost exactly: same dual-actor shape, same partial
+    uniques, and the same privacy rule — a save is counted, notified and shown
+    to nobody but the saver.
+
+    Deliberately no soft delete and no status column: unsaving is the delete,
+    and the saved list keeps closed/cancelled postings on purpose (a shortlist
+    is exactly where a player notices that a deadline passed).
+    """
+
+    # Dual-actor, same shape as SavedPost: a save belongs to the actor who made
+    # it, so a person and an org they run keep separate lists.
+    user = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="saved_recruitments"
+    )
+    org = models.ForeignKey(
+        Organization,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="saved_recruitments"
+    )
+    recruitment = models.ForeignKey(
+        Recruitment,
+        on_delete=models.CASCADE,
+        related_name="saved_by"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "saved_recruitments"
+
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(user__isnull=False, org__isnull=True) |
+                    Q(user__isnull=True, org__isnull=False)
+                ),
+                name="saved_recruitment_user_or_org",
+            ),
+            # Partial uniques — NULL never equals NULL, so an unconditional
+            # unique on a nullable column would let duplicates through.
+            models.UniqueConstraint(
+                fields=["user", "recruitment"],
+                condition=Q(user__isnull=False),
+                name="unique_saved_recruitment_user",
+            ),
+            models.UniqueConstraint(
+                fields=["org", "recruitment"],
+                condition=Q(org__isnull=False),
+                name="unique_saved_recruitment_org",
+            ),
+        ]

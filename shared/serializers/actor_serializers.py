@@ -1,6 +1,6 @@
 from rest_framework import serializers
-from organization.serializers.organization_serializers import OrganizationMiniSerializer
-from accounts.serializers.user_serializers import UserMiniSerializer
+from apps.organization.serializers.organization_serializers import OrganizationMiniSerializer
+from apps.accounts.serializers.user_serializers import UserMiniSerializer
 
 
 class ActorMiniSerializer(serializers.Serializer):

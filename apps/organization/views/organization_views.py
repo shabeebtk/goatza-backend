@@ -1,0 +1,511 @@
+import logging
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+from rest_framework import serializers
+from core.views.base_views import BaseAPIView
+from django.db import transaction
+from apps.organization.models import Organization
+from apps.organization.services.organization_service import OrganizationService
+from apps.organization.serializers.organization_serializers import (
+    OrganizationCreateSerializer, OrganizationMiniSerializer, OrganizationFullSerializer, 
+    UpdateOrganizationMediaSerializer
+)
+from apps.organization.serializers.update_organization_serializer import UpdateOrganizationSerializer
+from utils.response import response_data
+from utils.validations import is_valid_uuid
+from services.storage.factory import get_storage_service
+from services.storage.validators import (
+    allowed_image_extensions,
+    validate_media,
+    with_cache_buster,
+)
+from apps.organization.services.organization_member_service import OrganizationMemberService
+from apps.connections.services.follow_services import FollowService
+from apps.moderation.selectors.profile_visibility import (
+    has_blocked_me,
+    profile_block_state,
+)
+from apps.usernames.exceptions import UsernameTaken
+from apps.usernames.services.username_service import UsernameService
+from core.constant import TYPE_ORGANIZATION
+from apps.guardians.permissions import HasGuardianConsentIfMinor
+from apps.legal.permissions import HasAcceptedCurrentTerms
+
+logger = logging.getLogger(__name__)
+
+class CreateOrganizationAPIView(APIView):
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
+
+    def post(self, request):
+        try:
+            serializer = OrganizationCreateSerializer(
+                data=request.data
+            )
+
+            if not serializer.is_valid():
+                return response_data(
+                    success=False,
+                    message="Invalid data",
+                    data=serializer.errors,
+                    status_code=400
+                )
+
+            success, result = OrganizationService.create_organization(
+                user=request.user,
+                data=serializer.validated_data
+            )
+
+            return response_data(
+                success=success,
+                message=(
+                    "Organization created successfully"
+                    if success else result
+                ),
+                data=result if success else {},
+                status_code=201 if success else 400
+            )
+
+        except Exception as e:
+            logger.error(
+                f"CreateOrganizationAPIView error: {str(e)}"
+            )
+
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=500,
+                error=str(e)
+            )
+
+
+
+class ListUserOrganizationsAPIView(APIView):
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
+
+    def get(self, request):
+        try:
+            organizations = OrganizationService.get_user_organizations(
+                request.user
+            )
+
+            serializer = OrganizationMiniSerializer(
+                organizations,
+                many=True
+            )
+
+            return response_data(
+                success=True,
+                message="Organizations fetched successfully",
+                data=serializer.data,
+                status_code=200
+            )
+
+        except Exception as e:
+            logger.error(
+                f"UserOrganizationsAPIView error user={request.user.id}: {str(e)}"
+            )
+
+            return response_data(
+                success=False,
+                message="Failed to fetch organizations",
+                status_code=500,
+                error=str(e)
+            )
+        
+
+class OrganizationsDetailsAPIView(BaseAPIView):
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
+
+    def get(self, request):
+        try:
+            view_type = request.GET.get("type", "mini").lower()
+            organization_id = request.query_params.get("organization_id")
+            org_username = request.query_params.get("username")
+            actor = request.actor
+
+            # -------------------------
+            # VALIDATION
+            # -------------------------
+            if not organization_id and not org_username:
+                return response_data(
+                    success=False,
+                    error="organization_id or username is required",
+                    status_code=400
+                )
+
+            if organization_id and not is_valid_uuid(organization_id):
+                return response_data(
+                    success=False,
+                    error="Invalid organization_id",
+                    status_code=400
+                )
+
+            # -------------------------
+            # FETCH
+            # -------------------------
+            organization = OrganizationService.get_organization(
+                id=organization_id,
+                username=org_username
+            )
+
+            if not organization:
+                return response_data(
+                    success=False,
+                    error="Organization not found",
+                    status_code=404
+                )
+
+            # §1.5 — an org that blocked this viewer is indistinguishable from
+            # one that does not exist. Returned as None so the SAME 404 branch
+            # above renders it (this view fetches through a service that
+            # returns None rather than raising, so the shape differs from the
+            # user profile's DoesNotExist).
+            if has_blocked_me(actor, organization):
+                return response_data(
+                    success=False,
+                    error="Organization not found",
+                    status_code=404
+                )
+
+            # -------------------------
+            # SERIALIZE
+            # -------------------------
+            if view_type == "all":
+                # request in the context → `my_role`, which the settings screen
+                # uses to disable owner/admin-only rows.
+                serializer = OrganizationFullSerializer(
+                    organization, context={"request": request}
+                )
+            else:
+                serializer = OrganizationMiniSerializer(organization)
+
+            relation = FollowService.get_relationship(
+                actor=actor,
+                target_id=organization.id,
+                target_type=TYPE_ORGANIZATION
+            )
+
+            data = serializer.data
+            data["relationship"] = relation
+            data.update(profile_block_state(actor, organization))
+
+            return response_data(
+                success=True,
+                message="Organization fetched successfully",
+                data=data,
+                status_code=200
+            )
+
+        except Exception as e:
+            logger.error(
+                f"OrganizationsDetailsAPIView error user={request.user.id}: {str(e)}"
+            )
+
+            return response_data(
+                success=False,
+                message="Failed to fetch organization",
+                status_code=500,
+                error=str(e)
+            )
+
+
+
+
+class UpdateOrganizationMediaAPIView(BaseAPIView):
+    """
+    upload:
+    {
+        "logo": "https://media.goatza.com/organizations/<id>/logo.webp",
+        "logo_public_id": "users/{user_id}/organizations/{org_id}/organization_logo/logo",
+
+        "cover_image": "https://media.goatza.com/organizations/<id>/cover.webp",
+        "cover_image_public_id": "users/{user_id}/organizations/{org_id}/organization_cover/cover"
+    }
+
+    delete:
+    {
+        "is_delete_logo": true,
+        "is_delete_cover": true
+    }
+    """
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
+
+    def post(self, request):
+        try:
+            actor = request.actor
+            user = request.user 
+           
+        
+            org_id = request.query_params.get('org_id')
+            if not org_id:
+                if not actor.is_org:
+                    return response_data(
+                        success=False,
+                        error="organization request only",
+                        status_code=400
+                    )
+                
+                org_id = actor.organization.id
+
+
+            serializer = UpdateOrganizationMediaSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            data = serializer.validated_data
+
+            try:
+                org = Organization.objects.select_related("profile").get(id=org_id)
+                
+                if not OrganizationMemberService.is_organization_member(org, user):
+                    return response_data(
+                        success=False,
+                        message="not a organization member",
+                        status_code=400
+                    )
+
+            except Organization.DoesNotExist:
+                return response_data(
+                    success=False,
+                    message="Organization not found",
+                    status_code=404
+                )
+
+            profile = org.profile
+            storage = get_storage_service()
+
+            update_fields = []
+
+            # DELETE LOGO
+            if data.get("is_delete_logo"):
+                if profile.logo_public_id:
+                    storage.delete_file(profile.logo_public_id)
+
+                profile.logo = ""
+                profile.logo_public_id = ""
+
+                update_fields += ["logo", "logo_public_id"]
+
+            # DELETE COVER
+            if data.get("is_delete_cover"):
+                if profile.cover_image_public_id:
+                    storage.delete_file(profile.cover_image_public_id)
+
+                profile.cover_image = ""
+                profile.cover_image_public_id = ""
+
+                update_fields += ["cover_image", "cover_image_public_id"]
+
+            # UPDATE LOGO
+                        # UPDATE LOGO
+            # logo/cover each own ONE key per org and are overwritten in place,
+            # so the URL never changes and the CDN keeps serving the old image.
+            # with_cache_buster stamps ?v=<ts> on the stored URL; the public_id
+            # column keeps the bare key, which is what delete_file needs.
+            if "logo" in data:
+                validate_media(
+                    user=request.user,
+                    org=request.actor.organization,   # NEW
+                    url=data["logo"],
+                    public_id=data["logo_public_id"],
+                    allowed_extensions=allowed_image_extensions()
+                )
+
+                profile.logo = with_cache_buster(data["logo"])
+                profile.logo_public_id = data["logo_public_id"]
+
+                update_fields += ["logo", "logo_public_id"]
+
+
+            # UPDATE COVER
+            if "cover_image" in data:
+                validate_media(
+                    user=request.user,
+                    org=request.actor.organization,   # NEW
+                    url=data["cover_image"],
+                    public_id=data["cover_image_public_id"],
+                    allowed_extensions=allowed_image_extensions()
+                )
+
+                profile.cover_image = with_cache_buster(data["cover_image"])
+                profile.cover_image_public_id = data["cover_image_public_id"]
+
+                update_fields += ["cover_image", "cover_image_public_id"]
+
+            if update_fields:
+                update_fields.append("updated_at")
+                profile.save(update_fields=update_fields)
+
+            return response_data(
+                success=True,
+                message="Organization media updated successfully"
+            )
+
+        except serializers.ValidationError as e:
+            return response_data(
+                success=False,
+                message=str(e),
+                status_code=400
+            )
+
+        except ValueError as e:
+            return response_data(
+                success=False,
+                message=str(e),
+                status_code=400
+            )
+
+        except Exception as e:
+            return response_data(
+                success=False,
+                message=f"Failed to update media: {str(e)}",
+                status_code=500
+            )
+
+
+
+class UpdateOrganizationAPIView(BaseAPIView):
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
+
+    def patch(self, request):
+        TAG = "[ORG UPDATE]"
+        actor = request.actor
+        user = request.user 
+
+        org_id = request.query_params.get('org_id')
+        if not org_id:
+            if not actor.is_org:
+                return response_data(
+                    success=False,
+                    error="organization request only or provide org_id",
+                    status_code=400
+                )
+            org_id = actor.organization.id
+
+        logger.info(f"{TAG} User={user.id} updating Org={org_id}")
+
+        try:
+            org = Organization.objects.select_related("profile").get(id=org_id)
+            
+            if not OrganizationMemberService.is_organization_member(org, user):
+                return response_data(
+                    success=False,
+                    message="not a organization member",
+                    status_code=403
+                )
+        except Organization.DoesNotExist:
+            return response_data(
+                success=False,
+                message="Organization not found",
+                status_code=404
+            )
+
+        try:
+            serializer = UpdateOrganizationSerializer(
+                data=request.data,
+                context={"request": request, "org_id": org_id}
+            )
+            serializer.is_valid(raise_exception=True)
+
+            data = serializer.validated_data
+            profile = org.profile
+
+            org_fields = []
+            profile_fields = []
+
+            logger.debug(f"{TAG} Payload={data}")
+
+            # ORGANIZATION FIELDS
+            if "name" in data:
+                org.name = data["name"]
+                org_fields.append("name")
+
+            # Handles are NOT a plain field write — they live in the shared
+            # UsernameRegistry, so the claim happens inside the atomic save
+            # below (it writes the display column itself and busts the old AND
+            # new lookup caches). Tracked separately from org_fields for the
+            # same reason: nothing else should re-save the column.
+            claims_username = "username" in data
+
+            if "type" in data:
+                org.type = data["type"]
+                org_fields.append("type")
+
+            # PROFILE FIELDS
+            profile_mapping = ["headline", "description", "website", "level"]
+
+            for field in profile_mapping:
+                if field in data:
+                    old_value = getattr(profile, field)
+                    new_value = data[field]
+                    setattr(profile, field, new_value)
+                    profile_fields.append(field)
+                    logger.debug(f"{TAG} {field}: {old_value} -> {new_value}")
+
+            # ATOMIC SAVE
+            with transaction.atomic():
+                if claims_username:
+                    # Raises UsernameTaken (caught below) — deliberately NOT
+                    # returned from in here, or the rollback would never run
+                    # and a half-applied org edit would commit.
+                    UsernameService.claim(data["username"], organization=org)
+
+                if org_fields:
+                    org.save(update_fields=org_fields + ["updated_at"])
+
+                if profile_fields:
+                    profile.save(update_fields=profile_fields + ["updated_at"])
+
+            updated_fields = (
+                (["username"] if claims_username else []) + org_fields + profile_fields
+            )
+            logger.info(f"{TAG} Success org={org.id}, fields={updated_fields}")
+
+            # Return full updated org
+            org_fresh = OrganizationService.get_organization(id=org.id)
+            response_serializer = OrganizationFullSerializer(org_fresh)
+
+            return response_data(
+                success=True,
+                message="Organization updated successfully",
+                data=response_serializer.data
+            )
+
+        except UsernameTaken:
+            # Lost the race between the serializer's pre-check and the insert.
+            # The unique constraint is the arbiter, and this is what it said.
+            logger.info(f"{TAG} Username taken org={org_id}")
+
+            return response_data(
+                success=False,
+                message="Validation failed",
+                data={"username": ["Username already taken"]},
+                status_code=400
+            )
+
+        except serializers.ValidationError as e:
+            logger.warning(f"{TAG} Validation failed org={org_id}, error={e.detail}")
+            return response_data(
+                success=False,
+                message="Validation failed",
+                data=e.detail,
+                status_code=400
+            )
+
+        except Exception as e:
+            logger.exception(f"{TAG} Unexpected error org={org_id}")
+            return response_data(
+                success=False,
+                message="Failed to update organization",
+                error=str(e),
+                status_code=500
+            )
+

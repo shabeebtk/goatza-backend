@@ -4,7 +4,7 @@ from django.contrib.auth import get_user_model
 from channels.db import database_sync_to_async
 from core.actor import Actor
 from urllib.parse import parse_qs
-from organization.models import OrganizationMember
+from apps.organization.models import OrganizationMember
 
 User = get_user_model()
 

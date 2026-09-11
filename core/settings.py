@@ -107,36 +107,36 @@ INSTALLED_APPS = [
     'channels', 
 
     # my apps 
-    'accounts',
-    'sports',
-    'organization',
+    'apps.accounts',
+    'apps.sports',
+    'apps.organization',
     # Owns the ONE username namespace users and organizations share. Kept out
     # of both so neither app owns the other's handles.
-    'usernames',
-    'connections',
-    'posts',
-    'feed',
+    'apps.usernames',
+    'apps.connections',
+    'apps.posts',
+    'apps.feed',
     'shared',
-    'notifications',
-    'messaging',
-    'recruitments',
-    'highlights',
-    'careers',
-    'achievements',
-    'cv',
-    'matches',
-    'waitlist',
-    'moderation',
-    'legal',
+    'apps.notifications',
+    'apps.messaging',
+    'apps.recruitments',
+    'apps.highlights',
+    'apps.careers',
+    'apps.achievements',
+    'apps.cv',
+    'apps.matches',
+    'apps.waitlist',
+    'apps.moderation',
+    'apps.legal',
     # Parental consent for under-18 users. Parents live here as CONTACTS, with
     # no account, no role and no login — see guardians/models.py.
-    'guardians',
+    'apps.guardians',
     # "Report a problem" — app breakage, NOT abuse. Abuse reporting stays
     # in 'moderation'; the two share nothing but the word "report".
-    'support',
+    'apps.support',
     # Google Places (New) proxy. No models — it owns the API key and the daily
     # spend guard, nothing else.
-    'places',
+    'apps.places',
 
     # buildin apps 
     'django.contrib.admin',
@@ -281,14 +281,14 @@ REST_FRAMEWORK = {
     # and gated by default instead of open.
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
-        'legal.permissions.HasAcceptedCurrentTerms',
+        'apps.legal.permissions.HasAcceptedCurrentTerms',
         # The minor lock, directly after the terms gate because the two are
         # maintained as a pair: a view's own permission_classes REPLACES this
         # list, so every hand-rolled list that names one names the other
         # (guardians/tests/test_gate.py asserts exactly that). Unlike the terms
         # gate this one blocks reads as well as writes — see its module
         # docstring for why the two rules differ.
-        'guardians.permissions.HasGuardianConsentIfMinor',
+        'apps.guardians.permissions.HasGuardianConsentIfMinor',
     ],
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',

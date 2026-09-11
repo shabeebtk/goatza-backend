@@ -138,10 +138,10 @@ class LocationService:
         # Imported here: shared is below all of these in the dependency order,
         # and a module-level import would make services.location impossible to
         # import from any of them.
-        from accounts.models import UserProfile
-        from organization.models import OrganizationLocation
-        from posts.models import Post
-        from recruitments.models import Recruitment
+        from apps.accounts.models import UserProfile
+        from apps.organization.models import OrganizationLocation
+        from apps.posts.models import Post
+        from apps.recruitments.models import Recruitment
 
         coords = {
             "latitude": location.latitude,
