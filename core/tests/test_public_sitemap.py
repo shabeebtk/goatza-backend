@@ -18,9 +18,9 @@ from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from accounts.models import User, UserProfile
-from organization.models import Organization, OrganizationProfile
-from usernames.services.username_service import UsernameService
+from apps.accounts.models import User, UserProfile
+from apps.organization.models import Organization, OrganizationProfile
+from apps.usernames.services.username_service import UsernameService
 
 SITEMAP_URL = "/public/sitemap/urls"
 

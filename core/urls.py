@@ -38,48 +38,48 @@ urlpatterns = [
 
     # ABOVE 'user/': accounts.urls owns '<str:username>/details', so a later
     # include would let a user called "cv" shadow the CV settings endpoint.
-    path('user/cv/', include('cv.urls')),
+    path('user/cv/', include('apps.cv.urls')),
 
-    path('user/', include('accounts.urls')),
-    path('sports/', include('sports.urls')),
-    path('connections/', include('connections.urls')),
-    path('posts/', include('posts.urls')),
-    path('feed/', include('feed.urls')),
-    path('notifications/', include('notifications.urls')),
-    path('conversations/', include('messaging.urls')),
-    path('organizations/', include('organization.urls')),
-    path('recruitments/', include('recruitments.urls')),
-    path('highlights/', include('highlights.urls')),
-    path('careers/', include('careers.urls')),
-    path('achievements/', include('achievements.urls')),
+    path('user/', include('apps.accounts.urls')),
+    path('sports/', include('apps.sports.urls')),
+    path('connections/', include('apps.connections.urls')),
+    path('posts/', include('apps.posts.urls')),
+    path('feed/', include('apps.feed.urls')),
+    path('notifications/', include('apps.notifications.urls')),
+    path('conversations/', include('apps.messaging.urls')),
+    path('organizations/', include('apps.organization.urls')),
+    path('recruitments/', include('apps.recruitments.urls')),
+    path('highlights/', include('apps.highlights.urls')),
+    path('careers/', include('apps.careers.urls')),
+    path('achievements/', include('apps.achievements.urls')),
 
     # No username-shadowing hazard here, unlike cv: the diary hangs off its own
     # top-level prefix rather than under 'user/', so ordering does not matter.
-    path('matches/', include('matches.urls')),
+    path('matches/', include('apps.matches.urls')),
 
-    path('moderation/', include('moderation.urls')),
+    path('moderation/', include('apps.moderation.urls')),
 
     # "Report a problem" — the app is broken, not somebody's behaviour. Abuse
     # reporting is 'moderation/' above; the two share nothing but the word.
     # The logged-out half of this is in core/public_urls.py.
-    path('support/', include('support.urls')),
+    path('support/', include('apps.support.urls')),
 
     # Terms/privacy versions and the consent write. 'versions' is AllowAny but
     # not under 'public/' for the same reason places is not: that prefix is an
     # allow-list of anonymous reads of OUR data, and this returns four
     # published constants. The signup form needs it before an account exists.
-    path('legal/', include('legal.urls')),
+    path('legal/', include('apps.legal.urls')),
 
     # The child's side of parental consent. Authenticated but deliberately
     # OUTSIDE the terms gate (see guardians/views/consent_views.py): these are
     # the endpoints a locked minor uses to get unlocked, so they must work when
     # the rest of the account does not.
-    path('guardian/', include('guardians.urls')),
+    path('guardian/', include('apps.guardians.urls')),
 
     # Google Places proxy. AllowAny, but deliberately NOT under 'public/':
     # core.public_urls is an allow-list of anonymous reads of OUR data, and
     # these two endpoints read none of it — they spend money at Google. The
     # guard that matters is places.throttles plus the daily cap, not a
     # permission class. The public /join city picker is why they are open.
-    path('places/', include('places.urls')),
+    path('places/', include('apps.places.urls')),
 ]

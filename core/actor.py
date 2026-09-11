@@ -1,5 +1,5 @@
 from rest_framework.exceptions import PermissionDenied
-from organization.models import OrganizationMember
+from apps.organization.models import OrganizationMember
 from utils.validations import is_valid_uuid
 
 class Actor:

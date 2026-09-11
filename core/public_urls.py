@@ -40,12 +40,12 @@ from core.views.public_profile_views import (
     PublicUserProfileAPIView,
 )
 from core.views.sitemap_views import PublicSitemapURLsAPIView
-from cv.views.public_cv_views import PublicCVAPIView
-from recruitments.views.public_recruitment_views import (
+from apps.cv.views.public_cv_views import PublicCVAPIView
+from apps.recruitments.views.public_recruitment_views import (
     PublicRecruitmentDetailAPIView,
 )
-from support.views.problem_report_views import PublicProblemReportAPIView
-from waitlist.views.signup_views import (
+from apps.support.views.problem_report_views import PublicProblemReportAPIView
+from apps.waitlist.views.signup_views import (
     PlayerSignupCardAPIView,
     PlayerSignupCreateAPIView,
     WaitlistStatsAPIView,

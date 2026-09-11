@@ -1,0 +1,227 @@
+import logging
+from django.db import IntegrityError, transaction
+from core.constant import TYPE_ORGANIZATION
+from apps.sports.models import Sport
+from apps.organization.services.organization_location_service import resolve_place
+from apps.usernames.exceptions import UsernameTaken
+from apps.usernames.services.username_service import (
+    GENERATE_CLAIM_ATTEMPTS,
+    UsernameService,
+)
+from apps.organization.models import (
+    Organization,
+    OrganizationProfile,
+    OrganizationMember,
+    OrganizationLocation,
+    OrganizationSport
+)
+
+logger = logging.getLogger(__name__)
+
+class OrganizationService:
+
+    MAX_ORG_PER_USER = 3
+
+    @staticmethod
+    def can_create_organization(user):
+        count = Organization.objects.filter(created_by=user).count()
+        return count < OrganizationService.MAX_ORG_PER_USER
+    
+
+    @staticmethod
+    def _create_with_handle(user, data):
+        """
+        The Organization row plus its UsernameRegistry row, or None if the
+        namespace refused every candidate.
+
+        The handle is generated FIRST because ``Organization.username`` is a
+        non-null unique column — an org cannot exist without one, so it cannot
+        be created and then named. That leaves a gap between generating and
+        inserting, which two simultaneous creates from the same org name can
+        both land in; the savepoint below is what lets the loser re-roll
+        instead of poisoning ``create_organization``'s transaction.
+
+        The registry is still the arbiter across actor types: generate() looks
+        at it (not at Organization alone), and claim()'s unique constraint has
+        the final say.
+        """
+        for _ in range(GENERATE_CLAIM_ATTEMPTS):
+            username = UsernameService.generate(
+                data["name"], owner_type=TYPE_ORGANIZATION
+            )
+
+            try:
+                with transaction.atomic():
+                    org = Organization.objects.create(
+                        name=data["name"],
+                        username=username,
+                        type=data["type"],
+                        created_by=user
+                    )
+                    UsernameService.claim(username, organization=org)
+                return org
+            except (IntegrityError, UsernameTaken):
+                logger.info(
+                    f"[ORG CREATE] handle {username} taken, re-rolling"
+                )
+                continue
+
+        return None
+
+    @staticmethod
+    @transaction.atomic
+    def create_organization(user, data):
+        """
+        data:
+        {
+            name,
+            username,
+            type
+        }
+        """
+        try:
+            # LIMIT CHECK
+            if not OrganizationService.can_create_organization(user):
+                return False, "You can create up to 3 organizations only"
+
+            # CREATE ORGANIZATION (+ its handle)
+            org = OrganizationService._create_with_handle(user, data)
+
+            if org is None:
+                return False, "Could not allocate a username, please try again"
+
+            # PROFILE
+            profile = OrganizationProfile.objects.create(
+                organization=org,
+                headline=data.get("headline", ""),
+                website=data.get("website", ""),
+                logo=data.get("logo", ""),
+                description=data.get("description", ""),
+                level=data.get("level", ""),
+            )
+
+            # OWNER MEMBER
+            OrganizationMember.objects.create(
+                organization=org,
+                user=user,
+                role=OrganizationMember.Role.OWNER
+            )
+
+            # LOCATION (optional)
+            # The payload is one branch: `name`/`address` are the org's own,
+            # everything else describes the place and goes through the shared
+            # LocationService so the FK — and therefore coordinate refresh —
+            # points at the same row every other actor uses.
+            location = data.get('location', {})
+            if location and isinstance(location, dict) and location.get('city'):
+                place, columns = resolve_place(location)
+
+                OrganizationLocation.objects.create(
+                    organization=org,
+                    name=location.get("name", ""),
+                    address=location.get("address", ""),
+                    location=place,
+                    city=columns["city"],
+                    state=columns["state"],
+                    country_code=columns["country_code"],
+                    latitude=columns["latitude"],
+                    longitude=columns["longitude"],
+                    is_primary=True
+                )
+
+            # SPORTS (optional)
+            sport_ids = data.get("sport_ids", [])
+
+            if sport_ids:
+                sports = Sport.objects.filter(id__in=sport_ids)
+
+                sport_objects = []
+                first = True
+
+                for sport in sports:
+                    sport_objects.append(
+                        OrganizationSport(
+                            organization=org,
+                            sport=sport,
+                            is_primary=first
+                        )
+                    )
+                    first = False
+
+                OrganizationSport.objects.bulk_create(
+                    sport_objects
+                )
+
+            logger.info(
+                f"Organization created org={org.id} user={user.id}"
+            )
+
+            return True, {
+                "id": str(org.id),
+                "name": org.name,
+                "username": org.username,
+                "type": org.type,
+                "headline": profile.headline,
+                "logo": profile.logo,
+            }
+
+        except Exception as e:
+            logger.error(f"Create organization error (user={user.id}): {str(e)}")
+            return False, "Failed to create organization"
+        
+
+
+    @staticmethod
+    def get_user_organizations(user):
+        """
+        List organizations where user is owner/member.
+        """
+        queryset = (
+            Organization.objects.filter(
+                members__user=user,
+                is_active=True
+            )
+            .select_related("profile")
+            .distinct()
+            .order_by("name")
+        )
+
+        logger.info(f"Fetched organizations for user={user.id}")
+
+        return queryset
+    
+
+    @staticmethod
+    def get_organization(id=None, username=None):
+        """
+        Fetch organization by id OR username
+
+        Args:
+            id: UUID (organization_id)
+            username: str
+
+        Returns:
+            Organization instance or None
+        """
+
+        queryset = (
+            Organization.objects
+            # A suspended org is not found, not "found but hidden": the profile
+            # view turns a None from here into the standard 404 envelope, which
+            # is the same answer an unknown handle gets.
+            .filter(is_active=True, is_suspended=False)
+            .select_related("profile")
+            .prefetch_related(
+                "locations",
+                "sports__sport"
+            )
+        )
+
+        if id:
+            return queryset.filter(id=id).first()
+
+        if username:
+            return queryset.filter(username=username).first()
+
+        return None
+    

@@ -24,19 +24,19 @@ view turns that into a 404 — never a 403, which would confirm it exists.
 
 from django.db.models import F
 
-from accounts.models import User
-from achievements.selectors.achievement_selectors import (
+from apps.accounts.models import User
+from apps.achievements.selectors.achievement_selectors import (
     list_for_user as achievements_for_user,
 )
-from careers.selectors.career_selectors import career_entries_for
+from apps.careers.selectors.career_selectors import career_entries_for
 from core.constant import TYPE_ORGANIZATION, TYPE_USER
-from highlights.selectors.highlight_selectors import visible_highlights_for
-from organization.models import Organization
-from posts.models import Post
-from posts.selectors.post_visibility_selectors import profile_visibility_filter
-from posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
-from posts.services.saved_post_service import annotate_is_saved
-from recruitments.models import Recruitment
+from apps.highlights.selectors.highlight_selectors import visible_highlights_for
+from apps.organization.models import Organization
+from apps.posts.models import Post
+from apps.posts.selectors.post_visibility_selectors import profile_visibility_filter
+from apps.posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
+from apps.posts.services.saved_post_service import annotate_is_saved
+from apps.recruitments.models import Recruitment
 
 # How many posts ride along in the bundle. One screenful — enough that the
 # server-rendered page is complete on first paint, few enough that a profile

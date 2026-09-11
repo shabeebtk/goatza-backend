@@ -25,10 +25,10 @@ from channels.testing import WebsocketCommunicator
 from django.test import TransactionTestCase, override_settings
 from rest_framework_simplejwt.tokens import AccessToken
 
-from accounts.models import User, UserProfile
+from apps.accounts.models import User, UserProfile
 from core.asgi import application
-from legal.testing import accept_current_terms
-from usernames.services.username_service import UsernameService
+from apps.legal.testing import accept_current_terms
+from apps.usernames.services.username_service import UsernameService
 
 NOTIFICATIONS_PATH = "/ws/notifications/"
 

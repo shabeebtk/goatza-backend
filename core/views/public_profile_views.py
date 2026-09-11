@@ -21,13 +21,13 @@ Two design points worth stating:
 
 import logging
 
-from accounts.serializers.public_profile_serializers import (
+from apps.accounts.serializers.public_profile_serializers import (
     PublicUserProfileSerializer,
 )
-from achievements.serializers.achievement_serializers import (
+from apps.achievements.serializers.achievement_serializers import (
     AchievementSerializer,
 )
-from careers.serializers.career_serializers import CareerEntrySerializer
+from apps.careers.serializers.career_serializers import CareerEntrySerializer
 from core.constant import TYPE_ORGANIZATION, TYPE_USER
 from core.selectors.public_profile_selectors import (
     PUBLIC_POSTS_PAGE_SIZE,
@@ -43,12 +43,12 @@ from core.selectors.public_profile_selectors import (
     user_profile_ref,
 )
 from core.views.base_views import PublicAPIView
-from highlights.serializers.highlight_serializers import HighlightSerializer
-from organization.serializers.public_profile_serializers import (
+from apps.highlights.serializers.highlight_serializers import HighlightSerializer
+from apps.organization.serializers.public_profile_serializers import (
     PublicOrganizationProfileSerializer,
 )
-from posts.serializers.posts_serializers import PostListSerializer
-from recruitments.serializers.recruitment_list_serializers import (
+from apps.posts.serializers.posts_serializers import PostListSerializer
+from apps.recruitments.serializers.recruitment_list_serializers import (
     RecruitmentListSerializer,
 )
 from utils.cache import cache_get, cache_set
