@@ -3778,3 +3778,400 @@ class RecruitmentViewCountTests(APITestCase):
         for section in SECTION_ORDER:
             for row in discover.data["data"].get(section, []):
                 self.assertNotIn("views_count", row)
+
+
+# =====================================================================
+# TRIAL OVER — a trial vanishes from player-facing lists once its day ends
+# =====================================================================
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from apps.organization.models import OrganizationProfile
+from apps.recruitments import trial_window
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+class TrialOverTests(APITestCase):
+    """
+    The trial DAY is the unit, in RECRUITMENT_TIMEZONE (IST here), never the
+    instant: a 09:00 trial is still "today" at 20:00 and over at 00:00 the
+    next morning. Every clock in these tests is pinned — ``timezone.now`` is
+    patched for the request-level checks, and the helpers take ``now``.
+
+    What each surface does with an ended trial:
+
+      hides it   — All tab (ranked + plain), search, another org's profile
+                   tab, discover, the logged-out org bundle
+      keeps it   — the owner's own list, the shortlist, My applications, and
+                   a direct link to the detail — all of them with
+                   ``is_trial_over: true``
+      refuses    — applying, with "This trial has ended."
+    """
+
+    LIST_URL = "/recruitments/list"
+    DISCOVER_URL = "/recruitments/discover"
+    MY_APPS_URL = "/recruitments/applications/my"
+
+    # Trial day: 15 Sep 2026 IST. The two clocks the tests care about.
+    TRIAL_DAY = datetime(2026, 9, 15, tzinfo=IST)
+    EVENING = datetime(2026, 9, 15, 20, 0, tzinfo=IST)     # same day, 20:00
+    NEXT_MORNING = datetime(2026, 9, 16, 0, 30, tzinfo=IST)  # after midnight
+
+    def setUp(self):
+        cache.clear()  # discover payload + username lookups + public bundle
+
+        self.player = self._user("trial_player", "Player")
+        self.owner = self._user("trial_owner", "Owner")
+        self.rival = self._user("trial_rival", "Rival")
+
+        self.org = Organization.objects.create(
+            name="Sunrise FC", username="sunrisefc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationProfile.objects.create(organization=self.org)
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        UsernameService.claim(self.org.username, organization=self.org)
+
+        self.other_org = Organization.objects.create(
+            name="Rival FC", username="rivalfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.other_org, user=self.rival,
+            role=OrganizationMember.Role.OWNER,
+        )
+
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+
+    # ── factories ────────────────────────────────────────────────
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _recruitment(self, title="Trial", org=None, **overrides):
+        data = dict(
+            organization=org or self.org,
+            sport=self.sport,
+            title=title,
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            published_at=self.TRIAL_DAY,
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _date_only_trial(self, **overrides):
+        """What the frontend stores for a trial with no time: 23:59 local."""
+        return self._recruitment(
+            "Date-only",
+            event_date=datetime(2026, 9, 15, 23, 59, tzinfo=IST),
+            **overrides,
+        )
+
+    def _timed_trial(self, title="Timed", **overrides):
+        return self._recruitment(
+            title, event_date=datetime(2026, 9, 15, 9, 0, tzinfo=IST),
+            **overrides,
+        )
+
+    def _at(self, now):
+        """Pin every clock a request reads to ``now``."""
+        return patch("django.utils.timezone.now", return_value=now)
+
+    def _org_headers(self, org):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(org.id),
+        }
+
+    def _ids(self, resp):
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return {str(r["id"]) for r in resp.data["data"]["results"]}
+
+    def _list(self, now, user=None, org=None, **params):
+        self.client.force_authenticate(user=user or self.player)
+        headers = self._org_headers(org) if org else {}
+        with self._at(now):
+            return self.client.get(self.LIST_URL, params, **headers)
+
+    # ── the rule itself ──────────────────────────────────────────
+
+    def test_start_of_today_is_midnight_in_the_recruitment_timezone(self):
+        # 20:00 IST on the 15th → 00:00 IST on the 15th, however it is spelled.
+        start = trial_window.start_of_today(self.EVENING.astimezone(timezone.UTC))
+        self.assertEqual(start, self.TRIAL_DAY)
+
+    @override_settings(RECRUITMENT_TIMEZONE="UTC")
+    def test_the_timezone_setting_moves_the_boundary(self):
+        # 00:30 IST on the 16th is still 19:00 UTC on the 15th, so under a UTC
+        # rule the 23:59-IST trial (18:29 UTC) has NOT reached the day's end.
+        self.assertTrue(
+            trial_window.is_trial_over(
+                datetime(2026, 9, 15, 23, 59, tzinfo=IST), now=self.NEXT_MORNING
+            ) is False
+        )
+
+    def test_date_only_trial_is_visible_all_day_and_over_the_next_day(self):
+        trial = self._date_only_trial()
+
+        self.assertFalse(trial_window.is_trial_over(trial.event_date, self.EVENING))
+        self.assertTrue(
+            trial_window.is_trial_over(trial.event_date, self.NEXT_MORNING)
+        )
+
+        self.assertIn(str(trial.id), self._ids(self._list(self.EVENING)))
+        self.assertNotIn(str(trial.id), self._ids(self._list(self.NEXT_MORNING)))
+
+    def test_timed_trial_stays_visible_after_its_time_until_midnight(self):
+        trial = self._timed_trial()  # 09:00 IST
+
+        # 20:00 the same day: the trial's time has passed, the DAY has not.
+        self.assertIn(str(trial.id), self._ids(self._list(self.EVENING)))
+        # 00:30 the next morning: gone.
+        self.assertNotIn(str(trial.id), self._ids(self._list(self.NEXT_MORNING)))
+
+    def test_no_event_date_is_unchanged(self):
+        open_ended = self._recruitment("No date")
+
+        self.assertFalse(open_ended.is_trial_over)
+        self.assertTrue(open_ended.is_accepting_applications)
+        self.assertIn(str(open_ended.id), self._ids(self._list(self.NEXT_MORNING)))
+
+        # The Q helper keeps a null event_date, whatever the clock says.
+        kept = Recruitment.objects.filter(
+            trial_window.trial_not_over_q(self.NEXT_MORNING)
+        )
+        self.assertIn(open_ended, kept)
+
+    # ── which lists hide it ──────────────────────────────────────
+
+    def test_owner_list_keeps_ended_trials_other_viewers_do_not(self):
+        trial = self._timed_trial()
+        now = self.NEXT_MORNING
+
+        # The owning org, on its own username-scoped list.
+        owner = self._list(
+            now, user=self.owner, org=self.org, username=self.org.username
+        )
+        self.assertIn(str(trial.id), self._ids(owner))
+        row = next(
+            r for r in owner.data["data"]["results"] if r["id"] == str(trial.id)
+        )
+        self.assertTrue(row["is_trial_over"])
+
+        # A player: the ranked All tab, and the org's profile tab.
+        self.assertNotIn(str(trial.id), self._ids(self._list(now)))
+        self.assertNotIn(
+            str(trial.id),
+            self._ids(self._list(now, username=self.org.username)),
+        )
+        # Search too — it goes through the same candidate set.
+        self.assertNotIn(
+            str(trial.id), self._ids(self._list(now, search="Timed"))
+        )
+
+        # Another organization, both on the global list and on the profile tab.
+        self.assertNotIn(
+            str(trial.id),
+            self._ids(self._list(now, user=self.rival, org=self.other_org)),
+        )
+        self.assertNotIn(
+            str(trial.id),
+            self._ids(self._list(
+                now, user=self.rival, org=self.other_org,
+                username=self.org.username,
+            )),
+        )
+
+    def test_discover_excludes_ended_trials_and_suspended_organizations(self):
+        live = self._recruitment("Live")
+        ended = self._timed_trial()
+        suspended_org = Organization.objects.create(
+            name="Banned FC", username="bannedfc",
+            type=Organization.Type.CLUB, is_suspended=True,
+        )
+        from_suspended = self._recruitment("Suspended", org=suspended_org)
+
+        self.client.force_authenticate(user=self.player)
+        with self._at(self.NEXT_MORNING):
+            resp = self.client.get(self.DISCOVER_URL)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        served = {
+            str(row["id"])
+            for section in SECTION_ORDER
+            for row in resp.data["data"].get(section, [])
+        }
+        self.assertIn(str(live.id), served)
+        self.assertNotIn(str(ended.id), served)
+        self.assertNotIn(str(from_suspended.id), served)
+
+    def test_discover_keeps_a_trial_later_today(self):
+        trial = self._timed_trial()
+
+        self.client.force_authenticate(user=self.player)
+        with self._at(self.EVENING):
+            resp = self.client.get(self.DISCOVER_URL)
+
+        served = {
+            str(row["id"])
+            for section in SECTION_ORDER
+            for row in resp.data["data"].get(section, [])
+        }
+        self.assertIn(str(trial.id), served)
+
+    def test_public_organization_bundle_excludes_ended_trials(self):
+        live = self._recruitment("Live")
+        ended = self._date_only_trial()
+
+        self.client.force_authenticate(user=None)
+        with self._at(self.NEXT_MORNING):
+            resp = self.client.get(f"/public/organization/{self.org.username}")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        titles = {r["title"] for r in resp.data["data"]["recruitments"]}
+        self.assertEqual(titles, {live.title})
+        self.assertNotIn(ended.title, titles)
+
+        # ...and the same trial is still advertised while its day is running.
+        cache.clear()
+        with self._at(self.EVENING):
+            resp = self.client.get(f"/public/organization/{self.org.username}")
+        titles = {r["title"] for r in resp.data["data"]["recruitments"]}
+        self.assertEqual(titles, {live.title, ended.title})
+
+    # ── what still opens, and what is refused ────────────────────
+
+    def test_detail_still_opens_with_is_trial_over_and_apply_is_refused(self):
+        trial = self._date_only_trial()
+
+        self.client.force_authenticate(user=self.player)
+        with self._at(self.NEXT_MORNING):
+            detail = self.client.get(f"/recruitments/{trial.id}/details")
+            self.assertEqual(detail.status_code, status.HTTP_200_OK, detail.data)
+            self.assertTrue(detail.data["data"]["is_trial_over"])
+            self.assertFalse(detail.data["data"]["is_accepting_applications"])
+            self.assertFalse(detail.data["data"]["can_apply"])
+
+            # The logged-out link opens too.
+            self.client.force_authenticate(user=None)
+            public = self.client.get(f"/public/recruitments/{trial.id}")
+            self.assertEqual(public.status_code, status.HTTP_200_OK, public.data)
+            self.assertTrue(public.data["data"]["is_trial_over"])
+
+            self.client.force_authenticate(user=self.player)
+            resp = self.client.post(
+                f"/recruitments/{trial.id}/apply",
+                {"shared_name": "Player", "shared_phone": "+919876543210"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertEqual(resp.data["message"], "This trial has ended.")
+        self.assertFalse(
+            RecruitmentApplication.objects.filter(recruitment=trial).exists()
+        )
+
+    def test_a_trial_later_today_still_accepts_applications(self):
+        trial = self._timed_trial()  # 09:00; it is 20:00 — the day is not over
+
+        self.client.force_authenticate(user=self.player)
+        with self._at(self.EVENING), self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(
+                f"/recruitments/{trial.id}/apply",
+                {"shared_name": "Player", "shared_phone": "+919876543210"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+    def test_is_accepting_applications_turns_false_when_the_trial_is_over(self):
+        # No deadline set: before this rule such a trial accepted applications
+        # indefinitely after the trial itself.
+        trial = self._date_only_trial()
+        self.assertIsNone(trial.application_deadline)
+
+        with self._at(self.EVENING):
+            self.assertFalse(trial.is_trial_over)
+            self.assertTrue(trial.is_accepting_applications)
+
+        with self._at(self.NEXT_MORNING):
+            self.assertTrue(trial.is_trial_over)
+            self.assertFalse(trial.is_accepting_applications)
+
+    # ── the player's own lists keep it ───────────────────────────
+
+    def test_saved_list_keeps_an_ended_trial_flagged(self):
+        trial = self._timed_trial()
+        self.client.force_authenticate(user=self.player)
+        with self._at(self.EVENING):
+            on = self.client.post(f"/recruitments/{trial.id}/save")
+        self.assertEqual(on.status_code, status.HTTP_200_OK, on.data)
+
+        with self._at(self.NEXT_MORNING):
+            resp = self.client.get(SAVED_LIST_URL)
+        rows = resp.data["data"]["results"]
+        self.assertEqual([r["id"] for r in rows], [str(trial.id)])
+        self.assertTrue(rows[0]["is_trial_over"])
+        self.assertTrue(rows[0]["is_saved"])
+
+    def test_my_applications_keeps_an_ended_trial_flagged(self):
+        trial = self._timed_trial()
+        application = RecruitmentApplication.objects.create(
+            recruitment=trial, applicant=self.player,
+            shared_name="Player", shared_phone="+919876543210",
+        )
+
+        self.client.force_authenticate(user=self.player)
+        with self._at(self.NEXT_MORNING):
+            resp = self.client.get(self.MY_APPS_URL)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        rows = resp.data["data"]["results"]
+        self.assertEqual([r["id"] for r in rows], [str(application.id)])
+        self.assertEqual(rows[0]["recruitment"]["id"], str(trial.id))
+        self.assertTrue(rows[0]["recruitment"]["is_trial_over"])
+
+    def test_is_trial_over_adds_no_queries(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        for i in range(3):
+            self._timed_trial(title=f"Trial {i}")
+
+        # The property reads a column already on the row: zero queries.
+        rows = list(Recruitment.objects.all())
+        with self.assertNumQueries(0):
+            with self._at(self.NEXT_MORNING):
+                self.assertEqual([r.is_trial_over for r in rows], [True] * 3)
+
+        # End to end: the same owner request, once with every flag false and
+        # once with every flag true, costs the same number of queries. (Same
+        # rows both times, so any per-row cost elsewhere cancels out.)
+        self.client.force_authenticate(user=self.owner)
+        headers = self._org_headers(self.org)
+        # Warm the username→profile lookup cache so the first measured request
+        # is not one query dearer than the second for an unrelated reason.
+        self.client.get(self.LIST_URL, {"username": self.org.username}, **headers)
+        counts = {}
+        for label, now in (("live", self.EVENING), ("over", self.NEXT_MORNING)):
+            with self._at(now), CaptureQueriesContext(connection) as ctx:
+                resp = self.client.get(
+                    self.LIST_URL, {"username": self.org.username}, **headers
+                )
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+            flags = [r["is_trial_over"] for r in resp.data["data"]["results"]]
+            self.assertEqual(flags, [label == "over"] * 3)
+            counts[label] = len(ctx)
+
+        self.assertEqual(counts["live"], counts["over"])

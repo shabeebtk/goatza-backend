@@ -59,7 +59,9 @@ logger = logging.getLogger(__name__)
 
 # A shared profile can go viral in minutes. 60s is short enough that a rename or
 # a new post shows up almost immediately and long enough that a link doing the
-# rounds in a group chat costs one query set, not one per tap.
+# rounds in a group chat costs one query set, not one per tap. It also means an
+# org's ended trial can stay on the cached bundle for up to a minute past
+# midnight in RECRUITMENT_TIMEZONE — accepted, see public_recruitments_for.
 PUBLIC_BUNDLE_TTL = 60
 
 

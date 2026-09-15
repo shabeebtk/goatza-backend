@@ -88,6 +88,12 @@ class ApplicationService:
                 "This recruitment is not accepting applications."
             )
 
+        # Trial day over — checked BEFORE the deadline. The DB pins the
+        # deadline to <= event_date, so an ended trial's deadline has passed
+        # too and would otherwise answer with the less useful message.
+        if recruitment.is_trial_over:
+            raise ValidationError("This trial has ended.")
+
         if (
             recruitment.application_deadline
             and recruitment.application_deadline < timezone.now()

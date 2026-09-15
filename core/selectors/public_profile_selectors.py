@@ -13,7 +13,8 @@ each already tolerates ``actor=None``:
   * posts        → ``posts.selectors.post_visibility_selectors``
   * highlights   → ``highlights.selectors.highlight_selectors``
   * recruitments → the ACTIVE + PUBLIC pair, which is what
-                   ``RecruitmentSelector`` gives a non-owner anyway
+                   ``RecruitmentSelector`` gives a non-owner anyway, minus
+                   trials whose day has ended (``trial_window``)
   * careers / achievements → no matrix at all; both lists are fully public to
                    anyone who can see the profile, verified rows just carry a
                    badge (see their selectors' docstrings)
@@ -37,6 +38,7 @@ from apps.posts.selectors.post_visibility_selectors import profile_visibility_fi
 from apps.posts.serializers.posts_serializers import POST_MENTIONS_PREFETCH
 from apps.posts.services.saved_post_service import annotate_is_saved
 from apps.recruitments.models import Recruitment
+from apps.recruitments.trial_window import trial_not_over_q
 
 # How many posts ride along in the bundle. One screenful — enough that the
 # server-rendered page is complete on first paint, few enough that a profile
@@ -312,7 +314,7 @@ def public_achievements_for(user):
     return achievements_for_user(user)
 
 
-def public_recruitments_for(organization):
+def public_recruitments_for(organization, now=None):
     """
     An org's live, publicly-visible listings.
 
@@ -320,6 +322,12 @@ def public_recruitments_for(organization):
     sees (FOLLOWERS_ONLY is theirs) and narrower than the share rule (which
     also allows CLOSED — worth forwarding, not worth advertising on a public
     page as though you could still apply).
+
+    Ended trials are dropped too (``trial_not_over_q``), the same rule the
+    signed-in org profile tab applies. The bundle is cached for
+    PUBLIC_BUNDLE_TTL (60s), so a trial can outlive midnight in
+    RECRUITMENT_TIMEZONE by up to a minute on this page — accepted.
+    ``now`` is for tests only.
     """
     return (
         Recruitment.objects
@@ -329,6 +337,7 @@ def public_recruitments_for(organization):
             status=Recruitment.Status.ACTIVE,
             visibility=Recruitment.Visibility.PUBLIC,
         )
+        .filter(trial_not_over_q(now))
         .select_related("organization__profile", "sport")
         .prefetch_related("positions__position", "media")
         .order_by("-published_at", "-created_at")[:PUBLIC_RECRUITMENTS_LIMIT]

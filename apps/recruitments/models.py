@@ -7,6 +7,7 @@ from shared.models import BaseUUIDModel, Location
 from apps.organization.models import Organization, OrganizationMember
 from apps.accounts.models import User
 from apps.sports.models import Sport, SportPosition
+from apps.recruitments.trial_window import is_trial_over
 # Create your models here.
 
 
@@ -234,13 +235,29 @@ class Recruitment(BaseUUIDModel):
             )
 
     @property
+    def is_trial_over(self):
+        """
+        Whether the trial DAY has ended in RECRUITMENT_TIMEZONE. The rule
+        itself lives in ``trial_window`` next to its queryset twin,
+        ``trial_not_over_q`` — this is the per-row spelling the serializers
+        and the apply gate read. No event_date → never over.
+        """
+        return is_trial_over(self.event_date)
+
+    @property
     def is_accepting_applications(self):
         """
         True when the recruitment can still receive applications: active,
-        deadline not passed (if set), and under the max cap (if set).
-        Used by the apply flow and surfaced on the public detail serializer.
+        trial day not over, deadline not passed (if set), and under the max
+        cap (if set). Used by the apply flow and surfaced on the public detail
+        serializer.
         """
         if self.status != self.Status.ACTIVE:
+            return False
+
+        # A trial with no deadline used to accept applications after the
+        # trial itself; the day ending is the deadline nobody had to set.
+        if self.is_trial_over:
             return False
 
         if (
