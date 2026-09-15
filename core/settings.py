@@ -700,6 +700,15 @@ APPLICANT_ALERT_TIERS = [
     (None, 14400), # applicants 8+ : at most one alert per 4 hours
 ]
 
+# ------ RECRUITMENT TRIAL WINDOW ------/
+# The zone whose calendar decides when a trial day is OVER. A trial is hidden
+# from player-facing lists once its event_date's calendar day has ended here,
+# so a trial later today stays visible all day (TIME_ZONE stays UTC — this is
+# a product rule, not the server clock). The frontend saves a date-only trial
+# as 23:59 local time, so "day over" and "event_date passed" agree.
+# Read by apps/recruitments/trial_window.py; nothing else should consult it.
+RECRUITMENT_TIMEZONE = os.getenv("RECRUITMENT_TIMEZONE") or "Asia/Kolkata"
+
 # ------ GOOGLE PLACES (city + venue search) ------/
 # The proxy in places/ is the ONLY thing that talks to Google. The key is
 # server-side and never reaches the browser (docs/PLACES_MIGRATION.md decision

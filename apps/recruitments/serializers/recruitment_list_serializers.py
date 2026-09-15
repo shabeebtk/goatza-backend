@@ -100,6 +100,11 @@ class RecruitmentListSerializer(serializers.ModelSerializer):
     # chip costs no extra query. An empty list means "open to all ages".
     age_categories = RecruitmentAgeCategorySerializer(many=True, read_only=True)
     is_saved = serializers.SerializerMethodField()
+    # A model property over event_date — no query. Player-facing lists never
+    # contain an ended trial, so there it is always false; it matters on the
+    # surfaces that KEEP ended trials (the owner's list, the shortlist, a
+    # direct link) so the card can wear a "Trial over" badge.
+    is_trial_over = serializers.BooleanField(read_only=True)
 
     class Meta:
 
@@ -138,6 +143,7 @@ class RecruitmentListSerializer(serializers.ModelSerializer):
             "gender",
             # The bookmark. Always present so the card never has to guess.
             "is_saved",
+            "is_trial_over",
         ]
 
     def get_is_saved(self, obj):
@@ -355,6 +361,9 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
     my_application = serializers.SerializerMethodField()
     can_apply = serializers.SerializerMethodField()
     is_accepting_applications = serializers.BooleanField(read_only=True)
+    # Direct links (shares, notifications) still open an ended trial; this is
+    # how the page knows to say so. Same property the card reads, no query.
+    is_trial_over = serializers.BooleanField(read_only=True)
     age_categories = RecruitmentAgeCategorySerializer(many=True, read_only=True)
     contacts = RecruitmentContactSerializer(many=True, read_only=True)
     benefits = RecruitmentBenefitSerializer(many=True, read_only=True)
@@ -416,6 +425,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
             "my_application",
             "can_apply",
             "is_accepting_applications",
+            "is_trial_over",
             "external_apply_url",
             # Same bookmark the card carries, so the detail page's toggle has
             # its initial state without a second request.

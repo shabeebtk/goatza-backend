@@ -11,6 +11,7 @@ from apps.connections.models import Follow
 from apps.recruitments.selectors.saved_recruitment_selectors import (
     SavedRecruitmentSelector
 )
+from apps.recruitments.trial_window import trial_not_over_q
 from services.geo import haversine
 
 # Relations every recruitment card needs. Named once so the "All" tab and the
@@ -44,7 +45,8 @@ class RecruitmentSelector:
         closing_within_days=None,
         published_within_days=None,
         limit=10,
-        offset=0
+        offset=0,
+        now=None,
     ):
         """
         The "All" tab and every org-scoped listing, ordered newest-first.
@@ -71,6 +73,7 @@ class RecruitmentSelector:
             max_distance_km=max_distance_km,
             closing_within_days=closing_within_days,
             published_within_days=published_within_days,
+            now=now,
         )
 
         # COUNT
@@ -107,6 +110,7 @@ class RecruitmentSelector:
         max_distance_km=None,
         closing_within_days=None,
         published_within_days=None,
+        now=None,
     ):
         """
         The filtered candidate set — no ordering, no slicing, no prefetch.
@@ -115,14 +119,18 @@ class RecruitmentSelector:
         by a score computed in Python (§3) and therefore cannot let SQL do the
         LIMIT. Everything that decides WHICH rows are visible lives here, so
         both orderings answer over exactly the same set.
+
+        ``now`` only feeds the trial-over rule; it exists so tests can pin the
+        clock. Callers leave it None.
         """
 
         queryset = Recruitment.objects.filter(
             is_deleted=False,
-            # A suspended club's listings go with it. This is the one place
-            # that decides which recruitments are visible, so filtering here
-            # covers discover, the ranked list, search and the org profile at
-            # once — no second call site to keep in step.
+            # A suspended club's listings go with it. This decides which
+            # recruitments are visible for the ranked list, search and the org
+            # profile at once. Discover and the shortlist build their own
+            # candidate sets and restate the rule (discover_candidates,
+            # visible_to_actor_queryset).
             organization__is_suspended=False,
         )
         target_org = None
@@ -198,6 +206,16 @@ class RecruitmentSelector:
             queryset = queryset.filter(
                 visibility_filter
             )
+
+            # TRIAL OVER — a trial whose day has ended (in
+            # RECRUITMENT_TIMEZONE) is gone from every player-facing list:
+            # the All tab, the ranked list, search, and another org's profile
+            # tab. Sits inside the non-owner branch on purpose: the owning
+            # org's own list keeps ended trials, the same way it keeps drafts
+            # and closed postings. The shortlist and My applications do not
+            # come through here (see visible_to_actor_queryset), so a player
+            # who saved or applied still finds the trial in their own lists.
+            queryset = queryset.filter(trial_not_over_q(now))
 
         # FILTERS
         if sport_id:
@@ -362,6 +380,16 @@ class RecruitmentSelector:
           - deadline-passed rows are excluded. They stay in "All" for badging
             (§4); a section called "Recommended for you" that opens with a trial
             that closed last week is not a recommendation.
+
+        Ended trials (``trial_not_over_q``) and suspended organizations are
+        excluded here too. Discover builds its own candidate set and never
+        passes through ``build_list_queryset``, so neither rule is inherited
+        from there — both have to be restated.
+
+        The payload this feeds is cached per actor for CACHE_TTL_SECONDS (ten
+        minutes), so a trial can linger in a cached page for up to that long
+        after midnight in RECRUITMENT_TIMEZONE. Accepted: it is the same
+        tolerance the cache already grants a deadline that passes mid-window.
         """
         now = now or timezone.now()
 
@@ -376,9 +404,12 @@ class RecruitmentSelector:
             visibility,
             is_deleted=False,
             status=Recruitment.Status.ACTIVE,
+            organization__is_suspended=False,
         ).filter(
             Q(application_deadline__isnull=True)
             | Q(application_deadline__gte=now)
+        ).filter(
+            trial_not_over_q(now)
         )
 
         if context.center:
@@ -525,7 +556,9 @@ class RecruitmentSelector:
         shortlist needs: a saved trial that closed last week must stay in the
         list wearing its "Closed" badge, and ``build_list_queryset`` cannot
         answer that (it pins non-owners to ACTIVE, which is right for a
-        discovery list and wrong for a shortlist).
+        discovery list and wrong for a shortlist). The trial-over rule is
+        left off for the same reason: an ended trial stays on the shortlist
+        wearing ``is_trial_over``, because the shortlist is the player's own.
 
         Kept in this module, not in the saved-list view, so visibility keeps
         having exactly one home.

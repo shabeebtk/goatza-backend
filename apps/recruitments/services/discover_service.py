@@ -375,7 +375,8 @@ class RecruitmentDiscoverService:
         bounded cost as discover, over the same corpus.
 
         Deadline-passed rows stay in this list — they carry the "Applications
-        closed" badge, which is the whole reason "All" keeps them.
+        closed" badge, which is the whole reason "All" keeps them. Ended
+        TRIALS do not: build_list_queryset drops them for every non-owner.
 
         Returns ([(recruitment, MatchResult), ...], total_count).
         """
@@ -385,6 +386,7 @@ class RecruitmentDiscoverService:
         queryset = RecruitmentSelector.build_list_queryset(
             actor=actor,
             center=context.center,
+            now=now,
             **filters,
         )
 

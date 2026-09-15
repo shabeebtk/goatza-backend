@@ -397,6 +397,10 @@ class MyApplicationOrgMiniSerializer(serializers.ModelSerializer):
 class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
     organization = MyApplicationOrgMiniSerializer(read_only=True)
     sport = SportSerializer(read_only=True)
+    # My applications keeps ended trials on purpose (it is the player's own
+    # history); this flag is how the row says the day has passed. A property
+    # over event_date, so it costs nothing on the select_related row.
+    is_trial_over = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Recruitment
@@ -408,6 +412,7 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
             "city",
             "event_date",
             "application_deadline",
+            "is_trial_over",
             "organization",
             "sport",
         ]
