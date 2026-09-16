@@ -20,11 +20,13 @@ from apps.guardians.selectors.consent_selectors import (
 )
 from apps.guardians.services.consent_service import request_consent
 from apps.guardians.tests.base import (
+    ADULT_YEARS,
     PARENT_EMAIL,
     PARENT_NAME,
     GuardianTestCase,
     make_adult,
     make_minor,
+    years_ago,
 )
 from apps.accounts.models import User
 
@@ -146,8 +148,10 @@ class LinkedUserTests(GuardianTestCase):
         )
         self.assertEqual(event.method, "goatza_account")
 
-    def test_a_linked_account_with_no_birthdate_stays_separate_contact(self):
-        # Every uncertainty reads as "we cannot claim this was a known adult".
+    def test_an_account_with_no_birthdate_is_not_linked(self):
+        # Every uncertainty reads as "we cannot claim this was a known adult",
+        # and the link IS that claim — so it is not made, and the approval
+        # stays separate_contact.
         parent_user = make_adult(email="nobd@example.com", username="nobdparent")
         parent_user.profile.birthdate = None
         parent_user.profile.save(update_fields=["birthdate"])
@@ -156,10 +160,74 @@ class LinkedUserTests(GuardianTestCase):
         _, token = self.ask_for_consent(parent_email="nobd@example.com")
         self.approve_by_link(token)
 
+        self.assertIsNone(Guardian.objects.get(email="nobd@example.com").linked_user_id)
         event = GuardianConsentEvent.objects.get(
             child=child, event_type="approved"
         )
         self.assertEqual(event.method, "separate_contact")
+
+    def test_a_minor_sibling_who_owns_the_address_is_not_linked(self):
+        # A 14-year-old who happens to own the address their parent uses is
+        # not a parent. Linking them would upgrade the approval to "a known
+        # Goatza account stands behind this", which is the one thing it does
+        # not mean.
+        sibling = make_minor(email="bigsis@example.com", username="bigsis")
+        child = self.authenticate(make_minor())
+
+        _, token = self.ask_for_consent(parent_email="bigsis@example.com")
+        self.approve_by_link(token)
+
+        guardian = Guardian.objects.get(email="bigsis@example.com")
+        self.assertIsNone(guardian.linked_user_id)
+        self.assertNotEqual(guardian.linked_user_id, sibling.id)
+
+        event = GuardianConsentEvent.objects.get(
+            child=child, event_type="approved"
+        )
+        self.assertEqual(event.method, "separate_contact")
+
+    def test_an_old_row_linked_to_the_child_never_upgrades_the_method(self):
+        # Rows written under the looser rule may still point linked_user at
+        # the child. No migration rewrites them; the label logic has to be
+        # right anyway — and "a known adult account" must never mean the
+        # child themselves, whatever their profile says.
+        child = self.authenticate(make_minor())
+        _, token = self.ask_for_consent(parent_email="legacy@example.com")
+
+        guardian = Guardian.objects.get(email="legacy@example.com")
+        guardian.linked_user = child
+        guardian.save(update_fields=["linked_user"])
+        # Even with an adult birthdate on the child's own profile.
+        child.profile.birthdate = years_ago(ADULT_YEARS)
+        child.profile.save(update_fields=["birthdate"])
+
+        self.approve_by_link(token)
+
+        event = GuardianConsentEvent.objects.get(
+            child=child, event_type="approved"
+        )
+        self.assertEqual(event.method, "separate_contact")
+
+    def test_a_back_filled_link_follows_the_same_rule(self):
+        # A guardian row created before the parent had an account is linked
+        # on the next request — but only to an adult who is not the child.
+        first = make_minor(email="kid1@example.com", username="backfill1")
+        second = make_minor(email="kid2@example.com", username="backfill2")
+
+        self.authenticate(first)
+        self.ask_for_consent(parent_email="latecoach@example.com")
+        self.assertIsNone(
+            Guardian.objects.get(email="latecoach@example.com").linked_user_id
+        )
+
+        parent_user = make_adult(email="latecoach@example.com", username="latecoach")
+        self.authenticate(second)
+        self.ask_for_consent(parent_email="latecoach@example.com")
+
+        self.assertEqual(
+            Guardian.objects.get(email="latecoach@example.com").linked_user_id,
+            parent_user.id,
+        )
 
 
 class SiblingHintTests(GuardianTestCase):

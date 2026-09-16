@@ -15,12 +15,15 @@ that names the child has told them whose it was.
 import datetime
 from unittest.mock import patch
 
+from django.test import override_settings
 from django.utils import timezone
 
 from apps.accounts.models import User
-from apps.guardians.constants import TOKEN_TTL_DAYS, token_hash
+from apps.guardians.constants import TOKEN_TTL_DAYS, consent_page_url, token_hash
 from apps.guardians.models import GuardianConsentEvent
 from apps.guardians.tests.base import (
+    GUARDIAN_DETAILS_URL,
+    PARENT_EMAIL,
     PARENT_NAME,
     GuardianTestCase,
     consent_url,
@@ -37,6 +40,72 @@ def expire(token):
     GuardianConsentEvent.objects.filter(token_hash=token_hash(token)).update(
         token_expires_at=timezone.now() - datetime.timedelta(days=1)
     )
+
+
+class LinkShapeTests(GuardianTestCase):
+    """
+    The link has to land on the frontend's ``/guardian/[token]`` route. It
+    once pointed at ``/guardian-consent?token=``, a page that does not exist,
+    and every parent who opened it got a 404 — so the shape is pinned here,
+    down to the token being the last path segment and not a query value.
+    """
+
+    @override_settings(FRONTEND_BASE_URL="https://app.example.test/")
+    def test_the_token_is_the_last_path_segment(self):
+        self.assertEqual(
+            consent_page_url("abc123"), "https://app.example.test/guardian/abc123"
+        )
+
+    @override_settings(FRONTEND_BASE_URL="https://app.example.test")
+    def test_the_mailed_link_has_that_shape(self):
+        self.authenticate(make_minor(email=CHILD_EMAIL, username=CHILD_USERNAME))
+
+        with self.sending_consent_email() as sender:
+            self.client.post(
+                GUARDIAN_DETAILS_URL,
+                {"parent_name": PARENT_NAME, "parent_email": PARENT_EMAIL},
+                format="json",
+            )
+
+        url = sender.call_args.kwargs["consent_url"]
+        token = url.rsplit("/", 1)[1]
+
+        self.assertTrue(url.startswith("https://app.example.test/guardian/"), url)
+        self.assertNotIn("?", url)
+        self.assertNotIn("guardian-consent", url)
+        # And the segment IS the credential: it resolves.
+        self.assertEqual(self.parent_get(consent_url(token)).status_code, 200)
+
+
+class ConsentPageContentTests(GuardianTestCase):
+    """What the parent's page carries, per state."""
+
+    def setUp(self):
+        super().setUp()
+        self.child = self.authenticate(
+            make_minor(email=CHILD_EMAIL, username=CHILD_USERNAME)
+        )
+        _, self.token = self.ask_for_consent(parent_name="Priya Nair")
+
+    def test_a_pending_page_carries_the_name_the_child_gave(self):
+        # Pre-fills the parent's own name field. It is the name the child
+        # typed, which the email already greets them with — nothing new leaves.
+        res = self.parent_get(consent_url(self.token))
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["data"]["state"], "pending")
+        self.assertEqual(res.data["data"]["guardian_name"], "Priya Nair")
+
+    def test_an_approved_page_carries_no_name(self):
+        # No form to pre-fill, so no name with a job to do.
+        self.approve_by_link(self.token)
+
+        res = self.parent_get(consent_url(self.token))
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["data"]["state"], "approved")
+        self.assertIn("guardian_name", res.data["data"])
+        self.assertIsNone(res.data["data"]["guardian_name"])
 
 
 class TokenLifetimeTests(GuardianTestCase):

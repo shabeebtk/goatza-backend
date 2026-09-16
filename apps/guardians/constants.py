@@ -63,17 +63,17 @@ GUARDIAN_CONSENT_EXPIRY_DAYS = 30
 # somebody else's child.
 GUARDIAN_ADULT_AGE = 18
 
-# Where the parent lands. A path rather than a whole setting, because
-# ``FRONTEND_BASE_URL`` already exists and already owns the origin every
-# transactional email points at — a second URL setting would be a second thing
-# to get wrong on a deploy, and the two would disagree the first time only one
-# was updated.
-CONSENT_PAGE_PATH = "/guardian-consent"
-
-# The query parameter carrying the raw token. Named once here because three
-# places have to agree on it: this module builds the link, the consent view
-# reads it back, and the frontend page pulls it out of the URL.
-CONSENT_TOKEN_PARAM = "token"
+# Where the parent lands: the frontend's ``/guardian/[token]`` route, with the
+# raw token as the LAST PATH SEGMENT — ``consent_page_url`` below appends it.
+# A path rather than a whole setting, because ``FRONTEND_BASE_URL`` already
+# exists and already owns the origin every transactional email points at — a
+# second URL setting would be a second thing to get wrong on a deploy, and the
+# two would disagree the first time only one was updated.
+#
+# Must match the frontend route exactly. The link once pointed at a
+# ``/guardian-consent?token=`` page that does not exist, and every parent who
+# opened it got a 404 — ``apps/guardians/tests/test_tokens.py`` pins the shape.
+CONSENT_PAGE_PATH = "/guardian"
 
 # WHAT A PARENT IS AGREEING TO, itemized, in the words they are shown.
 #
@@ -198,8 +198,11 @@ def token_hash(raw_token) -> str:
 
 def consent_page_url(raw_token) -> str:
     """
-    The link a parent is sent, e.g.
-    ``https://goatza.com/guardian-consent?token=<raw>``.
+    The link a parent is sent, e.g. ``https://goatza.com/guardian/<raw>``.
+
+    The token rides as a path segment, unencoded, because it can: it is
+    ``secrets.token_urlsafe`` output — base64url, nothing a URL reserves — and
+    the frontend page reads it back from the same place.
 
     THE RAW TOKEN GOES IN THE LINK AND NOWHERE ELSE. It is never stored, never
     logged and never returned to the child's device — only its SHA-256 hash is
@@ -212,4 +215,4 @@ def consent_page_url(raw_token) -> str:
     """
     base_url = (settings.FRONTEND_BASE_URL or "").rstrip("/")
 
-    return f"{base_url}{CONSENT_PAGE_PATH}?{CONSENT_TOKEN_PARAM}={raw_token}"
+    return f"{base_url}{CONSENT_PAGE_PATH}/{raw_token}"

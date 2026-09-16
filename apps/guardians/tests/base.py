@@ -43,7 +43,6 @@ DETAILS_URL = "/user/details"
 FEED_URL = "/feed/list"
 GUARDIAN_DETAILS_URL = "/guardian/details"
 GUARDIAN_RESEND_URL = "/guardian/resend"
-GUARDIAN_SHARED_APPROVE_URL = "/guardian/shared/approve"
 
 
 def consent_url(token):
@@ -55,8 +54,11 @@ def years_ago(years):
 
 
 def token_from(url):
-    """The raw token out of a consent link."""
-    return url.split("token=")[1]
+    """
+    The raw token out of a consent link — the last path segment of
+    ``{FRONTEND_BASE_URL}/guardian/<token>``.
+    """
+    return url.rstrip("/").rsplit("/", 1)[1]
 
 
 def make_user(email, username, age_years, phone=None):
@@ -125,8 +127,9 @@ class GuardianTestCase(TestCase):
         POST /guardian/details as the authenticated child, and return
         ``(response, raw_token_or_None)``.
 
-        The token is None for a shared contact, which sends nothing — that is
-        the assertion several tests are actually making.
+        A link goes out for every accepted request — the child's own address
+        included — so the token is None only when the request was refused and
+        nothing was sent.
         """
         with self.sending_consent_email() as sender:
             response = self.client.post(

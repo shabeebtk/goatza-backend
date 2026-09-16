@@ -75,11 +75,12 @@ BLOCKING_STATUSES = frozenset({
 # Paths a locked child must still be able to reach. Written without the
 # trailing slash, like every route in this project (see core/urls.py).
 EXEMPT_PATHS = frozenset({
-    # THE WAY OUT. If nothing else on this list is right, these three must be:
-    # naming a guardian is the only action that can ever clear this gate, and
-    # resend is what a child does when the first email went nowhere.
+    # THE WAY OUT. If nothing else on this list is right, these two must be:
+    # naming a guardian is the only action that can ever start clearing this
+    # gate, and resend is what a child does when the first email went nowhere.
+    # The clearing itself happens on the parent's anonymous link, which this
+    # permission never sees.
     "/guardian/details",
-    "/guardian/shared/approve",
     "/guardian/resend",
 
     # The session. A locked child who cannot refresh a token is a child whose

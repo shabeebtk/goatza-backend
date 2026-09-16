@@ -20,8 +20,6 @@ from unittest.mock import patch
 from apps.accounts.models import User
 from apps.guardians.models import GuardianConsentEvent
 from apps.guardians.tests.base import (
-    GUARDIAN_SHARED_APPROVE_URL,
-    PARENT_NAME,
     GuardianTestCase,
     consent_url,
     make_minor,
@@ -202,15 +200,37 @@ class NothingIsEverEditedTests(EventTestCase):
         self.assertEqual(self.types(), ["requested", "approved"])
         self.assert_consistent()
 
-    def test_an_idempotent_repeat_writes_nothing(self):
-        self.ask_for_consent(parent_email=self.child.email)
-        body = {"parent_name": PARENT_NAME, "confirm_18_plus": True}
+    def test_a_same_address_link_answered_twice_writes_one_approval(self):
+        # The child's own address gets an ordinary link, and an ordinary link
+        # is spent by its first answer — a double tap on the parent's screen
+        # must not leave two approvals behind.
+        _, token = self.ask_for_consent(parent_email=self.child.email)
 
-        self.client.post(GUARDIAN_SHARED_APPROVE_URL, body, format="json")
-        self.client.post(GUARDIAN_SHARED_APPROVE_URL, body, format="json")
+        self.approve_by_link(token)
+        self.approve_by_link(token)
 
         self.assertEqual(self.types(), ["requested", "approved"])
         self.assert_consistent()
+
+    def test_a_parent_birthdate_in_the_body_is_not_stored(self):
+        # The approve endpoint stopped asking for it. A client that still
+        # sends one — an old build, a replayed request — is not refused, and
+        # nothing about the row changes: the column stays NULL, reserved for a
+        # verified flow that does not exist yet.
+        _, token = self.ask_for_consent()
+
+        res = self.parent_post(f"{consent_url(token)}/approve", {
+            "parent_name": "Priya S Nair",
+            "confirm_18_plus": True,
+            "parent_birthdate": "1988-04-02",
+        })
+
+        self.assertEqual(res.status_code, 200, res.data)
+        approval = GuardianConsentEvent.objects.get(
+            child=self.child, event_type="approved"
+        )
+        self.assertIsNone(approval.parent_birthdate_given)
+        self.assertEqual(approval.parent_name_given, "Priya S Nair")
 
 
 class EveryRowIsSelfDescribingTests(EventTestCase):
