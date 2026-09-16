@@ -20,6 +20,7 @@ from apps.guardians.tests.base import (
     DETAILS_URL,
     FEED_URL,
     GUARDIAN_DETAILS_URL,
+    GUARDIAN_RESEND_URL,
     MINOR_YEARS,
     PARENT_EMAIL,
     PASSWORD,
@@ -107,6 +108,7 @@ class EmailSignupFlowTests(GuardianTestCase):
         response, token = self.ask_for_consent()
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["data"]["mode"], "link_sent")
+        self.assertFalse(response.data["data"]["same_as_login_contact"])
         self.assertIsNotNone(token)
 
         approve = self.approve_by_link(token)
@@ -239,6 +241,20 @@ class DeclineFlowTests(GuardianTestCase):
         res = self.approve_by_link(self.token)
 
         self.assertEqual(res.status_code, 404, res.data)
+        self.assert_status(self.child, User.GuardianConsentStatus.PENDING)
+
+    def test_resending_after_a_decline_is_refused(self):
+        # The parent already answered. Mailing them the same question again
+        # is not a way forward; a new request (to them or somebody else) is,
+        # and the code is what tells the client to offer that instead.
+        self.parent_post(f"{consent_url(self.token)}/decline")
+
+        with self.sending_consent_email() as sender:
+            res = self.client.post(GUARDIAN_RESEND_URL, {}, format="json")
+
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data["data"]["code"], "consent_declined")
+        sender.assert_not_called()
         self.assert_status(self.child, User.GuardianConsentStatus.PENDING)
 
 

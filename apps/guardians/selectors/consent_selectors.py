@@ -13,6 +13,8 @@ page, which need the story around the status — who was asked, when, has the
 link expired — and can afford one indexed query to get it.
 """
 
+from django.utils import timezone
+
 from apps.accounts.models import User
 # mask_email lives with the deletion flow because that is where it was first
 # needed; email_change_service imports it across apps for the same reason.
@@ -120,25 +122,58 @@ def mask_contact(contact) -> str:
     return f"{head[:3]}{'•' * max(len(head) - 3, 0)}{tail}" if head else f"••••{tail}"
 
 
+# What the waiting screen should say about the standing request. Only ever set
+# while ``pending`` with a parent named; ``None`` everywhere else.
+REQUEST_STATE_WAITING = "waiting"      # the newest link is still live
+REQUEST_STATE_EXPIRED = "expired"      # the newest link lapsed, unanswered
+REQUEST_STATE_DECLINED = "declined"    # the child's newest event is a decline
+
+
+def _request_state(newest, newest_request) -> str:
+    """
+    ``newest`` is the child's most recent event of any kind, ``newest_request``
+    the most recent open one (the same row when the newest event IS a request).
+
+    A decline wins over everything: the declined link is spent whatever its
+    expiry says, and "your parent said no" is a different next step from
+    "your parent never saw it". Otherwise the link's own deadline decides.
+    """
+    if newest.event_type == GuardianConsentEventType.DECLINED:
+        return REQUEST_STATE_DECLINED
+
+    expires_at = newest_request.token_expires_at
+
+    if expires_at is None or expires_at <= timezone.now():
+        return REQUEST_STATE_EXPIRED
+
+    return REQUEST_STATE_WAITING
+
+
 def guardian_status(child) -> dict:
     """
     The ``guardian`` block on GET /user/details, and the one place its shape is
     decided::
 
-        {"status": "pending", "masked_contact": "p***a@gmail.com"}
+        {"status": "pending", "masked_contact": "p***a@gmail.com",
+         "same_as_login_contact": false, "request_state": "waiting"}
 
     Rides along on the call the client already makes at session start, exactly
     as ``legal_status`` does, because a locked child's waiting screen needs to
-    render on the same round trip that tells it the account is locked.
+    render on the same round trip that tells it the account is locked — and
+    it is the same call the waiting screen re-reads when the child comes back
+    to the tab, so ``request_state`` is what turns "still waiting" into a
+    screen that says declined or expired instead of quietly bouncing.
 
-    ONE QUERY, AND ONLY WHEN PENDING. Every other status — the adults, the
-    approved minors, the withdrawn ones — is answered from the denormalized
-    column with no query at all, which is the whole reason that column exists.
-    A waiting screen is the only state that needs to name a contact.
+    NO QUERY UNLESS PENDING, AT MOST TWO WHEN IT IS. Every other status — the
+    adults, the approved minors, the withdrawn ones — is answered from the
+    denormalized column alone, which is the whole reason that column exists.
+    Pending costs one read for the newest event (``guardian_child_recent_idx``)
+    and a second only when that event is not itself a request — after a
+    decline, say — to find the request the address actually went to.
 
-    The contact comes from the newest OPEN request rather than the newest event
-    of any kind: after a decline the child is still pending, and the address
-    worth showing them is the one a link actually went to.
+    The three extra keys carry real values only while pending with a parent
+    named; a minor who has just finished signup and has not reached the parent
+    form gets ``None`` / ``False`` and the client shows that form.
     """
     status = getattr(
         child,
@@ -146,26 +181,51 @@ def guardian_status(child) -> dict:
         User.GuardianConsentStatus.NOT_NEEDED,
     )
 
-    if status != User.GuardianConsentStatus.PENDING:
-        return {"status": status, "masked_contact": None}
+    nothing_named = {
+        "status": status,
+        "masked_contact": None,
+        "same_as_login_contact": False,
+        "request_state": None,
+    }
 
-    newest_request = (
+    if status != User.GuardianConsentStatus.PENDING:
+        return nothing_named
+
+    newest = (
         GuardianConsentEvent.objects
         .select_related("guardian")
-        .filter(child_id=child.pk, event_type__in=OPEN_EVENT_TYPES)
+        .filter(child_id=child.pk)
         .first()
     )
 
-    if newest_request is None:
-        # Pending and nobody named yet — a minor who has just finished signup
-        # and has not reached the parent form. The client shows that form.
-        return {"status": status, "masked_contact": None}
+    if newest is None:
+        return nothing_named
+
+    if newest.event_type in OPEN_EVENT_TYPES:
+        newest_request = newest
+    else:
+        # The contact comes from the newest OPEN request rather than the newest
+        # event of any kind: after a decline the child is still pending, and
+        # the address worth showing them is the one a link actually went to.
+        newest_request = (
+            GuardianConsentEvent.objects
+            .select_related("guardian")
+            .filter(child_id=child.pk, event_type__in=OPEN_EVENT_TYPES)
+            .first()
+        )
+
+        if newest_request is None:
+            return nothing_named
 
     guardian = newest_request.guardian
 
     return {
         "status": status,
         "masked_contact": mask_contact(guardian.email or guardian.phone),
+        "same_as_login_contact": consent_service.is_childs_own_contact(
+            child, guardian
+        ),
+        "request_state": _request_state(newest, newest_request),
     }
 
 
@@ -224,6 +284,12 @@ def consent_page(raw_token) -> dict | None:
     if they press Approve now; an approved page shows the version stored on the
     approval, because that is the text they actually did agree to, whatever has
     been published since.
+
+    ``guardian_name`` — the name the CHILD typed for them — is sent on the
+    pending page only, to pre-fill the parent's own name field. The email
+    already greets them with it, so nothing new leaves; and an approved page
+    has no form to pre-fill, so it carries ``None`` rather than a name with
+    no job.
     """
     event = consent_service.open_event_or_none(raw_token)
     state = STATE_PENDING
@@ -264,6 +330,7 @@ def consent_page(raw_token) -> dict | None:
         # stopped meaning anything, and a countdown to nothing is worse than
         # no countdown.
         "expires_at": event.token_expires_at if state == STATE_PENDING else None,
+        "guardian_name": event.guardian.name if state == STATE_PENDING else None,
     }
 
 

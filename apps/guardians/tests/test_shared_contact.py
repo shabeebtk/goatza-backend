@@ -1,26 +1,29 @@
 """
-The hand-the-phone route: when the only contact a child has for their parent is
-the one they log in with themselves.
+The same-address case: a child names the email they signed up with.
 
-This is the weak path and the tests are written to keep it visibly weak. An
-approval collected on the child's own device, through the child's own inbox,
-proves that somebody with access to that inbox agreed and NOTHING more — so the
-row it writes says ``shared_contact``, and every test here checks that label as
-carefully as it checks the unlock. If these approvals ever start recording as
-something stronger, the DPDP question "how do you know it was the parent" gets a
-worse answer than the truth.
+There is no separate route for it any more. The link goes out exactly as it
+would to any other address — the honest alternative, a hand-the-phone approval
+on the child's own device, let anybody holding the phone tick "I'm the parent"
+— and what makes the case different is the LABEL on the answer: an approval
+that came back through an inbox the child can open is recorded as
+``shared_contact``, the weakest of the three methods, so it stays countable and
+can be re-verified when the DPDP rules say what a verified parent looks like.
 
-The other half of the design is that no email goes out. Mailing a consent link
-to an address the child controls would be mailing the child a button that
-unlocks their own account.
+The tests are written to keep it visibly weak. If these approvals ever start
+recording as something stronger, the DPDP question "how do you know it was the
+parent" gets a worse answer than the truth.
 """
 
-from apps.guardians.constants import GuardianConsentLevel, GuardianConsentMethod
+from apps.guardians.constants import (
+    GuardianConsentLevel,
+    GuardianConsentMethod,
+    token_hash,
+)
 from apps.guardians.models import Guardian, GuardianConsentEvent
 from apps.guardians.services.consent_service import request_consent
 from apps.guardians.tests.base import (
     FEED_URL,
-    GUARDIAN_SHARED_APPROVE_URL,
+    GUARDIAN_DETAILS_URL,
     PARENT_NAME,
     GuardianTestCase,
     make_minor,
@@ -30,8 +33,10 @@ from apps.accounts.models import User
 CHILD_EMAIL = "sharedchild@example.com"
 CHILD_PHONE = "+919876500011"
 
+SHARED_APPROVE_URL = "/guardian/shared/approve"
 
-class DetectionTests(GuardianTestCase):
+
+class SameAddressRequestTests(GuardianTestCase):
 
     def setUp(self):
         super().setUp()
@@ -39,48 +44,63 @@ class DetectionTests(GuardianTestCase):
             make_minor(email=CHILD_EMAIL, username="sharedchild")
         )
 
-    def test_the_childs_own_email_is_detected(self):
+    def test_the_link_is_sent_like_any_other(self):
         response, token = self.ask_for_consent(parent_email=CHILD_EMAIL)
 
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["data"]["mode"], "shared_contact")
-        self.assertIsNone(token)
+        self.assertEqual(response.data["data"]["mode"], "link_sent")
+        self.assertTrue(response.data["data"]["same_as_login_contact"])
+        self.assertIsNotNone(token)
 
-    def test_nothing_is_emailed(self):
+    def test_the_email_goes_to_that_address(self):
         with self.sending_consent_email() as sender:
             self.client.post(
-                "/guardian/details",
+                GUARDIAN_DETAILS_URL,
                 {"parent_name": PARENT_NAME, "parent_email": CHILD_EMAIL},
                 format="json",
             )
 
-        sender.assert_not_called()
+        sender.assert_called_once()
+        self.assertEqual(sender.call_args.kwargs["email"], CHILD_EMAIL)
 
-    def test_no_token_is_minted(self):
-        # There is no link, so there must be no credential. A hash on this row
-        # would be a live token nobody could ever have received.
-        self.ask_for_consent(parent_email=CHILD_EMAIL)
+    def test_a_real_token_is_minted(self):
+        # A link with nothing behind it would be a link that resolves to a 404
+        # in the parent's hands. The hash and the deadline are stored exactly
+        # as they are for any other address.
+        _, token = self.ask_for_consent(parent_email=CHILD_EMAIL)
 
         event = GuardianConsentEvent.objects.get(child=self.child)
         self.assertEqual(event.event_type, "requested")
-        self.assertEqual(event.token_hash, "")
-        self.assertIsNone(event.token_expires_at)
+        self.assertEqual(event.token_hash, token_hash(token))
+        self.assertIsNotNone(event.token_expires_at)
 
     def test_case_does_not_hide_a_shared_contact(self):
-        # "SharedChild@Example.COM" is the same inbox. Missing that would mail
-        # the child a link to approve themselves — the exact hole this detects.
+        # "SharedChild@Example.COM" is the same inbox, and the label has to
+        # say so — otherwise the approval would be recorded as a stronger
+        # thing than it is.
         response, token = self.ask_for_consent(
             parent_email=CHILD_EMAIL.upper()
         )
 
-        self.assertEqual(response.data["data"]["mode"], "shared_contact")
-        self.assertIsNone(token)
+        self.assertEqual(response.data["data"]["mode"], "link_sent")
+        self.assertTrue(response.data["data"]["same_as_login_contact"])
+        self.assertIsNotNone(token)
 
     def test_a_different_address_is_not_shared(self):
         response, token = self.ask_for_consent(parent_email="mum@example.com")
 
         self.assertEqual(response.data["data"]["mode"], "link_sent")
+        self.assertFalse(response.data["data"]["same_as_login_contact"])
         self.assertIsNotNone(token)
+
+    def test_the_guardian_is_not_linked_to_the_childs_own_account(self):
+        # The address matches an existing account — the child's. Linking it
+        # would make the child their own guardian on paper, and the link is
+        # read as "a known adult stands behind this contact".
+        self.ask_for_consent(parent_email=CHILD_EMAIL)
+
+        guardian = Guardian.objects.get(email=CHILD_EMAIL)
+        self.assertIsNone(guardian.linked_user_id)
 
     def test_a_phone_login_is_detected_too(self):
         """
@@ -97,35 +117,28 @@ class DetectionTests(GuardianTestCase):
             child=child, parent_name=PARENT_NAME, parent_contact=CHILD_PHONE
         )
 
-        self.assertEqual(result["mode"], GuardianConsentMethod.SHARED_CONTACT)
+        self.assertTrue(result["same_as_login_contact"])
         self.assertEqual(result["delivery"], "none")
 
 
-class InlineApprovalTests(GuardianTestCase):
+class SameAddressApprovalTests(GuardianTestCase):
 
     def setUp(self):
         super().setUp()
         self.child = self.authenticate(
             make_minor(email=CHILD_EMAIL, username="sharedchild")
         )
-        self.ask_for_consent(parent_email=CHILD_EMAIL)
+        _, self.token = self.ask_for_consent(parent_email=CHILD_EMAIL)
 
-    def _approve(self, **overrides):
-        body = {"parent_name": PARENT_NAME, "confirm_18_plus": True}
-        body.update(overrides)
-        return self.client.post(
-            GUARDIAN_SHARED_APPROVE_URL, body, format="json"
-        )
-
-    def test_it_unlocks_the_child(self):
-        res = self._approve()
+    def test_the_link_unlocks_the_child(self):
+        res = self.approve_by_link(self.token)
 
         self.assertEqual(res.status_code, 200, res.data)
         self.assert_status(self.child, User.GuardianConsentStatus.APPROVED)
         self.assertEqual(self.client.get(FEED_URL).status_code, 200)
 
     def test_the_event_records_the_weak_method(self):
-        self._approve()
+        self.approve_by_link(self.token)
 
         event = GuardianConsentEvent.objects.get(
             child=self.child, event_type="approved"
@@ -134,45 +147,35 @@ class InlineApprovalTests(GuardianTestCase):
         self.assertEqual(event.level, GuardianConsentLevel.ACKNOWLEDGED)
         self.assertEqual(event.notice_version, "2026-10-01")
 
-    def test_the_parents_own_details_are_recorded_separately(self):
+    def test_the_parents_own_name_is_recorded_separately(self):
         # Guardian.name is what the CHILD said; parent_name_given is what the
         # person answering typed. The two disagreeing is a signal, so they are
         # never collapsed into one column.
-        self._approve(parent_name="Priya S Nair", parent_birthdate="1988-04-02")
+        self.approve_by_link(self.token, parent_name="Priya S Nair")
 
         event = GuardianConsentEvent.objects.get(
             child=self.child, event_type="approved"
         )
         self.assertEqual(event.parent_name_given, "Priya S Nair")
-        self.assertEqual(str(event.parent_birthdate_given), "1988-04-02")
         self.assertEqual(event.guardian.name, PARENT_NAME)
 
-    def test_confirm_18_plus_is_required(self):
-        for value in (None, False, "true", 1):
-            body = {"parent_name": PARENT_NAME}
-            if value is not None:
-                body["confirm_18_plus"] = value
+    def test_resend_works_for_a_same_address_request(self):
+        response, fresh_token = self.resend_consent()
 
-            res = self.client.post(
-                GUARDIAN_SHARED_APPROVE_URL, body, format="json"
-            )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data["data"]["same_as_login_contact"])
+        self.assertIsNotNone(fresh_token)
+        self.assertNotEqual(fresh_token, self.token)
 
-            self.assertEqual(res.status_code, 400, f"confirm={value!r}")
-            self.assert_status(self.child, User.GuardianConsentStatus.PENDING)
-
-    def test_approving_twice_writes_one_row(self):
-        self._approve()
-        self._approve()
-
-        self.assertEqual(
-            GuardianConsentEvent.objects.filter(
-                child=self.child, event_type="approved"
-            ).count(),
-            1,
+        # The fresh link works, and it is labelled the same honest way.
+        self.assertEqual(self.approve_by_link(fresh_token).status_code, 200)
+        event = GuardianConsentEvent.objects.get(
+            child=self.child, event_type="approved"
         )
+        self.assertEqual(event.method, GuardianConsentMethod.SHARED_CONTACT)
 
     def test_one_guardian_row_for_the_shared_contact(self):
-        self._approve()
+        self.approve_by_link(self.token)
 
         # The guardian created for a shared contact holds the child's own
         # address — which is exactly why the method is recorded as the weak one.
@@ -186,13 +189,12 @@ class InlineApprovalTests(GuardianTestCase):
         )
 
 
-class InlineApprovalIsRefusedWhenALinkWentOutTests(GuardianTestCase):
+class TheOnDeviceRouteIsGoneTests(GuardianTestCase):
     """
-    The bypass this guard exists to close.
-
-    Without it a child could name a parent's real address, let the link go out,
-    and then approve themselves from their own device — the parent's inbox
-    untouched, the row claiming an approval that never happened.
+    The bypass the old route opened: a child could name a parent's real
+    address, let the link go out, and then approve themselves from their own
+    device — or simply be anybody holding the phone. There is no endpoint for
+    it now, on any account state.
     """
 
     def setUp(self):
@@ -200,32 +202,32 @@ class InlineApprovalIsRefusedWhenALinkWentOutTests(GuardianTestCase):
         self.child = self.authenticate(
             make_minor(email=CHILD_EMAIL, username="sharedchild")
         )
-        _, self.token = self.ask_for_consent(parent_email="mum@example.com")
 
-    def test_inline_approval_is_refused(self):
-        res = self.client.post(
-            GUARDIAN_SHARED_APPROVE_URL,
+    def _post(self):
+        return self.client.post(
+            SHARED_APPROVE_URL,
             {"parent_name": PARENT_NAME, "confirm_18_plus": True},
             format="json",
         )
 
-        self.assertEqual(res.status_code, 400, res.data)
-        self.assertEqual(res.data["data"]["code"], "consent_link_sent")
-        self.assert_status(self.child, User.GuardianConsentStatus.PENDING)
-
-    def test_the_honest_route_is_still_open(self):
-        # Starting a NEW request with their own contact is how a child moves to
-        # the hand-the-phone flow, and it records itself as what it is.
+    def test_it_is_a_404_after_a_same_address_request(self):
         self.ask_for_consent(parent_email=CHILD_EMAIL)
 
-        res = self.client.post(
-            GUARDIAN_SHARED_APPROVE_URL,
-            {"parent_name": PARENT_NAME, "confirm_18_plus": True},
-            format="json",
-        )
+        self.assertEqual(self._post().status_code, 404)
+        self.assert_status(self.child, User.GuardianConsentStatus.PENDING)
 
-        self.assertEqual(res.status_code, 200, res.data)
-        event = GuardianConsentEvent.objects.get(
-            child=self.child, event_type="approved"
+    def test_it_is_a_404_after_a_link_went_to_a_parent(self):
+        self.ask_for_consent(parent_email="mum@example.com")
+
+        self.assertEqual(self._post().status_code, 404)
+        self.assert_status(self.child, User.GuardianConsentStatus.PENDING)
+
+    def test_it_writes_nothing(self):
+        self.ask_for_consent(parent_email=CHILD_EMAIL)
+        self._post()
+
+        self.assertFalse(
+            GuardianConsentEvent.objects
+            .filter(child=self.child, event_type="approved")
+            .exists()
         )
-        self.assertEqual(event.method, GuardianConsentMethod.SHARED_CONTACT)

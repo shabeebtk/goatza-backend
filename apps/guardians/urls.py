@@ -3,7 +3,6 @@ from django.urls import path
 from apps.guardians.views.consent_views import (
     GuardianDetailsAPIView,
     GuardianResendAPIView,
-    GuardianSharedApproveAPIView,
 )
 from apps.guardians.views.public_consent_views import (
     PublicConsentApproveAPIView,
@@ -16,8 +15,9 @@ from apps.guardians.views.public_consent_views import (
 #
 # TWO SURFACES, and they share nothing but a prefix.
 #
-# The first three are the CHILD's: authenticated as the account being unlocked,
-# outside the terms gate so a locked minor can still use them.
+# The first two are the CHILD's: authenticated as the account being unlocked,
+# outside the terms gate so a locked minor can still use them. Neither of them
+# approves anything — every approval comes in through the parent's link.
 #
 # Everything under consent/ is the PARENT's, and is ANONYMOUS — no session, no
 # account, the token in the URL is the whole identity. It is listed in
@@ -31,7 +31,6 @@ from apps.guardians.views.public_consent_views import (
 urlpatterns = [
     # ---- the child's side (authenticated) ----
     path('details', GuardianDetailsAPIView.as_view()),
-    path('shared/approve', GuardianSharedApproveAPIView.as_view()),
     path('resend', GuardianResendAPIView.as_view()),
 
     # ---- the parent's side (anonymous, token-addressed) ----

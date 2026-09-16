@@ -176,14 +176,16 @@ class PublicConsentApproveAPIView(PublicConsentBaseView):
     """
     POST /guardian/consent/<token>/approve
 
-    Body: ``parent_name`` (required), ``confirm_18_plus`` (strictly true),
-    ``parent_birthdate`` (optional).
+    Body: ``parent_name`` (required), ``confirm_18_plus`` (strictly true).
+    Nothing else is read — a ``parent_birthdate`` in the body is ignored and
+    the column stays NULL; the service keeps the keyword for a future verified
+    flow, and asking a parent for it today bought nothing but friction.
 
     Unlocks the child. ``confirm_18_plus`` is checked here rather than in the
-    service for the same reason the child-side view checks it: it is an
-    affordance on a screen, while what the service records is the approval
-    itself. Strictly True — a missing key, "", "false" and 0 are not a
-    confirmation, the same rule ``accepted_terms`` gets at signup.
+    service because it is an affordance on a screen — the checkbox the parent
+    is looking at — while what the service records is the approval itself.
+    Strictly True — a missing key, "", "false" and 0 are not a confirmation,
+    the same rule ``accepted_terms`` gets at signup.
     """
 
     throttle_classes = [PublicConsentWriteThrottle]
@@ -213,7 +215,6 @@ class PublicConsentApproveAPIView(PublicConsentBaseView):
             event = approve_by_token(
                 raw_token=token,
                 parent_name=parent_name,
-                parent_birthdate=request.data.get("parent_birthdate") or None,
                 request=request,
             )
         except GuardianConsentError as exc:

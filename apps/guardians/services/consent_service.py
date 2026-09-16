@@ -37,6 +37,17 @@ take permission back must outlive the seven-day window they were given to grant
 it, or "you can remove this later from the same link" — which is what the email
 promises them — would be a lie after a week.
 
+ONE ROUTE FOR EVERYONE: THE LINK. There is no hand-the-phone approval on the
+child's own device any more. That route let anybody holding the phone tick
+"I'm the parent", and it let a child who had already emailed a real parent
+switch to their own address and approve themselves. A child may still name
+the email they signed up with — some families genuinely share one — and the
+link is sent there like any other. What changes is the LABEL: an approval
+that came back through the child's own login contact is recorded as
+``shared_contact`` (see ``_approval_method``), the weakest of the three
+methods, so those rows stay countable and can be re-verified when the DPDP
+rules say what a verified parent looks like.
+
 WHAT THIS MODULE DOES NOT DO: throttling (the view layer, next session), SMS
 (there is no sender in this codebase yet — a phone-only guardian gets a
 recorded request and no delivery, see ``request_consent``), and expiring stale
@@ -114,11 +125,12 @@ NOT_REQUESTED_MESSAGE = (
     "No consent request has been started for this account yet."
 )
 
-# Said to a child who asks to approve on-device while their parent already has
-# a real link waiting in their own inbox. See record_shared_contact_approval.
-LINK_ALREADY_SENT_MESSAGE = (
-    "We've sent a permission link to your parent or guardian. They need to "
-    "approve it from their own email."
+# Said to a child who asks for the SAME request to be re-sent after the parent
+# on the other end said no. The way forward is a new request, not the old one
+# again — see ``resend``.
+CONSENT_DECLINED_MESSAGE = (
+    "Your parent or guardian didn't approve the last request. Ask them again "
+    "or ask someone else."
 )
 
 
@@ -195,37 +207,77 @@ def _clean_parent_name(parent_name):
     return name[:Guardian._meta.get_field("name").max_length]
 
 
-def _is_childs_own_contact(child, kind, value):
+def is_childs_own_contact(child, guardian) -> bool:
     """
-    Whether this contact is one the CHILD already signs in with.
+    Whether this guardian's contact is one the CHILD already signs in with.
 
-    The one check that decides which of the two flows runs, so it is
-    deliberately generous: an approval sent to an address the child controls
-    proves nothing about a parent, and the honest response is to say so
-    (``shared_contact``) rather than to email the child a link to approve
-    themselves.
+    Public, and the ONE place the question is answered — the service uses it
+    to label an approval, the selectors use it to tell the waiting screen
+    "that's the address you signed up with", and the view reports it as
+    ``same_as_login_contact``. Deliberately generous: an approval that came
+    back through an inbox the child can open proves nothing about a parent,
+    and every reader of this answer has to agree on that.
+
+    Compares against the guardian's STORED contact, which ``_normalize_contact``
+    has already stripped and (for email) lowercased; the child's own column is
+    normalized here because ``User.email`` is kept as the user typed it.
     """
-    if kind == "email":
-        return bool(child.email) and child.email.strip().lower() == value
+    if guardian.email:
+        return bool(child.email) and child.email.strip().lower() == guardian.email
 
-    return bool(child.phone) and child.phone.strip() == value
+    return bool(child.phone) and child.phone.strip() == guardian.phone
 
 
-def _matching_user(kind, value):
+def _is_adult_account(account) -> bool:
     """
-    The existing account this contact belongs to, or None.
+    Whether an account is old enough to be somebody's parent, by the birthdate
+    on its own profile.
+
+    False for every uncertainty: no profile row, no birthdate on it. Both the
+    ``goatza_account`` upgrade and the ``linked_user`` link are claims that a
+    KNOWN ADULT stands behind this contact, and "we have no idea how old they
+    are" does not support either. A flat 18 rather than the per-country table
+    — see ``GUARDIAN_ADULT_AGE``.
+    """
+    profile = getattr(account, "profile", None)
+    birthdate = getattr(profile, "birthdate", None)
+
+    if birthdate is None:
+        return False
+
+    return account_constants.age_on(birthdate) >= GUARDIAN_ADULT_AGE
+
+
+def _linkable_account(kind, value, child):
+    """
+    The existing account ``Guardian.linked_user`` may point at for this
+    contact, or None.
 
     Case-insensitive on email because ``User.email`` is stored as the user typed
     it, and the guardian's copy has been lowercased by ``_normalize_contact`` —
     an exact match would miss every account created with a capital letter.
+
+    ONLY AN ADULT ACCOUNT THAT IS NOT THE CHILD'S OWN. The link is read by
+    ``_approval_method`` as "a known adult account stands behind this
+    contact", so two matches must never be made: the child themselves (a
+    same-email request would otherwise mark the child as their own guardian)
+    and a minor sibling who happens to own the address the parent was named
+    at. An unknown birthdate does not link either — see ``_is_adult_account``.
     """
+    accounts = User.objects.select_related("profile")
+
     if kind == "email":
-        return User.objects.filter(email__iexact=value).first()
+        account = accounts.filter(email__iexact=value).first()
+    else:
+        account = accounts.filter(phone=value).first()
 
-    return User.objects.filter(phone=value).first()
+    if account is None or account.pk == child.pk:
+        return None
+
+    return account if _is_adult_account(account) else None
 
 
-def _find_or_create_guardian(kind, value, parent_name):
+def _find_or_create_guardian(kind, value, parent_name, *, child):
     """
     The guardian at this contact, creating one if this is the first child to
     name them.
@@ -239,8 +291,11 @@ def _find_or_create_guardian(kind, value, parent_name):
     An existing row KEEPS ITS NAME. The second child to name this parent may
     spell them differently ("Amma", "Mrs Nair"), and overwriting would rewrite
     what the first child's consent record says about who was asked.
-    ``linked_user`` is filled in if it is still empty, since that is a fact
-    about the contact rather than about either child's account.
+    ``linked_user`` is filled in if it is still empty and the contact belongs
+    to an account ``_linkable_account`` will vouch for — that is a fact about
+    the contact rather than about either child's account. Rows linked under
+    the older, looser rule are not rewritten; ``_approval_method`` stays
+    correct for them regardless.
     """
     lookup = {kind: value}
 
@@ -254,12 +309,12 @@ def _find_or_create_guardian(kind, value, parent_name):
             name=parent_name,
             email=value if kind == "email" else "",
             phone=value if kind == "phone" else "",
-            linked_user=_matching_user(kind, value),
+            linked_user=_linkable_account(kind, value, child),
         )
         return guardian
 
     if guardian.linked_user_id is None:
-        linked_user = _matching_user(kind, value)
+        linked_user = _linkable_account(kind, value, child)
 
         if linked_user is not None:
             guardian.linked_user = linked_user
@@ -375,23 +430,48 @@ def _linked_user_is_adult(guardian):
     Whether this guardian's matched Goatza account is old enough to be somebody's
     parent — the one thing that upgrades an approval to ``goatza_account``.
 
-    False for every uncertainty: no linked account, no profile row, no birthdate
-    on it. The upgrade is a claim that the approval came from a known adult
-    account, and "we have no idea how old they are" does not support that claim.
-    A flat 18 rather than the per-country table — see ``GUARDIAN_ADULT_AGE``.
+    False for every uncertainty, including no linked account at all — see
+    ``_is_adult_account`` for the rule and the reason.
     """
     linked_user = guardian.linked_user
 
     if linked_user is None:
         return False
 
-    profile = getattr(linked_user, "profile", None)
-    birthdate = getattr(profile, "birthdate", None)
+    return _is_adult_account(linked_user)
 
-    if birthdate is None:
-        return False
 
-    return account_constants.age_on(birthdate) >= GUARDIAN_ADULT_AGE
+def _approval_method(event):
+    """
+    HOW an approval on this link reached us — the ``method`` written on the
+    approved row, decided in ONE place so the three labels cannot drift.
+
+    In order, first match wins:
+
+      1. ``shared_contact`` — the guardian's contact is the child's own login
+         email or phone. The link went to an inbox the child can open, so the
+         approval proves that somebody with access to that inbox agreed, and
+         nothing beyond that. Checked FIRST, before the account link, because
+         a same-email row created under the old linking rule may still point
+         ``linked_user`` at the child, and nothing about that makes the
+         approval stronger.
+      2. ``goatza_account`` — the contact matched a separate account whose own
+         birthdate puts them at 18 or over. Explicitly never the child: an old
+         row linked to them must not be read as a known adult standing behind
+         the request.
+      3. ``separate_contact`` — a channel the child does not control, owned by
+         nobody we know anything about.
+    """
+    guardian = event.guardian
+    child = event.child
+
+    if is_childs_own_contact(child, guardian):
+        return GuardianConsentMethod.SHARED_CONTACT
+
+    if guardian.linked_user_id != child.pk and _linked_user_is_adult(guardian):
+        return GuardianConsentMethod.GOATZA_ACCOUNT
+
+    return GuardianConsentMethod.SEPARATE_CONTACT
 
 
 def _write_event(*, guardian, child, event_type, request=None, **fields):
@@ -461,61 +541,36 @@ def ensure_pending_for_minor(user) -> bool:
 
 def request_consent(*, child, parent_name, parent_contact, request=None):
     """
-    Ask a parent for permission, by whichever route the contact allows.
+    Ask a parent for permission: mint a link, record the request, send it.
 
-    Returns ``{"mode", "delivery", "guardian", "event"}``:
+    ONE ROUTE, WHATEVER THE CONTACT. A token is always minted, its hash and
+    expiry always stored on the ``requested`` row, and the link always sent —
+    including when the contact given is the child's own login email. That case
+    used to send nothing and hand the approval to the child's device; now it
+    is an ordinary link, and what marks it as the weaker thing it is happens at
+    the other end, where ``approve_by_token`` labels the approval
+    ``shared_contact`` (see the module docstring).
 
-      * ``mode="shared_contact"`` — the contact given IS the child's own login
-        email or phone. NOTHING IS SENT, because there is nothing to send it
-        to: a link mailed to the child's own inbox is a link the child can
-        click, and an approval collected that way is the child approving
-        themselves. The caller's next step is the hand-the-phone flow
-        (``record_shared_contact_approval``), which records exactly that and
-        labels it as the weak method it is.
+    Returns ``{"delivery", "guardian", "event", "same_as_login_contact"}``:
 
-      * ``mode="separate_contact"`` — a channel the child does not control. A
-        token is minted, its hash stored, and the link sent.
+      * ``delivery`` says what actually went out: ``"email"``, or ``"none"``
+        for a phone contact, because THIS CODEBASE HAS NO SMS SENDER. A
+        phone-only guardian still gets a Guardian row and a recorded request —
+        the evidence is correct — but nobody is reached, so the caller must
+        tell the child to give an email address instead. That is a gap to
+        close when a texting provider lands, not a silent failure to hide.
+      * ``same_as_login_contact`` — the contact IS the child's own. Reported
+        so the waiting screen can say "that's the address you signed up with"
+        instead of implying a second inbox exists.
 
-    ``delivery`` says what actually went out: ``"email"``, or ``"none"`` for a
-    phone contact, because THIS CODEBASE HAS NO SMS SENDER. A phone-only
-    guardian still gets a Guardian row and a recorded request — the evidence is
-    correct — but nobody is reached, so the caller must tell the child to give
-    an email address instead. That is a gap to close when a texting provider
-    lands, not a silent failure to hide.
-
-    A ``requested`` row is written in BOTH modes. It is what links this child to
-    this guardian (there is nothing else to look them up by), it is what makes
-    "we asked on the 3rd" true, and without it ``record_shared_contact_approval``
-    would have no guardian to approve as.
+    The ``requested`` row is what links this child to this guardian (there is
+    nothing else to look them up by) and what makes "we asked on the 3rd" true.
     """
     parent_name = _clean_parent_name(parent_name)
     kind, value = _normalize_contact(parent_contact)
 
-    shared = _is_childs_own_contact(child, kind, value)
-
     with transaction.atomic():
-        guardian = _find_or_create_guardian(kind, value, parent_name)
-
-        if shared:
-            event = _write_event(
-                guardian=guardian,
-                child=child,
-                event_type=GuardianConsentEventType.REQUESTED,
-                request=request,
-            )
-            _set_status(child, User.GuardianConsentStatus.PENDING)
-
-            logger.info(
-                f"request_consent | shared contact, nothing sent | "
-                f"child={child.pk} | guardian={guardian.pk}"
-            )
-
-            return {
-                "mode": GuardianConsentMethod.SHARED_CONTACT,
-                "delivery": "none",
-                "guardian": guardian,
-                "event": event,
-            }
+        guardian = _find_or_create_guardian(kind, value, parent_name, child=child)
 
         raw_token, hashed, expires_at = _mint_token()
 
@@ -531,16 +586,18 @@ def request_consent(*, child, parent_name, parent_contact, request=None):
 
         delivery = _deliver_request(guardian, child, raw_token, kind)
 
+    same_as_login_contact = is_childs_own_contact(child, guardian)
+
     logger.info(
         f"request_consent | child={child.pk} | guardian={guardian.pk} | "
-        f"delivery={delivery}"
+        f"delivery={delivery} | same_as_login_contact={same_as_login_contact}"
     )
 
     return {
-        "mode": GuardianConsentMethod.SEPARATE_CONTACT,
         "delivery": delivery,
         "guardian": guardian,
         "event": event,
+        "same_as_login_contact": same_as_login_contact,
     }
 
 
@@ -591,6 +648,13 @@ def resend(*, child, request=None):
     full window and, because ``_resolve_open_event`` only accepts the newest
     open request for a child, retires the old link at the same instant.
 
+    REFUSED AFTER A DECLINE. If the child's newest event is the parent saying
+    no, re-sending the same request would mail a person who has already
+    answered, to ask the same question — and the child would be resending
+    into a refusal rather than fixing anything. The way forward is a new
+    request through ``request_consent`` (the same parent again, or somebody
+    else), which is what the ``consent_declined`` code tells the client.
+
     Throttling is the view's job (next session). Nothing here rate-limits, so
     calling this in a loop will happily mail a parent in a loop.
     """
@@ -599,18 +663,14 @@ def resend(*, child, request=None):
     if previous is None:
         raise GuardianConsentError(NOT_REQUESTED_MESSAGE, "consent_not_requested")
 
+    if previous.event_type == GuardianConsentEventType.DECLINED:
+        raise GuardianConsentError(CONSENT_DECLINED_MESSAGE, "consent_declined")
+
     guardian = previous.guardian
 
     # Which channel to use is decided by the guardian row, not by whatever the
-    # last event happened to be: the parent's contact is what it is, and a
-    # shared-contact request has no link to resend in the first place.
+    # last event happened to be: the parent's contact is what it is.
     kind = "email" if guardian.email else "phone"
-    value = guardian.email or guardian.phone
-
-    if _is_childs_own_contact(child, kind, value):
-        raise GuardianConsentError(
-            INVALID_CONTACT_MESSAGE, "shared_contact_not_resendable"
-        )
 
     raw_token, hashed, expires_at = _mint_token()
 
@@ -633,10 +693,10 @@ def resend(*, child, request=None):
     )
 
     return {
-        "mode": GuardianConsentMethod.SEPARATE_CONTACT,
         "delivery": delivery,
         "guardian": guardian,
         "event": event,
+        "same_as_login_contact": is_childs_own_contact(child, guardian),
     }
 
 
@@ -644,91 +704,20 @@ def resend(*, child, request=None):
 # Answering
 # ---------------------------------------------------------------------
 
-def record_shared_contact_approval(
-    *, child, parent_name, parent_birthdate=None, request=None
-):
-    """
-    Record the hand-the-phone approval: the parent is standing next to the
-    child, on the child's device, because the only contact they have is the
-    child's own.
-
-    Written down as ``shared_contact`` / ``acknowledged``, which is the honest
-    label — nothing here proves a parent was present, and the value exists so
-    that these approvals stay countable and separable when the DPDP rules say
-    what is and is not enough. See ``GuardianConsentMethod``.
-
-    IDEMPOTENT. A double-tapped button or a retried request must not append a
-    second approval: if the child's newest event is already an approval, that
-    row comes back untouched, keeping its original timestamp. Same rule, and
-    the same reason, as ``legal.acceptance_service.record_acceptance``.
-
-    REFUSED WHEN THE GUARDIAN IS REACHABLE SEPARATELY, and that guard is the
-    reason this function checks anything at all. Without it a child could name
-    a parent's real email, let the link go out, and then call this endpoint to
-    approve themselves — the parent's inbox untouched, the row claiming an
-    approval that never happened. So the standing request has to be one that
-    genuinely had nowhere else to go: the guardian's contact must be the
-    child's own. A child who wants this route after asking for a link says so
-    the honest way, by starting a new request with their own contact.
-    """
-    newest = _newest_event_for_child(child)
-
-    if newest is None:
-        raise GuardianConsentError(NOT_REQUESTED_MESSAGE, "consent_not_requested")
-
-    if newest.event_type != GuardianConsentEventType.APPROVED:
-        guardian = newest.guardian
-        kind = "email" if guardian.email else "phone"
-
-        if not _is_childs_own_contact(child, kind, guardian.email or guardian.phone):
-            logger.warning(
-                f"record_shared_contact_approval | refused, guardian is "
-                f"reachable separately | child={child.pk} | "
-                f"guardian={guardian.pk}"
-            )
-            raise GuardianConsentError(
-                LINK_ALREADY_SENT_MESSAGE, "consent_link_sent"
-            )
-
-    if newest.event_type == GuardianConsentEventType.APPROVED:
-        logger.info(
-            f"record_shared_contact_approval | already approved | "
-            f"child={child.pk} | event={newest.pk}"
-        )
-        return newest
-
-    with transaction.atomic():
-        event = _write_event(
-            guardian=newest.guardian,
-            child=child,
-            event_type=GuardianConsentEventType.APPROVED,
-            request=request,
-            method=GuardianConsentMethod.SHARED_CONTACT,
-            level=GuardianConsentLevel.ACKNOWLEDGED,
-            parent_name_given=_given_name(parent_name),
-            parent_birthdate_given=parent_birthdate,
-        )
-        _set_status(child, User.GuardianConsentStatus.APPROVED)
-
-    logger.info(
-        f"record_shared_contact_approval | child={child.pk} | "
-        f"guardian={newest.guardian_id}"
-    )
-
-    return event
-
-
 def approve_by_token(*, raw_token, parent_name, parent_birthdate=None, request=None):
     """
-    A parent said yes on their own link.
+    A parent said yes on their link — the only way an approval is recorded.
 
-    ``separate_contact`` normally — the link travelled down a channel the child
-    does not control, which is the whole strength of this route. It is upgraded
-    to ``goatza_account`` when the guardian's contact matched an existing
-    account AND that account's own birthdate puts them at 18 or over: an
-    approval from a known adult account is a stronger record than one from an
-    address we know nothing about, and the two must stay distinguishable in the
+    ``method`` is decided by ``_approval_method``: ``separate_contact``
+    normally (the link travelled down a channel the child does not control,
+    which is the whole strength of this route), ``goatza_account`` when a
+    known adult account stands behind the contact, ``shared_contact`` when the
+    contact was the child's own. The three must stay distinguishable in the
     table rather than being averaged into one "approved".
+
+    ``parent_birthdate`` is kept as a keyword for a future verified flow and
+    NOTHING PASSES IT TODAY — the public approve view stopped reading it from
+    the body, so the column stays NULL on every row written here.
 
     The answer row carries the SAME ``token_hash`` as the request it answers.
     That is what makes the pair one exchange: the newest row for a hash is the
@@ -738,11 +727,7 @@ def approve_by_token(*, raw_token, parent_name, parent_birthdate=None, request=N
     event = _resolve_open_event(raw_token)
     child = event.child
 
-    method = (
-        GuardianConsentMethod.GOATZA_ACCOUNT
-        if _linked_user_is_adult(event.guardian)
-        else GuardianConsentMethod.SEPARATE_CONTACT
-    )
+    method = _approval_method(event)
 
     with transaction.atomic():
         approval = _write_event(
