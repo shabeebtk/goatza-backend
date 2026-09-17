@@ -631,6 +631,78 @@ else:
     }
 # ------ CACHE END ------/
 
+# ------ CELERY (background jobs) ------/
+# OPTIONAL, AND OFF BY DEFAULT. With CELERY_ENABLED unset the app never
+# contacts a broker: every task runs where it was called, exactly as before
+# Celery existed. Turn it on only where a worker actually runs, or jobs pile up
+# in Redis with nothing draining them. utils/background_jobs.py is the one
+# dispatch path and CLAUDE.md ("Background jobs") holds the conventions.
+CELERY_ENABLED = os.getenv("CELERY_ENABLED", "False") == "True"
+
+# Separate from REDIS_URL on purpose: the cache/channel-layer database is one
+# a test run can FLUSHDB (cache.clear()), and queued jobs must not live there.
+CELERY_BROKER_URL = (
+    os.getenv("CELERY_BROKER_URL") or _REDIS_URL or "redis://127.0.0.1:6379/0"
+)
+
+# Fire and forget: no result backend at all. Nothing waits on a job's return
+# value, and storing results would only spend Redis commands.
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TASK_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+
+# Crontab hours are read in this zone, so crontab(hour=2) means 2 AM India.
+# Django's TIME_ZONE stays UTC; this only affects schedules.
+CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE") or "Asia/Kolkata"
+CELERY_ENABLE_UTC = True
+
+# PUBLISH SIDE — the settings that keep a sick broker from freezing a request.
+# socket_connect_timeout is the load-bearing one; without it a blackholed Redis
+# blocks apply_async for minutes.
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "socket_connect_timeout": int(os.getenv("CELERY_BROKER_CONNECT_TIMEOUT") or 1),
+    "socket_timeout": 2,
+    "max_retries": 1,
+    "interval_start": 0,
+    "interval_step": 0.2,
+    "interval_max": 0.2,
+    # WORKER SIDE: the BRPOP timeout, i.e. how often an idle worker polls.
+    # 1s is ~2.6M Redis commands a month, which alone exceeds Upstash's free
+    # 500K. Raise it on Upstash; the cost is up to this many seconds of delay
+    # before a queued job is picked up.
+    "polling_interval": float(os.getenv("CELERY_BROKER_POLL_INTERVAL") or 1),
+    "visibility_timeout": 3600,
+}
+CELERY_TASK_PUBLISH_RETRY_POLICY = {
+    "max_retries": 1, "interval_start": 0, "interval_step": 0.2, "interval_max": 0.2,
+}
+
+# Safety net: if anyone ever calls task.delay() directly while Celery is off,
+# it runs locally instead of reaching for a broker that isn't there.
+CELERY_TASK_ALWAYS_EAGER = not CELERY_ENABLED
+CELERY_TASK_EAGER_PROPAGATES = False
+
+# Worker behaviour
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_TIME_LIMIT = 600
+CELERY_TASK_SOFT_TIME_LIMIT = 540
+CELERY_WORKER_MAX_TASKS_PER_CHILD = 200
+CELERY_WORKER_SEND_TASK_EVENTS = False
+# Celery would otherwise replace the LOGGING config below, taking the format
+# and the Sentry-on-ERROR behaviour with it.
+CELERY_WORKER_HIJACK_ROOT_LOGGER = False
+
+CELERY_BEAT_SCHEDULE = {}
+CELERY_BEAT_SCHEDULE_FILENAME = str(BASE_DIR / "celerybeat-schedule")
+
+# Seconds the dispatch helper stops trying the broker after a publish failure.
+CELERY_DISPATCH_FAILURE_COOLDOWN = int(
+    os.getenv("CELERY_DISPATCH_FAILURE_COOLDOWN") or 60
+)
+# ------ CELERY END ------/
+
 AUTH_COOKIE_DOMAIN = os.getenv("AUTH_COOKIE_DOMAIN")  # None = host-only
 
 # ------ WAITLIST (pre-launch player registration) ------/
