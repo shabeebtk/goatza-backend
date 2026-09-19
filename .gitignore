@@ -3,6 +3,7 @@ env
 *.pyc
 venv/
 *.log
+celerybeat-schedule
 celerybeat-schedule.*
 goatza-dev-firebase-adminsdk-fbsvc-272fa51808.json
 CLAUDE.md

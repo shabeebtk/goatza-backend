@@ -38,3 +38,10 @@ Free Redis
 https://upstash.com
 
 '''
+
+# The Celery app must be created whenever Django loads — not only when a
+# worker starts — so that shared_task and autodiscovery bind to THIS app in
+# the web process too. See core/celery.py.
+from core.celery import app as celery_app
+
+__all__ = ("celery_app",)
