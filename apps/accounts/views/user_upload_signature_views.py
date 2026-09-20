@@ -33,9 +33,10 @@ VIDEO_CONTENT_TYPES = {"video/mp4", "video/webm"}
 # derives one server-side; the client captures it while encoding the video.
 THUMB_MAX_BYTES = 1 * MB
 
-# Belt-and-braces ceiling on the request itself, independent of type: 10 images
-# + 10 thumbs is the largest legitimate batch (posts).
-MAX_FILES_PER_REQUEST = 20
+# Belt-and-braces ceiling on the request itself, independent of type. The
+# largest legitimate batch is a recruitment: 10 images + a video, each with its
+# own thumb, and recruitments are the one type that allows both at once.
+MAX_FILES_PER_REQUEST = 22
 
 POLICY = {
     # ---- single fixed-slot images (replace themselves on re-upload) ----
@@ -89,12 +90,19 @@ POLICY = {
         "image_thumbs": True,
     },
     # A recruitment post can carry a gallery AND a video (a pitch clip next to
-    # facility photos), so no `exclusive`.
+    # facility photos), so no `exclusive`. Image thumbs are allowed for the same
+    # reason posts allow them, and because the rest of the stack already
+    # depends on them: CreateRecruitmentModal uploads [image, thumb, …] pairs,
+    # RecruitmentService.validate_thumbnail checks each one against its
+    # parent's folder, and RecruitmentMedia.thumbnail_url is what the card and
+    # the list serializer render. With this False, every recruitment image
+    # upload was refused with "A thumbnail must accompany the file it belongs
+    # to" — the policy was the only part of the chain that said no.
     "recruitments": {
         "images": {"min": 0, "max": 10, "max_bytes": 5 * MB},
         "video": {"min": 0, "max": 1, "max_bytes": 80 * MB},
         "exclusive": False,
-        "image_thumbs": False,
+        "image_thumbs": True,
     },
 
     # ---- video-only ----
