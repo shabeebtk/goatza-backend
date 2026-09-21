@@ -159,8 +159,18 @@ class UpdateUserMediaSerializer(serializers.Serializer):
     cover_photo = serializers.URLField(required=False)
     cover_photo_public_id = serializers.CharField(required=False)
 
+    # Remove flags. A plain Serializer drops fields it does not declare, so
+    # without these the view never saw a delete and validate() rejected the
+    # request as empty.
+    is_delete_profile = serializers.BooleanField(required=False, default=False)
+    is_delete_cover = serializers.BooleanField(required=False, default=False)
+
     def validate(self, data):
-        if not data:
+        # The defaults always land in data; "nothing asked for" is no URL
+        # and no delete flag set.
+        if not any(data.get(k) for k in (
+            "profile_photo", "cover_photo", "is_delete_profile", "is_delete_cover"
+        )):
             raise serializers.ValidationError("No data provided")
 
         # Ensure pair consistency
