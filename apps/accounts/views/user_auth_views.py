@@ -31,7 +31,12 @@ from apps.legal.services.acceptance_service import record_acceptance
 from apps.usernames.services.username_service import UsernameService
 from utils.response import response_data
 from utils.validations import is_valid_email, is_valid_password
-from utils.otp_validation import generate_otp, verify_otp
+from utils.otp_validation import (
+    OTP_UNAVAILABLE_MESSAGE,
+    OTPStorageError,
+    generate_otp,
+    verify_otp,
+)
 from utils.transactional_emails import (
     send_signup_otp_email,
     send_login_otp_email,
@@ -213,6 +218,16 @@ class UserSignupAPIView(APIView):
                     }
                 )
 
+        except OTPStorageError:
+            # Raised INSIDE the atomic block, so the half-created account rolls
+            # back with it — which is what we want: an account whose code was
+            # never stored can never verify, and leaving the row behind would
+            # answer "User already exists" to every retry.
+            # Already logged at ERROR by generate_otp.
+            return response_data(
+                False, OTP_UNAVAILABLE_MESSAGE, status_code=503
+            )
+
         except IntegrityError:
             logger.warning(f"Duplicate signup attempt: {email}")
             return response_data(False, "User already exists", status_code=400)
@@ -370,7 +385,14 @@ class ResendSignupOTPAPIView(APIView):
             and not user.is_email_verified
             and not user.is_active
         ):
-            otp = generate_otp(email)
+            try:
+                otp = generate_otp(email)
+            except OTPStorageError:
+                # Says nothing about the address, exactly like the success
+                # path: only that the code could not be sent right now.
+                return response_data(
+                    False, OTP_UNAVAILABLE_MESSAGE, status_code=503
+                )
 
             # Fire-and-forget for the usual reason (see _send_email_safely):
             # the cooldown above is already written, so an exception escaping
@@ -439,7 +461,14 @@ class UserLoginAPIView(APIView):
         
         if not user.is_email_verified:
             # Generate OTP
-            otp = generate_otp(email)
+            try:
+                otp = generate_otp(email)
+            except OTPStorageError:
+                # The password was correct, so this is not an auth failure and
+                # must not read as one — 503, not 401.
+                return response_data(
+                    False, OTP_UNAVAILABLE_MESSAGE, status_code=503
+                )
 
             # Send email
             send_login_otp_email(
@@ -507,7 +536,14 @@ class ForgotPasswordAPIView(APIView):
             )
 
         # Generate OTP
-        otp = generate_otp(email)
+        try:
+            otp = generate_otp(email)
+        except OTPStorageError:
+            return response_data(
+                success=False,
+                message=OTP_UNAVAILABLE_MESSAGE,
+                status_code=503,
+            )
 
         # Send OTP via email
         send_password_reset_otp_email(

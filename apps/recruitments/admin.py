@@ -94,7 +94,7 @@ class RecruitmentAdmin(admin.ModelAdmin):
     readonly_fields = [
         "views_count",
         "applications_count",
-        "shortlisted_count",
+        "confirmed_count",
         "selected_count",
         "published_at",
         "created_at",
@@ -178,7 +178,7 @@ class RecruitmentAdmin(admin.ModelAdmin):
             "fields": (
                 "views_count",
                 "applications_count",
-                "shortlisted_count",
+                "confirmed_count",
                 "selected_count",
             )
         }),

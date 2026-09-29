@@ -1,4 +1,6 @@
 # recruitments/serializers/recruitment_list_serializers.py
+from datetime import time
+
 from rest_framework import serializers
 from apps.recruitments.models import (
     Recruitment, RecruitmentMedia, RecruitmentQuestion,
@@ -8,6 +10,10 @@ from apps.recruitments.models import (
 )
 from apps.organization.serializers.organization_serializers import OrganizationMiniSerializer
 from apps.sports.serializers.sports_serializers import SportSerializer, SportPositionSerializer
+from apps.recruitments.feedback_window import (
+    can_give_feedback,
+    prompt_window_open,
+)
 
 
 class RecruitmentPositionMiniSerializer(serializers.ModelSerializer):
@@ -91,7 +97,124 @@ class RecruitmentEligibilityCriteriaSerializer(serializers.ModelSerializer):
         ]
 
 
-class RecruitmentListSerializer(serializers.ModelSerializer):
+# =========================================================
+# TRIAL SESSIONS
+# =========================================================
+# Not a ModelSerializer: every venue field on a session is an OVERRIDE that
+# falls back to the recruitment's, so the payload has to be built with the
+# parent in hand. Doing it as a nested ModelSerializer would mean reaching
+# for ``session.recruitment`` once per row — a query per date on every card.
+
+def trial_session_payload(session, recruitment):
+    """
+    One date, with its venue resolved: the session's own value where it set
+    one, the recruitment's where it did not.
+    """
+    return {
+        "id": str(session.id),
+        "title": session.title,
+        "date": session.date,
+        "start_time": session.start_time,
+        "end_time": session.end_time,
+        "is_cancelled": session.is_cancelled,
+        "venue_name": session.venue_name or recruitment.venue_name,
+        "venue_link": session.venue_link or recruitment.venue_link,
+        "city": session.city or recruitment.city,
+        "latitude": (
+            session.latitude
+            if session.latitude is not None
+            else recruitment.latitude
+        ),
+        "longitude": (
+            session.longitude
+            if session.longitude is not None
+            else recruitment.longitude
+        ),
+    }
+
+
+def trial_sessions_payload(recruitment):
+    """
+    Every date on a recruitment: live ones first, each group in the model's
+    own ordering (date, start time, display order). Sorted in Python off the
+    prefetched rows, so this costs no query.
+    """
+    sessions = sorted(
+        recruitment.sessions.all(),
+        key=lambda session: (
+            session.is_cancelled,
+            session.date,
+            session.start_time or time(23, 59),
+            session.display_order,
+        ),
+    )
+    return [
+        trial_session_payload(session, recruitment)
+        for session in sessions
+    ]
+
+
+# The chosen date ON AN APPLICATION — the slice both sides need. Null unless
+# the trial is choose_one, because nothing else has a date to pick.
+def application_session_payload(application):
+    session = application.session
+    if session is None:
+        return None
+
+    resolved = trial_session_payload(session, application.recruitment)
+    return {
+        key: resolved[key]
+        for key in (
+            "id", "title", "date", "start_time",
+            "venue_name", "venue_link", "city",
+        )
+    }
+
+
+class TrialSessionsMixin(metaclass=serializers.SerializerMetaclass):
+    """
+    The three trial-window fields every recruitment payload carries, plus the
+    dates themselves.
+
+    ``event_date`` stays exactly where it already is on each payload — it is
+    still the first session and a lot of the client reads it. What is new is
+    that ``applications_close_at`` is NOT the same instant: on an "attend
+    every date" trial applications close on day one while the trial runs on.
+
+    THE METACLASS IS LOAD-BEARING. DRF collects declared fields off a base
+    class only when that base carries ``_declared_fields``, which only
+    ``SerializerMetaclass`` puts there. A plain mixin's fields are silently
+    dropped — and ``sessions`` does not then go missing, which would have been
+    caught in a minute: ModelSerializer sees the reverse relation and builds a
+    ``PrimaryKeyRelatedField(many=True)``, so every payload shipped a list of
+    bare session UUIDs where the client expected date objects.
+    """
+
+    sessions = serializers.SerializerMethodField()
+    session_mode = serializers.CharField(read_only=True)
+    trial_end_date = serializers.DateTimeField(read_only=True)
+    applications_close_at = serializers.DateTimeField(read_only=True)
+
+    auto_confirm = serializers.BooleanField(read_only=True)
+
+    SESSION_FIELDS = [
+        "sessions",
+        "session_mode",
+        "trial_end_date",
+        "applications_close_at",
+        # An open-trial-only setting, and a public one: a player deciding
+        # whether to apply wants to know a place is guaranteed rather than
+        # screened.
+        "auto_confirm",
+    ]
+
+    def get_sessions(self, obj):
+        return trial_sessions_payload(obj)
+
+
+class RecruitmentListSerializer(
+    TrialSessionsMixin, serializers.ModelSerializer
+):
     organization = OrganizationMiniSerializer(read_only=True)
     sport = SportSerializer(read_only=True)
     positions = RecruitmentPositionMiniSerializer(many=True, read_only=True)
@@ -144,7 +267,7 @@ class RecruitmentListSerializer(serializers.ModelSerializer):
             # The bookmark. Always present so the card never has to guess.
             "is_saved",
             "is_trial_over",
-        ]
+        ] + TrialSessionsMixin.SESSION_FIELDS
 
     def get_is_saved(self, obj):
         """
@@ -338,6 +461,15 @@ class RecruitmentQuestionSerializer(
 # PLAYER APPLICATION
 class MyApplicationSerializer(serializers.ModelSerializer):
     age_category = ApplicationAgeCategorySerializer(read_only=True)
+    # The date they picked, on a choose_one trial. Null everywhere else.
+    session = serializers.SerializerMethodField()
+    # THE SAME ANSWERS My applications returns, because a player who opens
+    # the trial they just attended is exactly who should be asked — and the
+    # rule for whether to ask has one home (feedback_window.py), not two.
+    # get_my_application attaches the recruitment it already has, so neither
+    # flag walks the FK back.
+    can_give_feedback = serializers.SerializerMethodField()
+    feedback_window_open = serializers.SerializerMethodField()
 
     class Meta:
         model = RecruitmentApplication
@@ -348,11 +480,30 @@ class MyApplicationSerializer(serializers.ModelSerializer):
             "applied_at",
             "updated_at",
             "age_category",
+            "session",
+            "attended_self_reported",
+            "outcome_self_reported",
+            "trial_rating",
+            "trial_feedback",
+            "feedback_at",
+            "can_give_feedback",
+            "feedback_window_open",
         ]
+
+    def get_session(self, obj):
+        return application_session_payload(obj)
+
+    def get_can_give_feedback(self, obj):
+        return can_give_feedback(obj, obj.recruitment)
+
+    def get_feedback_window_open(self, obj):
+        return prompt_window_open(obj.recruitment)
 
 
 # PUBLIC DETAIL SERIALIZER
-class RecruitmentDetailSerializer(serializers.ModelSerializer):
+class RecruitmentDetailSerializer(
+    TrialSessionsMixin, serializers.ModelSerializer
+):
     organization = OrganizationMiniSerializer(read_only=True)
     sport = SportSerializer(read_only=True)
     positions = RecruitmentPositionMiniSerializer(many=True, read_only=True)
@@ -432,7 +583,7 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
             "is_saved",
 
             "created_at",
-        ]
+        ] + TrialSessionsMixin.SESSION_FIELDS
 
     # BOOKMARK — annotated by SavedRecruitmentSelector.annotate_is_saved on
     # the detail selector's queryset; see RecruitmentListSerializer.get_is_saved.
@@ -448,10 +599,16 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
             return None
 
         application = obj.applications.select_related(
-            "age_category"
+            "age_category",
+            # The chosen date resolves its venue against the recruitment, so
+            # hand the serializer the one we already have rather than letting
+            # it walk the FK back.
+            "session",
         ).filter(
             applicant=actor.user
         ).first()
+        if application is not None:
+            application.recruitment = obj
 
         if not application:
             return None
@@ -486,6 +643,39 @@ class RecruitmentDetailSerializer(serializers.ModelSerializer):
         return not already_applied
 
 
+# VIEWER DETAIL SERIALIZER
+class RecruitmentViewerDetailSerializer(RecruitmentDetailSerializer):
+    """
+    The public detail plus one fact about the viewer: their OWN birth year, so
+    the apply modal can warn about a mismatched age group without a second
+    request.
+
+    Used by the authenticated detail endpoint for every caller except the
+    owning org. Never by /public/recruitments/<id>: that payload is anonymous
+    and cacheable, and a birth year does not belong in a response any layer
+    between us and the browser may keep.
+    """
+
+    viewer_birth_year = serializers.SerializerMethodField()
+
+    class Meta(RecruitmentDetailSerializer.Meta):
+        fields = RecruitmentDetailSerializer.Meta.fields + [
+            "viewer_birth_year",
+        ]
+
+    def get_viewer_birth_year(self, obj):
+        """None for an org actor, an anonymous caller, or no birthdate."""
+        request = self.context.get("request")
+        actor = getattr(request, "actor", None)
+
+        if not actor or not actor.is_user:
+            return None
+
+        profile = getattr(actor.user, "profile", None)
+        birthdate = getattr(profile, "birthdate", None)
+        return birthdate.year if birthdate else None
+
+
 # OWNER DETAIL SERIALIZER
 class RecruitmentOwnerDetailSerializer(
     RecruitmentDetailSerializer
@@ -500,6 +690,8 @@ class RecruitmentOwnerDetailSerializer(
     """
 
     saves_count = serializers.SerializerMethodField()
+    rating_average = serializers.SerializerMethodField()
+    rating_count = serializers.SerializerMethodField()
 
     class Meta(RecruitmentDetailSerializer.Meta):
 
@@ -508,7 +700,7 @@ class RecruitmentOwnerDetailSerializer(
 
             "max_applications",
 
-            "shortlisted_count",
+            "confirmed_count",
             "selected_count",
 
             "views_count",
@@ -517,9 +709,38 @@ class RecruitmentOwnerDetailSerializer(
             # so this says how many, never who.
             "saves_count",
 
+            # How the players rated the trial. An AGGREGATE, owner-only:
+            # an individual rating stays between the player and the org that
+            # ran the trial. Null average until somebody rates.
+            "rating_average",
+            "rating_count",
+
             "published_at",
             "updated_at",
         ]
+
+    def _rating_summary(self, obj):
+        # ONE aggregate per row, not two: the two fields below are two views
+        # of the same query. Keyed by row id rather than cached flat on the
+        # serializer, so this stays correct if it is ever used with
+        # many=True instead of on a single detail row.
+        cache = getattr(self, "_rating_cache", None)
+        if cache is None:
+            cache = self._rating_cache = {}
+
+        if obj.id not in cache:
+            from apps.recruitments.services.trial_feedback_service import (
+                TrialFeedbackService,
+            )
+            cache[obj.id] = TrialFeedbackService.rating_summary(obj)
+
+        return cache[obj.id]
+
+    def get_rating_average(self, obj):
+        return self._rating_summary(obj)[0]
+
+    def get_rating_count(self, obj):
+        return self._rating_summary(obj)[1]
 
     def get_saves_count(self, obj):
         # A COUNT on the one row we already fetched, not an annotation on the

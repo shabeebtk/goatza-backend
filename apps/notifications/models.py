@@ -16,6 +16,12 @@ class Notification(BaseUUIDModel):
         MENTION = "mention", "Mention"
         RECRUITMENT_APPLICATION = "recruitment_application", "Recruitment Application"
         RECRUITMENT_APPLICATION_STATUS = "recruitment_application_status", "Recruitment Application Status"
+        # An org speaking to the people on ONE recruitment. Written by the
+        # announcement outbox drain, never by a request.
+        RECRUITMENT_ANNOUNCEMENT = "recruitment_announcement", "Recruitment Announcement"
+        # The evening before. Written by send_trial_reminders, never by
+        # a request.
+        TRIAL_REMINDER = "trial_reminder", "Trial Reminder"
         MESSAGE = "message", "Message"
         CAREER_VERIFICATION_REQUEST = "career_verification_request", "Career Verification Request"
         CAREER_VERIFIED = "career_verified", "Career Verified"

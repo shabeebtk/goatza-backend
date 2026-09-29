@@ -1,12 +1,20 @@
 # recruitments/trial_window.py
 """
-THE definition of "this trial is over".
+THE definition of "this trial is over" — the WHOLE trial window, not the
+apply gate.
 
-A recruitment's ``event_date`` is the trial day. The frontend stores a
-date-only trial as 23:59 local time and a timed trial at its real time, so the
-rule is about the CALENDAR DAY, not the instant: a trial is over once that day
-has ended in ``settings.RECRUITMENT_TIMEZONE``. A 09:00 trial is still "today"
-at 20:00; it is over at 00:00 the next morning.
+A trial runs on one or more ``TrialSession`` dates. The last of them is
+cached on the recruitment as ``trial_end_date`` (23:59:59 of that day, written
+by ``RecruitmentService._sync_trial_window``), so the rule is about the
+CALENDAR DAY, not the instant: a trial is over once its last day has ended in
+``settings.RECRUITMENT_TIMEZONE``. A 09:00 session is still "today" at 20:00;
+the trial is over at 00:00 the morning after its final date. A three-weekend
+trial is NOT over after weekend one.
+
+This module deliberately does not answer "can somebody still apply". That is
+``Recruitment.applications_close_at``, and it usually says an EARLIER instant
+— on an "attend every date" trial applications close on the FIRST session,
+because a player cannot join a two-day trial on day two.
 
 Three spellings of one rule, all built on ``start_of_today``:
 
@@ -38,17 +46,23 @@ def start_of_today(now=None):
 
 def trial_not_over_q(now=None):
     """
-    Rows whose trial day has not ended: no event_date at all, or an event_date
-    on or after the start of today. A trial later today therefore stays in.
+    Rows whose trial window has not closed: no trial_end_date at all, or one
+    on or after the start of today. A trial whose last day is today therefore
+    stays in.
+
+    A null bound never excludes — which is why every row must be BACKFILLED
+    before this ships. A pre-backfill recruitment has a null trial_end_date
+    and would pass this filter forever, putting every ended trial back in the
+    player-facing lists. Run ``manage.py backfill_trial_sessions`` first.
     """
     return (
-        Q(event_date__isnull=True)
-        | Q(event_date__gte=start_of_today(now))
+        Q(trial_end_date__isnull=True)
+        | Q(trial_end_date__gte=start_of_today(now))
     )
 
 
-def is_trial_over(event_date, now=None):
-    """The same rule for one row. No event_date → never over."""
-    if event_date is None:
+def is_trial_over(trial_end_date, now=None):
+    """The same rule for one row. No trial_end_date → never over."""
+    if trial_end_date is None:
         return False
-    return event_date < start_of_today(now)
+    return trial_end_date < start_of_today(now)

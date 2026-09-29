@@ -15,7 +15,7 @@ from core.decorators.actor_required import org_required
 from apps.recruitments.selectors.recruitment_selectors import RecruitmentSelector
 from apps.recruitments.serializers.recruitment_list_serializers import (
     RecruitmentListSerializer, RecruitmentOwnerDetailSerializer,
-    RecruitmentDetailSerializer, RecruitmentDiscoverItemSerializer
+    RecruitmentViewerDetailSerializer, RecruitmentDiscoverItemSerializer
 )
 from apps.recruitments.services.discover_service import (
     RecruitmentDiscoverService, SECTION_ORDER
@@ -148,7 +148,16 @@ class UpdateRecruitmentAPIView(BaseAPIView):
                 success=True,
                 message="Recruitment updated successfully",
                 data={
-                    "recruitment_id": str(recruitment.id)
+                    "recruitment_id": str(recruitment.id),
+                    # What changed that applicants would want to hear about.
+                    # The client uses it to offer a pre-filled announcement —
+                    # editing a recruitment notifies nobody by itself, and
+                    # this is the nudge that stops a moved date going untold.
+                    # Empty when nothing schedule-related moved, and empty
+                    # when there is nobody to tell.
+                    "schedule_changed_fields": getattr(
+                        recruitment, "schedule_changed_fields", []
+                    ),
                 }
             )
 
@@ -484,12 +493,6 @@ class DiscoverRecruitmentsAPIView(BaseAPIView):
 
             RecruitmentDiscoverService.set_cached(cache_key, data)
 
-            # §8 — logged on cache MISS only; the cache window is the serve
-            # window. See record_impressions.
-            RecruitmentDiscoverService.record_impressions(
-                actor, payload.sections
-            )
-
             logger.info(
                 f"{TAG} | Success | "
                 + " ".join(
@@ -554,11 +557,13 @@ class RecruitmentDetailAPIView(BaseAPIView):
             # below succeeds whatever the cache or the database is doing.
             RecruitmentViewService.record_view(recruitment, actor, request)
 
-            # SERIALIZER
+            # SERIALIZER — the owner gets its numbers; everyone else gets the
+            # public fields plus their own birth year (viewer_birth_year),
+            # which the anonymous /public twin never carries.
             serializer_class = (
                 RecruitmentOwnerDetailSerializer
                 if is_owner
-                else RecruitmentDetailSerializer
+                else RecruitmentViewerDetailSerializer
             )
 
             serializer = serializer_class(

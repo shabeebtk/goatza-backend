@@ -13,15 +13,18 @@ from apps.organization.models import OrganizationMember
 RECRUITMENT_APPLICATION_PUSH_WINDOW = timedelta(minutes=10)
 
 # Copy for org-initiated application status changes, keyed by the new status.
-# `verb` attaches to the org name ("{Org} shortlisted your application"); `body`
-# attaches to "Your application for {title} …". Rejected copy stays gentle.
+# `verb` attaches to the org name ("{Org} selected you 🎉"); `body` attaches to
+# "Your application for {title} …". Negative copy stays gentle. `reviewing` and
+# `shortlisted` are silent (never notified), so they have no entry; `invited`
+# and `rejected` are no longer settable but stay for historical rows.
 # Shared with grouping_service so in-app + push text can't drift.
 RECRUITMENT_STATUS_COPY = {
-    "reviewing":   {"verb": "is reviewing your application", "body": "is now being reviewed"},
-    "shortlisted": {"verb": "shortlisted your application",  "body": "was shortlisted"},
-    "invited":     {"verb": "invited you to the trial",      "body": "has an invitation for you"},
-    "selected":    {"verb": "selected you 🎉",               "body": "— you've been selected 🎉"},
-    "rejected":    {"verb": "reviewed your application",      "body": "was not selected this time"},
+    "invited":         {"verb": "invited you to the trial",    "body": "has an invitation for you"},
+    "trial_confirmed": {"verb": "confirmed you for the trial", "body": "— you're confirmed for the trial"},
+    "not_shortlisted": {"verb": "reviewed your application",   "body": "wasn't called for this trial"},
+    "selected":        {"verb": "selected you 🎉",             "body": "— you've been selected 🎉"},
+    "not_selected":    {"verb": "reviewed your application",   "body": "wasn't selected this time"},
+    "rejected":        {"verb": "reviewed your application",   "body": "was not selected this time"},
 }
 RECRUITMENT_STATUS_COPY_DEFAULT = {"verb": "updated your application", "body": "was updated"}
 
@@ -87,6 +90,39 @@ ACHIEVEMENT_DECISION_COPY = {
 MODERATION_WARNING_BODY = (
     "Your content was found to violate Goatza's community guidelines."
 )
+
+
+def _reporting_line(application, session):
+    """"Sat 11 Oct · 9:00 am · Corporation Stadium" — the push's whole point.
+
+    Reporting TIME prefers the applicant's age group over the session's start:
+    a U15 group told to report at 8:00 for a 9:00 trial needs the 8:00. The
+    venue falls back to the recruitment's, the same resolution the API does.
+    """
+    from utils.transactional_emails import format_date
+
+    recruitment = application.recruitment
+    group = application.age_category
+
+    parts = [format_date(session.starts_at)]
+
+    reporting = getattr(group, "reporting_time", None) or session.start_time
+    if reporting:
+        hour = reporting.hour
+        suffix = "am" if hour < 12 else "pm"
+        display = 12 if hour % 12 == 0 else hour % 12
+        parts.append(f"{display}:{reporting.minute:02d} {suffix}")
+
+    venue = (
+        (session.venue_name or "").strip()
+        or (recruitment.venue_name or "").strip()
+        or (session.city or "").strip()
+        or (recruitment.city or "").strip()
+    )
+    if venue:
+        parts.append(venue)
+
+    return " · ".join(parts)
 
 
 def _resolve_actor_display(notification: "Notification"):
@@ -215,6 +251,28 @@ def build_notification_payload(notification: "Notification") -> dict:
         )
         title = f"{actor_name} {copy['verb']}"
         body = f"Your application for {recruitment_title} {copy['body']}"
+
+    elif notification.type == Notification.Type.RECRUITMENT_ANNOUNCEMENT:
+        # The org's own words are the push. An announcement that says "venue
+        # moved to Corporation Stadium" is worth opening; "You have a new
+        # announcement" is not, and the title is already capped at 120 chars.
+        title = notification.data.get("announcement_title", "") or (
+            f"An update from {actor_name}"
+        )
+        recruitment_title = getattr(
+            notification.recruitment, "title", "a recruitment"
+        )
+        body = f"{actor_name} · {recruitment_title}"
+
+    elif notification.type == Notification.Type.TRIAL_REMINDER:
+        recruitment_title = notification.data.get("recruitment_title", "")
+        reporting = notification.data.get("reporting_line", "")
+        title = f"Your trial is tomorrow — {recruitment_title}"
+        # The reporting time and venue ARE the reminder. A body that says
+        # "tap to view" wastes the one line that could have told them
+        # where to be.
+        body = reporting or f"{actor_name} · tap for your pass"
+
 
     elif notification.type == Notification.Type.CAREER_VERIFICATION_REQUEST:
         entry_title = notification.data.get("entry_title", "a career entry")
@@ -667,8 +725,90 @@ class NotificationService:
         _dispatch(notification)
 
     # ──────────────────────────────────────────
+    # RECRUITMENT ANNOUNCEMENT (org → the people on a posting)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def recruitment_announcement(
+        actor_org, recipient_user, recruitment, announcement, push=True
+    ):
+        """
+        Deliver one announcement to one recipient.
+
+        Called ONLY from the announcement outbox drain
+        (``manage.py dispatch_announcements``), never from a request: the
+        whole point of the outbox is that sending to 340 people does not
+        happen on a web dyno. See AnnouncementDelivery's docstring.
+
+        No dedup key. The outbox's unique constraint already guarantees one
+        delivery row per (announcement, application, channel), and a SENT row
+        is never re-sent — so idempotency lives there, where it can also
+        survive a crashed drain, rather than in a second mechanism here.
+
+        Ungrouped (no group_key): an announcement is a singular event with the
+        org's own words in it, and collapsing two of them into "2 updates"
+        would hide the one that says the venue moved.
+
+        ``push=False`` writes the in-app row and skips the push. The drain
+        passes it when the same announcement already reached this player as a
+        Goatza MESSAGE, which produced its own push: the player still wants
+        the update in their notifications list, but one thing the org said
+        should not buzz the phone twice.
+        """
+        notification = Notification.objects.create(
+            type=Notification.Type.RECRUITMENT_ANNOUNCEMENT,
+            recruitment=recruitment,
+            data={
+                "announcement_id": str(announcement.id),
+                "announcement_title": announcement.title,
+                "recruitment_id": str(recruitment.id),
+                "recruitment_title": recruitment.title,
+            },
+            **NotificationService._actor_kwargs(actor_org=actor_org),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        if push:
+            _dispatch(notification)
+
+    # ──────────────────────────────────────────
     # CAREER ADD PROMPT (org selection → player)
     # ──────────────────────────────────────────
+    # TRIAL REMINDER (the evening before)
+    @staticmethod
+    def trial_reminder(
+        actor_org, recipient_user, recruitment, application, session
+    ):
+        """
+        Tell a confirmed player their trial is tomorrow.
+
+        Called ONLY from ``manage.py send_trial_reminders``. Its idempotency
+        is that command's ``trial_reminder_sent_at`` stamp, NOT a dedup key
+        here: the stamp also has to survive the date MOVING, which clears it
+        so the new date earns a new reminder. A dedup key would block exactly
+        that.
+
+        Ungrouped: there is one of these per trial, and it is the one
+        notification the player must not miss.
+        """
+        notification = Notification.objects.create(
+            type=Notification.Type.TRIAL_REMINDER,
+            recruitment=recruitment,
+            data={
+                "application_id": str(application.id),
+                "recruitment_id": str(recruitment.id),
+                "recruitment_title": recruitment.title,
+                "session_id": str(session.id),
+                # Pre-rendered: the push is built from `data` alone and must
+                # not go back to the database for a venue.
+                "reporting_line": _reporting_line(application, session),
+            },
+            **NotificationService._actor_kwargs(actor_org=actor_org),
+            **NotificationService._recipient_kwargs(
+                recipient_user=recipient_user
+            ),
+        )
+        _dispatch(notification)
+
+
     @staticmethod
     def career_add_prompt(actor_org, recipient_user, recruitment, application_id):
         """

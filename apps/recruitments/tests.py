@@ -27,7 +27,6 @@ from apps.recruitments.models import (
     RecruitmentQuestion,
     RecruitmentAgeCategory,
     RecruitmentEligibilityCriteria,
-    RecruitmentDiscoverImpression,
     SavedRecruitment,
 )
 from apps.recruitments.selectors.recruitment_selectors import RecruitmentSelector
@@ -44,6 +43,11 @@ from apps.legal.testing import accept_current_terms
 
 SIGNATURE_URL = "/user/get/upload/signature"
 CREATE_URL = "/recruitments/create"
+
+# Every open_trial now needs at least one trial date, so the create/update
+# payload helpers below carry one. Far enough out that a "deadline in the
+# past" test still fails on the deadline and not on the date.
+FUTURE_SESSIONS = [{"date": "2030-06-15"}]
 
 # Deterministic media host so URL validation is env-independent.
 CLOUD = "democloud"
@@ -126,6 +130,7 @@ class RecruitmentMediaPipelineTests(APITestCase):
             "positions": [
                 {"position_id": str(self.position.id), "is_primary": True}
             ],
+            "sessions": FUTURE_SESSIONS,
             "media": media,
         }
 
@@ -361,6 +366,7 @@ class RecruitmentValidationTests(APITestCase):
             "recruitment_type": "open_trial",
             "sport_id": str(self.sport.id),
             "positions": [],
+            "sessions": FUTURE_SESSIONS,
         }
         payload.update(overrides)
         return payload
@@ -922,7 +928,7 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         with self.captureOnCommitCallbacks(execute=True):
             resp = self.client.post(
                 self._bulk_url(),
-                {"application_ids": [str(a1.id), str(a2.id)], "status": "shortlisted"},
+                {"application_ids": [str(a1.id), str(a2.id)], "status": "trial_confirmed"},
                 format="json", **self._org_headers(),
             )
 
@@ -931,12 +937,12 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         self.assertIn("status_counts", resp.data["data"])
 
         a1.refresh_from_db()
-        self.assertEqual(a1.status, "shortlisted")
+        self.assertEqual(a1.status, "trial_confirmed")
         self.assertEqual(a1.reviewed_by, self.member)
         self.assertIsNotNone(a1.reviewed_at)
         self.assertTrue(
             RecruitmentApplicationStatusHistory.objects.filter(
-                application=a1, to_status="shortlisted", changed_by=self.member,
+                application=a1, to_status="trial_confirmed", changed_by=self.member,
             ).exists()
         )
         # One status notification per updated applicant.
@@ -960,7 +966,7 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
             email="p3_l@example.com", password="pass1234", username="player3_l"
         )
         accept_current_terms(third)
-        a_nochange = self._make_app(third, "shortlisted")
+        a_nochange = self._make_app(third, "trial_confirmed")
         missing = str(uuid.uuid4())
 
         self.client.force_authenticate(user=self.owner)
@@ -972,7 +978,7 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
                         str(a_ok.id), str(a_withdrawn.id),
                         str(a_nochange.id), missing,
                     ],
-                    "status": "shortlisted",
+                    "status": "trial_confirmed",
                 },
                 format="json", **self._org_headers(),
             )
@@ -1041,11 +1047,11 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         with self.captureOnCommitCallbacks(execute=True):
             resp = self.client.post(
                 f"/recruitments/applications/{a.id}/status",
-                {"status": "reviewing"}, format="json", **self._org_headers(),
+                {"status": "trial_confirmed"}, format="json", **self._org_headers(),
             )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         a.refresh_from_db()
-        self.assertEqual(a.status, "reviewing")
+        self.assertEqual(a.status, "trial_confirmed")
         self.assertEqual(a.reviewed_by, self.member)
         self.assertEqual(
             Notification.objects.filter(
@@ -1054,14 +1060,29 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
             1,
         )
 
-    def test_single_status_invited_rejected(self):
-        # `invited` is reserved for the future personal-invite feature — the org
-        # status API must reject it as a target.
+    def test_single_status_accepts_and_maps_a_legacy_value(self):
+        # `invited` was retired by the v3 split, but an installed PWA keeps
+        # sending it for days after a deploy. The endpoint ACCEPTS it and
+        # translates — refusing would 400 and lose the org's decision.
+        #
+        # This is the HTTP-level proof: the serializer's ChoiceField has to
+        # let the old word through before the service can map it.
         a = self._make_app(self.player, "applied")
         self.client.force_authenticate(user=self.owner)
         resp = self.client.post(
             f"/recruitments/applications/{a.id}/status",
             {"status": "invited"}, format="json", **self._org_headers(),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data["data"]["status"], "trial_confirmed")
+
+        a.refresh_from_db()
+        self.assertEqual(a.status, "trial_confirmed")
+
+        # Junk is still junk — widening the accepted set did not open it up.
+        resp = self.client.post(
+            f"/recruitments/applications/{a.id}/status",
+            {"status": "nonsense"}, format="json", **self._org_headers(),
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
@@ -1104,7 +1125,7 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         with self.captureOnCommitCallbacks(execute=True):
             self.client.post(
                 f"/recruitments/applications/{a.id}/status",
-                {"status": "shortlisted"}, format="json", **self._org_headers(),
+                {"status": "trial_confirmed"}, format="json", **self._org_headers(),
             )
 
         notif = Notification.objects.get(
@@ -1112,13 +1133,13 @@ class RecruitmentApplicationLifecycleTests(APITestCase):
         )
         self.assertEqual(notif.recruitment_id, self.recruitment.id)
         self.assertEqual(str(notif.actor_org_id), str(self.org.id))
-        self.assertEqual(notif.data["to_status"], "shortlisted")
+        self.assertEqual(notif.data["to_status"], "trial_confirmed")
         self.assertEqual(notif.data["application_id"], str(a.id))
 
         payload = build_notification_payload(notif)
         self.assertEqual(payload["type"], "recruitment_application_status")
-        self.assertIn("shortlisted your application", payload["title"])
-        self.assertIn("was shortlisted", payload["body"])
+        self.assertIn("confirmed you for the trial", payload["title"])
+        self.assertIn("you're confirmed for the trial", payload["body"])
         self.assertEqual(payload["url"], f"/recruitments/{self.recruitment.id}")
         self.assertEqual(payload["recruitment_id"], str(self.recruitment.id))
 
@@ -1435,6 +1456,7 @@ class RecruitmentEligibilityTests(APITestCase):
             "recruitment_type": "open_trial",
             "sport_id": str(self.sport.id),
             "positions": [],
+            "sessions": FUTURE_SESSIONS,
         }
         payload.update(overrides)
         return payload
@@ -2618,7 +2640,7 @@ class RecruitmentDiscoverAPITests(APITestCase):
             ["positions", "birthdate", "location"],
         )
 
-    # ── cache + metrics ──────────────────────────────────────────
+    # ── cache ──────────────────────────────────────────────────
 
     def test_payload_is_cached_per_actor(self):
         self._recruitment(km=5)
@@ -2631,31 +2653,6 @@ class RecruitmentDiscoverAPITests(APITestCase):
 
         cache.clear()
         self.assertEqual(len(self._discover().data["data"]["recommended"]), 2)
-
-    def test_serving_discover_logs_an_impression_row(self):
-        recruitment = self._recruitment(km=5)
-
-        self._discover()
-
-        impression = RecruitmentDiscoverImpression.objects.get(
-            user=self.player, recruitment=recruitment
-        )
-        self.assertEqual(impression.section, "recommended")
-        self.assertGreater(impression.match_score, 0)
-        self.assertEqual(impression.served_count, 1)
-
-        # A second assembly counts a second serve on the same row, not a
-        # duplicate: the table's size tracks the corpus, not pageviews.
-        cache.clear()
-        self._discover()
-        impression.refresh_from_db()
-        self.assertEqual(impression.served_count, 2)
-        self.assertEqual(
-            RecruitmentDiscoverImpression.objects.filter(
-                user=self.player, recruitment=recruitment
-            ).count(),
-            1,
-        )
 
 
 class RecruitmentAllTabFilterTests(APITestCase):
@@ -3537,7 +3534,7 @@ class PublicRecruitmentDetailTests(APITestCase):
 
     OWNER_ONLY_FIELDS = (
         "views_count", "saves_count", "status", "max_applications",
-        "shortlisted_count", "selected_count", "published_at", "updated_at",
+        "confirmed_count", "selected_count", "published_at", "updated_at",
     )
 
     def test_anonymous_payload_has_no_owner_only_fields(self):
@@ -3784,7 +3781,7 @@ class RecruitmentViewCountTests(APITestCase):
 # TRIAL OVER — a trial vanishes from player-facing lists once its day ends
 # =====================================================================
 
-from datetime import datetime
+from datetime import datetime, time as _dt_time
 from zoneinfo import ZoneInfo
 
 from apps.organization.models import OrganizationProfile
@@ -3816,6 +3813,7 @@ class TrialOverTests(APITestCase):
 
     # Trial day: 15 Sep 2026 IST. The two clocks the tests care about.
     TRIAL_DAY = datetime(2026, 9, 15, tzinfo=IST)
+    MORNING = datetime(2026, 9, 15, 8, 0, tzinfo=IST)      # same day, 08:00
     EVENING = datetime(2026, 9, 15, 20, 0, tzinfo=IST)     # same day, 20:00
     NEXT_MORNING = datetime(2026, 9, 16, 0, 30, tzinfo=IST)  # after midnight
 
@@ -3870,7 +3868,41 @@ class TrialOverTests(APITestCase):
             published_at=self.TRIAL_DAY,
         )
         data.update(overrides)
-        return Recruitment.objects.create(**data)
+        recruitment = Recruitment.objects.create(**data)
+        self._give_it_a_session(recruitment)
+        return recruitment
+
+    def _give_it_a_session(self, recruitment):
+        """
+        A trial's dates now live in TrialSession, and event_date /
+        trial_end_date are DERIVED from them. Give every fixture the one
+        session its event_date stands for — exactly the shape
+        ``backfill_trial_sessions`` gives every pre-existing row, so these
+        tests keep asking the same question of the new model.
+        """
+        from apps.recruitments.models import TrialSession
+        from apps.recruitments.services.recruitment_service import (
+            RecruitmentService,
+        )
+
+        if (
+            recruitment.recruitment_type != Recruitment.Type.OPEN_TRIAL
+            or recruitment.event_date is None
+        ):
+            return
+
+        local = recruitment.event_date.astimezone(IST)
+        start_time = local.time()
+        TrialSession.objects.create(
+            recruitment=recruitment,
+            date=local.date(),
+            start_time=(
+                None
+                if start_time in (_dt_time(23, 59), _dt_time(0, 0))
+                else start_time
+            ),
+        )
+        RecruitmentService._sync_trial_window(recruitment)
 
     def _date_only_trial(self, **overrides):
         """What the frontend stores for a trial with no time: 23:59 local."""
@@ -4084,16 +4116,47 @@ class TrialOverTests(APITestCase):
         )
 
     def test_a_trial_later_today_still_accepts_applications(self):
-        trial = self._timed_trial()  # 09:00; it is 20:00 — the day is not over
+        """
+        The trial DAY is still the unit for "is it over" — but applications
+        close when the trial STARTS, not when its day ends. The two windows
+        are different questions (Recruitment.applications_close_at).
 
+        A date-only trial therefore takes applications all day, because 23:59
+        is its start; a 09:00 trial takes them until 09:00 and no longer —
+        nobody joins a trial that is already underway.
+        """
         self.client.force_authenticate(user=self.player)
+
+        date_only = self._date_only_trial()
         with self._at(self.EVENING), self.captureOnCommitCallbacks(execute=True):
-            resp = self.client.post(
-                f"/recruitments/{trial.id}/apply",
-                {"shared_name": "Player", "shared_phone": "+919876543210"},
-                format="json",
-            )
+            resp = self._apply(date_only)
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        # No captureOnCommitCallbacks here, unlike the apply above: the
+        # post-commit work (notification + email) is the same code either
+        # way, and each execution fires off a daemon email thread that
+        # outlives this test's transaction.
+        timed = self._timed_trial()  # 09:00
+        with self._at(self.MORNING):
+            resp = self._apply(timed)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        # 20:00 — the trial has been running for hours. The day is not over,
+        # so this is NOT "this trial has ended"; it is a closed window.
+        started = self._timed_trial(title="Already started")
+        with self._at(self.EVENING):
+            resp = self._apply(started)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertEqual(
+            resp.data["message"], "Applications for this trial have closed."
+        )
+
+    def _apply(self, trial):
+        return self.client.post(
+            f"/recruitments/{trial.id}/apply",
+            {"shared_name": "Player", "shared_phone": "+919876543210"},
+            format="json",
+        )
 
     def test_is_accepting_applications_turns_false_when_the_trial_is_over(self):
         # No deadline set: before this rule such a trial accepted applications
@@ -4175,3 +4238,2184 @@ class TrialOverTests(APITestCase):
             counts[label] = len(ctx)
 
         self.assertEqual(counts["live"], counts["over"])
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Application status split — open-trial date guards, silent statuses, the
+# confirmed / selected counters, age_mismatch_at_apply.
+# ═════════════════════════════════════════════════════════════════════
+
+from datetime import date
+
+from rest_framework.exceptions import ValidationError
+
+from apps.recruitments.services.application_service import ApplicationService
+
+
+class ApplicationStatusSplitTests(APITestCase):
+    """
+    Service-level: change_status / apply / withdraw are called directly, with
+    the clock pinned the same way TrialOverTests pins it.
+    """
+
+    # Sat 10 Oct 2026, noon IST.
+    NOW = datetime(2026, 10, 10, 12, 0, tzinfo=IST)
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            email="own_split@example.com", password="pass1234",
+            username="owner_split",
+        )
+        self.org = Organization.objects.create(
+            name="Tide FC", username="tidefc", type=Organization.Type.CLUB
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.org_actor = Actor(
+            actor_type="organization", organization=self.org,
+            organization_member=self.member,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.recruitment = Recruitment.objects.create(
+            organization=self.org, sport=self.sport, title="Open Trial",
+            status=Recruitment.Status.ACTIVE, recruitment_type="open_trial",
+            apply_method="goatza", visibility=Recruitment.Visibility.PUBLIC,
+        )
+        self._players = 0
+
+    # ── helpers ──────────────────────────────────────────────────
+
+    def _player(self, birthdate=None):
+        self._players += 1
+        user = User.objects.create_user(
+            email=f"split{self._players}@example.com", password="pass1234",
+            username=f"split_player{self._players}",
+        )
+        UserProfile.objects.create(
+            user=user, name=f"Player {self._players}", birthdate=birthdate
+        )
+        return user
+
+    def _app(self, status="applied"):
+        return RecruitmentApplication.objects.create(
+            recruitment=self.recruitment, applicant=self._player(),
+            shared_name="Name", shared_phone="+919876543210", status=status,
+        )
+
+    def _change(self, apps, to_status):
+        with patch("django.utils.timezone.now", return_value=self.NOW):
+            with self.captureOnCommitCallbacks(execute=True):
+                return ApplicationService.change_status(
+                    self.org_actor, self.recruitment,
+                    [str(app.id) for app in apps], to_status,
+                )
+
+    def _set_recruitment(self, **fields):
+        Recruitment.objects.filter(id=self.recruitment.id).update(**fields)
+        self.recruitment.refresh_from_db()
+
+    def _assert_counts(self, confirmed, selected):
+        self.recruitment.refresh_from_db()
+        self.assertEqual(
+            (self.recruitment.confirmed_count, self.recruitment.selected_count),
+            (confirmed, selected),
+        )
+
+    # ── open-trial results guard ─────────────────────────────────
+
+    def test_results_are_refused_before_the_trial_day(self):
+        # Mon 12 Oct, a date-only trial (stored 23:59 local).
+        self._set_recruitment(event_date=datetime(2026, 10, 12, 23, 59, tzinfo=IST))
+        app = self._app()
+
+        with self.assertRaises(ValidationError) as ctx:
+            self._change([app], "selected")
+
+        self.assertEqual(
+            str(ctx.exception.detail[0]),
+            "Results open on Mon 12 Oct. If that date is wrong, edit the trial.",
+        )
+        app.refresh_from_db()
+        self.assertEqual(app.status, "applied")
+
+    def test_results_open_on_the_trial_day_and_stay_open_after(self):
+        on_the_day, after = self._app(), self._app()
+
+        # Later today counts — the unit is the calendar day, not the instant.
+        self._set_recruitment(event_date=datetime(2026, 10, 10, 23, 59, tzinfo=IST))
+        result = self._change([on_the_day], "selected")
+        self.assertEqual(result["updated"], [str(on_the_day.id)])
+
+        self._set_recruitment(event_date=datetime(2026, 10, 8, 9, 0, tzinfo=IST))
+        result = self._change([after], "not_selected")
+        self.assertEqual(result["updated"], [str(after.id)])
+
+    def test_the_results_guard_is_for_open_trials_only(self):
+        self._set_recruitment(
+            recruitment_type="player_looking",
+            event_date=datetime(2026, 10, 12, 23, 59, tzinfo=IST),
+        )
+        app = self._app()
+
+        result = self._change([app], "selected")
+
+        self.assertEqual(result["updated"], [str(app.id)])
+
+    # ── silent statuses ──────────────────────────────────────────
+
+    @patch("apps.recruitments.services.application_service.send_application_status_email")
+    def test_reviewing_and_shortlisted_notify_nobody(self, mock_email):
+        app = self._app()
+
+        self._change([app], "reviewing")
+        self._change([app], "shortlisted")
+
+        # The change itself is recorded in full...
+        app.refresh_from_db()
+        self.assertEqual(app.status, "shortlisted")
+        self.assertEqual(app.reviewed_by, self.member)
+        self.assertEqual(
+            RecruitmentApplicationStatusHistory.objects.filter(
+                application=app
+            ).count(),
+            2,
+        )
+        # ...but no notification row (so no push either) and no email.
+        self.assertFalse(
+            Notification.objects.filter(recipient_user=app.applicant).exists()
+        )
+        mock_email.assert_not_called()
+
+    # ── counters ─────────────────────────────────────────────────
+
+    def test_counters_follow_a_bulk_move_into_and_out_of_trial_confirmed(self):
+        a1, a2, a3 = self._app(), self._app(), self._app()
+
+        self._change([a1, a2, a3], "trial_confirmed")
+        self._assert_counts(confirmed=3, selected=0)
+
+        self._change([a1, a2], "selected")
+        self._assert_counts(confirmed=1, selected=2)
+
+        # a3 is already confirmed (no_change) and must not count twice.
+        result = self._change([a1, a3], "trial_confirmed")
+        self.assertEqual(result["updated"], [str(a1.id)])
+        self._assert_counts(confirmed=2, selected=1)
+
+        # A confirmed player withdrawing gives their count back.
+        ApplicationService.withdraw(
+            Actor(actor_type="user", user=a3.applicant), a3.id
+        )
+        self._assert_counts(confirmed=1, selected=1)
+
+    # ── age_mismatch_at_apply ────────────────────────────────────
+
+    def test_age_mismatch_is_recorded_and_an_unknown_age_is_not_one(self):
+        u17 = RecruitmentAgeCategory.objects.create(
+            recruitment=self.recruitment, title="U17",
+            min_birth_year=2009, max_birth_year=2010,
+        )
+        cases = (
+            (self._player(birthdate=date(2004, 5, 1)), True),
+            (self._player(birthdate=None), False),
+        )
+
+        for player, expected in cases:
+            with self.subTest(expected=expected):
+                application = ApplicationService.apply(
+                    Actor(actor_type="user", user=player),
+                    self.recruitment.id,
+                    {
+                        "shared_name": "Name",
+                        "shared_phone": "+919876543210",
+                        "age_category": u17.id,
+                    },
+                )
+                application.refresh_from_db()
+                self.assertIs(application.age_mismatch_at_apply, expected)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# migrate_recruitment_v3 — the one-off data migration onto the v3 statuses.
+# ═════════════════════════════════════════════════════════════════════
+
+from io import StringIO
+
+from django.core.management import call_command
+
+from apps.recruitments.models import RecruitmentBenefit
+
+
+class MigrateRecruitmentV3Tests(APITestCase):
+    """
+    selected/rejected are judged by WHEN the org set them (the newest history
+    row into the current status) against the trial day — never against today.
+    """
+
+    # A date-only trial: stored at 23:59 local on Tue 15 Sep 2026.
+    TRIAL = datetime(2026, 9, 15, 23, 59, tzinfo=IST)
+    BEFORE = datetime(2026, 9, 10, 12, 0, tzinfo=IST)
+    AFTER = datetime(2026, 9, 16, 12, 0, tzinfo=IST)
+
+    def setUp(self):
+        owner = User.objects.create_user(
+            email="own_v3@example.com", password="pass1234", username="owner_v3"
+        )
+        self.org = Organization.objects.create(
+            name="Harbour FC", username="harbourfc", type=Organization.Type.CLUB
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.trial = self._recruitment("open_trial", event_date=self.TRIAL)
+        self._players = 0
+
+    # ── helpers ──────────────────────────────────────────────────
+
+    def _recruitment(self, recruitment_type, event_date=None):
+        return Recruitment.objects.create(
+            organization=self.org, sport=self.sport, title="Trial",
+            status=Recruitment.Status.ACTIVE, recruitment_type=recruitment_type,
+            apply_method="goatza", visibility=Recruitment.Visibility.PUBLIC,
+            event_date=event_date,
+        )
+
+    def _app(self, recruitment, status):
+        self._players += 1
+        player = User.objects.create_user(
+            email=f"v3_{self._players}@example.com", password="pass1234",
+            username=f"v3_player{self._players}",
+        )
+        return RecruitmentApplication.objects.create(
+            recruitment=recruitment, applicant=player,
+            shared_name="Name", shared_phone="+919876543210", status=status,
+        )
+
+    def _selected(self, recruitment, set_at):
+        """An application the org moved to `selected` at ``set_at``."""
+        app = self._app(recruitment, "selected")
+        history = RecruitmentApplicationStatusHistory.objects.create(
+            application=app, from_status="applied", to_status="selected",
+            changed_by=self.member,
+        )
+        # created_at is auto_now_add — backdate it the only way there is.
+        RecruitmentApplicationStatusHistory.objects.filter(
+            id=history.id
+        ).update(created_at=set_at)
+        return app
+
+    def _run(self, **options):
+        out = StringIO()
+        call_command("migrate_recruitment_v3", stdout=out, **options)
+        return out.getvalue()
+
+    def _status(self, app):
+        app.refresh_from_db()
+        return app.status
+
+    def _snapshot(self):
+        """Everything the command can write, in a comparable shape."""
+        return (
+            sorted(RecruitmentApplication.objects.values_list(
+                "id", "status", "age_mismatch_at_apply"
+            )),
+            sorted(RecruitmentApplicationStatusHistory.objects.values_list(
+                "id", "to_status"
+            )),
+            sorted(Recruitment.objects.values_list(
+                "id", "recruitment_type", "confirmed_count", "selected_count"
+            )),
+            sorted(RecruitmentBenefit.objects.values_list("id", "title")),
+        )
+
+    def _mixed_fixture(self):
+        """One of each thing the command rewrites."""
+        self._selected(self.trial, self.BEFORE)
+        self._app(self.trial, "invited")
+        self._app(self.trial, "rejected")
+        self._recruitment("scholarship")
+
+    # ── tests ────────────────────────────────────────────────────
+
+    def test_selected_before_the_trial_day_becomes_trial_confirmed(self):
+        app = self._selected(self.trial, self.BEFORE)
+
+        self._run()
+
+        self.assertEqual(self._status(app), "trial_confirmed")
+        self.assertTrue(
+            RecruitmentApplicationStatusHistory.objects.filter(
+                application=app, from_status="selected",
+                to_status="trial_confirmed", changed_by=None,
+                note="status split migration",
+            ).exists()
+        )
+        self.trial.refresh_from_db()
+        self.assertEqual(
+            (self.trial.confirmed_count, self.trial.selected_count), (1, 0)
+        )
+
+    def test_selected_after_the_trial_day_stays_selected(self):
+        app = self._selected(self.trial, self.AFTER)
+
+        self._run()
+
+        self.assertEqual(self._status(app), "selected")
+        self.trial.refresh_from_db()
+        self.assertEqual(
+            (self.trial.confirmed_count, self.trial.selected_count), (0, 1)
+        )
+
+    def test_player_looking_keeps_selected_whatever_the_dates(self):
+        looking = self._recruitment("player_looking", event_date=self.TRIAL)
+        app = self._selected(looking, self.BEFORE)
+
+        self._run()
+
+        self.assertEqual(self._status(app), "selected")
+
+    def test_a_second_run_changes_nothing(self):
+        self._mixed_fixture()
+        before = self._snapshot()
+
+        self._run()
+        after_first = self._snapshot()
+        self.assertNotEqual(after_first, before)
+
+        self._run()
+
+        self.assertEqual(self._snapshot(), after_first)
+
+    def test_dry_run_writes_nothing(self):
+        self._mixed_fixture()
+        before = self._snapshot()
+
+        report = self._run(dry_run=True)
+
+        self.assertEqual(self._snapshot(), before)
+        # ...while still reporting what a real run would do.
+        self.assertRegex(
+            report, r"selected -> trial_confirmed \(set pre-trial\)\s*: 1"
+        )
+
+
+# =====================================================================
+# TRIAL SESSIONS - the two windows
+# =====================================================================
+
+from datetime import date, time as dt_time
+
+from rest_framework.exceptions import ValidationError as DRFValidationError
+
+from apps.recruitments import trial_window
+from apps.recruitments.models import TrialSession
+from apps.recruitments.services.application_service import ApplicationService
+from apps.recruitments.services.recruitment_service import RecruitmentService
+
+
+class TrialSessionWindowTests(APITestCase):
+    """
+    A trial has DATES, and "is this over?" is two questions with two answers:
+
+      is the TRIAL over          trial_end_date — the LAST date's day ending
+      are APPLICATIONS open      applications_close_at — the FIRST date in
+                                 `all` mode, the last in `choose_one`
+
+    v2 of the spec collapsed them into one, which let somebody apply at 9am
+    on the Sunday of a Sat-Sun trial and be auto-confirmed for a trial that
+    was half over.
+
+    Every clock here is pinned; the trial dates are IST calendar days.
+    """
+
+    # A two-day weekend trial: 12-13 Sep 2026 (Sat-Sun), IST.
+    DAY_ONE = date(2026, 9, 12)
+    DAY_TWO = date(2026, 9, 13)
+
+    BEFORE = datetime(2026, 9, 10, 10, 0, tzinfo=IST)       # both days ahead
+    DAY_TWO_MORNING = datetime(2026, 9, 13, 9, 0, tzinfo=IST)
+    AFTER = datetime(2026, 9, 14, 0, 30, tzinfo=IST)        # both days done
+
+    def setUp(self):
+        self.owner = self._user("session_owner", "Owner")
+        self.player = self._user("session_player", "Player")
+
+        self.org = Organization.objects.create(
+            name="Session FC", username="sessionfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(
+            name="Cricket", icon_name="mdi:cricket"
+        )
+
+    # -- factories ------------------------------------------------
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _trial(self, **overrides):
+        data = dict(
+            organization=self.org, sport=self.sport,
+            title="Weekend Trials", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _session(self, recruitment, day, **overrides):
+        return TrialSession.objects.create(
+            recruitment=recruitment, date=day, **overrides
+        )
+
+    def _sync(self, recruitment):
+        RecruitmentService._sync_trial_window(recruitment)
+        recruitment.refresh_from_db()
+        return recruitment
+
+    def _at(self, now):
+        return patch("django.utils.timezone.now", return_value=now)
+
+    # -- 1. the window is derived from the dates ------------------
+
+    def test_window_is_derived_from_first_and_last_session(self):
+        trial = self._trial()
+        self._session(trial, self.DAY_TWO, start_time=dt_time(14, 0))
+        self._session(trial, self.DAY_ONE, start_time=dt_time(9, 0))
+
+        self._sync(trial)
+
+        # event_date is day ONE at its own start time...
+        self.assertEqual(
+            trial.event_date.astimezone(IST),
+            datetime(2026, 9, 12, 9, 0, tzinfo=IST),
+        )
+        # ...and the window closes at the end of day TWO, whatever time that
+        # session started.
+        self.assertEqual(
+            trial.trial_end_date.astimezone(IST),
+            datetime(2026, 9, 13, 23, 59, 59, tzinfo=IST),
+        )
+
+    # -- 2. a cancelled date drops out of the window --------------
+
+    def test_cancelling_the_first_session_moves_event_date_on(self):
+        trial = self._trial()
+        day_one = self._session(trial, self.DAY_ONE, start_time=dt_time(9, 0))
+        self._session(trial, self.DAY_TWO, start_time=dt_time(14, 0))
+        self._sync(trial)
+
+        day_one.is_cancelled = True
+        day_one.save(update_fields=["is_cancelled"])
+        self._sync(trial)
+
+        self.assertEqual(
+            trial.event_date.astimezone(IST),
+            datetime(2026, 9, 13, 14, 0, tzinfo=IST),
+        )
+
+        # Cancel the rest and BOTH columns go back to null — there is no
+        # trial left to have a window.
+        trial.sessions.update(is_cancelled=True)
+        self._sync(trial)
+
+        self.assertIsNone(trial.event_date)
+        self.assertIsNone(trial.trial_end_date)
+
+    # -- 3. `all` closes on day one -------------------------------
+
+    def test_all_mode_closes_applications_on_the_first_date(self):
+        trial = self._trial(session_mode=Recruitment.SessionMode.ALL)
+        self._session(trial, self.DAY_ONE, start_time=dt_time(9, 0))
+        self._session(trial, self.DAY_TWO, start_time=dt_time(9, 0))
+        self._sync(trial)
+
+        self.assertEqual(trial.applications_close_at, trial.event_date)
+
+        # Sunday morning: the trial is still running, but nobody new may join
+        # a two-day trial on day two.
+        with self._at(self.DAY_TWO_MORNING):
+            self.assertFalse(trial.is_accepting_applications)
+            self.assertFalse(trial.is_trial_over)
+
+            with self.assertRaises(DRFValidationError) as caught:
+                ApplicationService.apply(
+                    Actor(actor_type="user", user=self.player),
+                    trial.id,
+                    {"shared_name": "P", "shared_phone": "9999999999"},
+                )
+
+        self.assertIn(
+            "Applications for this trial have closed.",
+            str(caught.exception.detail),
+        )
+
+    # -- 4. choose_one stays open to the last date ----------------
+
+    def test_choose_one_stays_open_until_the_last_date(self):
+        trial = self._trial(
+            session_mode=Recruitment.SessionMode.CHOOSE_ONE
+        )
+        self._session(trial, self.DAY_ONE, start_time=dt_time(9, 0))
+        day_two = self._session(
+            trial, self.DAY_TWO, start_time=dt_time(9, 0)
+        )
+        self._sync(trial)
+
+        self.assertEqual(trial.applications_close_at, trial.trial_end_date)
+
+        # Same Sunday morning — still open, because each city is its own round.
+        with self._at(self.DAY_TWO_MORNING):
+            self.assertTrue(trial.is_accepting_applications)
+
+            application = ApplicationService.apply(
+                Actor(actor_type="user", user=self.player),
+                trial.id,
+                {
+                    "shared_name": "P",
+                    "shared_phone": "9999999999",
+                    "session": day_two.id,
+                },
+            )
+
+        self.assertEqual(application.session_id, day_two.id)
+
+        with self._at(self.AFTER):
+            self.assertFalse(trial.is_accepting_applications)
+
+    # -- 5. over means the WHOLE window is over -------------------
+
+    def test_is_trial_over_reads_the_last_weekend_not_the_first(self):
+        trial = self._trial()
+        for week in range(3):
+            self._session(trial, self.DAY_ONE + timedelta(days=7 * week))
+        self._sync(trial)
+
+        # Weekend one has been and gone; two more to run.
+        with self._at(datetime(2026, 9, 14, 10, 0, tzinfo=IST)):
+            self.assertFalse(trial.is_trial_over)
+            self.assertIn(
+                trial.id,
+                Recruitment.objects.filter(
+                    trial_window.trial_not_over_q()
+                ).values_list("id", flat=True),
+            )
+
+        # The morning after the third.
+        with self._at(datetime(2026, 9, 27, 0, 30, tzinfo=IST)):
+            self.assertTrue(trial.is_trial_over)
+            self.assertNotIn(
+                trial.id,
+                Recruitment.objects.filter(
+                    trial_window.trial_not_over_q()
+                ).values_list("id", flat=True),
+            )
+
+    # -- 6. editing dates keeps the applicants' choice ------------
+
+    def test_editing_sessions_keeps_an_applicants_chosen_date(self):
+        trial = self._trial(
+            session_mode=Recruitment.SessionMode.CHOOSE_ONE
+        )
+        kochi = self._session(
+            trial, self.DAY_ONE, title="Kochi", start_time=dt_time(9, 0)
+        )
+        calicut = self._session(trial, self.DAY_TWO, title="Calicut")
+        self._sync(trial)
+
+        application = RecruitmentApplication.objects.create(
+            recruitment=trial, applicant=self.player,
+            shared_name="P", shared_phone="9999999999",
+            session=kochi,
+        )
+
+        # The org fixes a typo in one title and adds a third city. Every row
+        # it still wants comes back carrying its id.
+        RecruitmentService._sync_trial_sessions(trial, [
+            {
+                "id": kochi.id, "title": "Kochi round",
+                "date": self.DAY_ONE, "start_time": dt_time(9, 0),
+                "display_order": 0,
+            },
+            {
+                "id": calicut.id, "title": "Calicut",
+                "date": self.DAY_TWO, "display_order": 1,
+            },
+            {"title": "Kannur", "date": date(2026, 9, 20), "display_order": 2},
+        ])
+        self._sync(trial)
+
+        application.refresh_from_db()
+        kochi.refresh_from_db()
+
+        self.assertEqual(application.session_id, kochi.id)
+        self.assertEqual(kochi.title, "Kochi round")
+        self.assertEqual(trial.sessions.count(), 3)
+        self.assertEqual(
+            trial.trial_end_date.astimezone(IST).date(), date(2026, 9, 20)
+        )
+
+    # -- 7. a date from another trial is not adopted --------------
+
+    def test_choose_one_rejects_a_session_from_another_recruitment(self):
+        trial = self._trial(
+            session_mode=Recruitment.SessionMode.CHOOSE_ONE
+        )
+        self._session(trial, self.DAY_ONE, start_time=dt_time(9, 0))
+        self._session(trial, self.DAY_TWO, start_time=dt_time(9, 0))
+        self._sync(trial)
+
+        other = self._trial(title="Someone else's trial")
+        stolen = self._session(other, self.DAY_ONE)
+        self._sync(other)
+
+        actor = Actor(actor_type="user", user=self.player)
+        payload = {"shared_name": "P", "shared_phone": "9999999999"}
+
+        with self._at(self.BEFORE):
+            # An id this trial does not own is REJECTED, never adopted...
+            with self.assertRaises(DRFValidationError) as caught:
+                ApplicationService.apply(
+                    actor, trial.id, {**payload, "session": stolen.id}
+                )
+            self.assertIn(
+                "Invalid date for this recruitment.",
+                str(caught.exception.detail),
+            )
+
+            # ...and on a choose_one trial a date is not optional either.
+            with self.assertRaises(DRFValidationError) as caught:
+                ApplicationService.apply(actor, trial.id, payload)
+
+        self.assertIn(
+            "Pick which date you'll attend.", str(caught.exception.detail)
+        )
+        self.assertFalse(
+            RecruitmentApplication.objects.filter(recruitment=trial).exists()
+        )
+
+
+# =====================================================================
+# TRIAL SESSIONS - the payload shape every client reads
+# =====================================================================
+
+from rest_framework import serializers
+
+from apps.recruitments.serializers.recruitment_list_serializers import (
+    RecruitmentDetailSerializer,
+    RecruitmentListSerializer,
+    RecruitmentOwnerDetailSerializer,
+    TrialSessionsMixin,
+)
+
+
+class TrialSessionsPayloadShapeTests(APITestCase):
+    """
+    `sessions` is a LIST OF DATES, not a list of ids.
+
+    TrialSessionsMixin declares it as a SerializerMethodField, but DRF only
+    collects declared fields off a base that carries `_declared_fields` -
+    which only SerializerMetaclass puts there. When the mixin was a plain
+    class every one of its fields was dropped, and `sessions` did not then
+    go missing: ModelSerializer saw the reverse relation and quietly built a
+    PrimaryKeyRelatedField(many=True). Every recruitment payload shipped bare
+    UUIDs, the detail page threw on the first one, and the edit wizard
+    prefilled a trial with no dates at all.
+
+    So this asserts the SHAPE, on every serializer that carries the mixin.
+    A field that silently downgrades to the model default is exactly the
+    kind of break no amount of business-logic testing catches.
+    """
+
+    SERIALIZERS = (
+        RecruitmentListSerializer,
+        RecruitmentDetailSerializer,
+        RecruitmentOwnerDetailSerializer,
+    )
+
+    def setUp(self):
+        self.org = Organization.objects.create(
+            name="Shape FC", username="shapefc",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(
+            name="Hockey", icon_name="mdi:hockey-sticks"
+        )
+        self.trial = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            title="City tour", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            session_mode=Recruitment.SessionMode.CHOOSE_ONE,
+            venue_name="Corporation Stadium", city="Kozhikode",
+        )
+        self.first = TrialSession.objects.create(
+            recruitment=self.trial, date=date(2026, 10, 10),
+            start_time=dt_time(9, 0), end_time=dt_time(13, 0),
+            city="Kochi",
+        )
+        TrialSession.objects.create(
+            recruitment=self.trial, date=date(2026, 10, 12),
+            start_time=dt_time(9, 0), city="Kannur",
+        )
+        RecruitmentService._sync_trial_window(self.trial)
+        self.trial.refresh_from_db()
+
+    def test_mixin_fields_survive_onto_every_serializer(self):
+        """Declared, not rebuilt from the model."""
+        for serializer_class in self.SERIALIZERS:
+            fields = serializer_class().fields
+            with self.subTest(serializer=serializer_class.__name__):
+                for name in TrialSessionsMixin.SESSION_FIELDS:
+                    self.assertIn(name, fields)
+                self.assertIsInstance(
+                    fields["sessions"], serializers.SerializerMethodField
+                )
+
+    def test_sessions_are_objects_with_the_fields_the_client_reads(self):
+        for serializer_class in self.SERIALIZERS:
+            data = serializer_class(self.trial).data
+            with self.subTest(serializer=serializer_class.__name__):
+                sessions = data["sessions"]
+                self.assertEqual(len(sessions), 2)
+
+                for session in sessions:
+                    self.assertIsInstance(session, dict)
+
+                # Ordered, and every field the date list renders is present -
+                # `end_time` included, which is the one the client probes for.
+                opening = sessions[0]
+                self.assertEqual(str(opening["id"]), str(self.first.id))
+                self.assertEqual(str(opening["date"]), "2026-10-10")
+                self.assertEqual(str(opening["start_time"]), "09:00:00")
+                self.assertEqual(str(opening["end_time"]), "13:00:00")
+                self.assertFalse(opening["is_cancelled"])
+                self.assertEqual(opening["city"], "Kochi")
+                # A date that set no venue inherits the trial's own, so
+                # nothing downstream has to fall back.
+                self.assertEqual(
+                    opening["venue_name"], "Corporation Stadium"
+                )
+
+                self.assertIsNone(sessions[1]["end_time"])
+
+    def test_trial_window_fields_ride_along(self):
+        """The two windows are on the payload, and they are not the same."""
+        data = RecruitmentOwnerDetailSerializer(self.trial).data
+
+        self.assertEqual(data["session_mode"], "choose_one")
+        self.assertIsNotNone(data["trial_end_date"])
+        # choose_one: applications close with the LAST date, not the first.
+        self.assertIsNotNone(data["applications_close_at"])
+
+
+# =====================================================================
+# PER-TRIAL SETTINGS - auto-confirm, the fee, age filters
+# =====================================================================
+
+from apps.recruitments.serializers.recruitment_serializers import (
+    RecruitmentCreateSerializer,
+)
+from apps.recruitments.selectors.application_selectors import (
+    ApplicationSelector,
+)
+
+
+class TrialSettingsTests(APITestCase):
+    """
+    The per-trial settings an org actually asked for.
+
+    auto_confirm    everyone who applies gets their pass on the spot - but
+                    NOT after applications close, which is the pairing the
+                    two windows were separated for in the first place
+    the fee         information, never a gate
+    birth years     how old an applicant IS, which is a different question
+                    from the age group they applied UNDER
+    """
+
+    # Far enough ahead that no clock needs pinning: the window is open and
+    # the trial is not over, whenever these run.
+    TRIAL_DATE = date(2030, 6, 15)
+    SECOND_DATE = date(2030, 6, 16)
+
+    def setUp(self):
+        self.owner = self._user("settings_owner", "Owner")
+        self.org = Organization.objects.create(
+            name="Settings FC", username="settingsfc",
+            type=Organization.Type.CLUB,
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(
+            name="Hockey", icon_name="mdi:hockey-sticks"
+        )
+        self.org_actor = Actor(
+            actor_type="organization",
+            organization=self.org,
+            organization_member=self.member,
+        )
+
+    # -- factories ------------------------------------------------
+
+    def _user(self, username, name, birthdate=None):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name, birthdate=birthdate)
+        return user
+
+    def _trial(self, dates=(TRIAL_DATE,), **overrides):
+        data = dict(
+            organization=self.org, sport=self.sport,
+            title="Settings Trial", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        data.update(overrides)
+        recruitment = Recruitment.objects.create(**data)
+        for day in dates:
+            TrialSession.objects.create(recruitment=recruitment, date=day)
+        RecruitmentService._sync_trial_window(recruitment)
+        recruitment.refresh_from_db()
+        return recruitment
+
+    def _apply(self, recruitment, user):
+        return ApplicationService.apply(
+            Actor(actor_type="user", user=user),
+            recruitment.id,
+            {"shared_name": "P", "shared_phone": "9999999999"},
+        )
+
+    def _application(self, recruitment, user, **overrides):
+        data = dict(
+            recruitment=recruitment, applicant=user,
+            shared_name="P", shared_phone="9999999999",
+        )
+        data.update(overrides)
+        return RecruitmentApplication.objects.create(**data)
+
+    # -- 1. auto-confirm lands confirmed --------------------------
+
+    def test_auto_confirm_lands_the_application_confirmed(self):
+        trial = self._trial(auto_confirm=True)
+        player = self._user("auto_player", "Auto")
+
+        application = self._apply(trial, player)
+
+        self.assertEqual(
+            application.status,
+            RecruitmentApplication.Status.TRIAL_CONFIRMED,
+        )
+
+        history = application.status_history.get()
+        self.assertEqual(history.from_status, "")
+        self.assertEqual(
+            history.to_status, RecruitmentApplication.Status.TRIAL_CONFIRMED
+        )
+        self.assertIsNone(history.changed_by)
+        self.assertEqual(history.note, "auto-confirmed")
+
+        trial.refresh_from_db()
+        self.assertEqual(trial.applications_count, 1)
+        self.assertEqual(trial.confirmed_count, 1)
+
+        # ...and with it off, nothing changes about the old behaviour.
+        plain = self._trial()
+        plain_application = self._apply(plain, self._user("plain", "Plain"))
+        plain.refresh_from_db()
+
+        self.assertEqual(
+            plain_application.status, RecruitmentApplication.Status.APPLIED
+        )
+        self.assertEqual(plain.confirmed_count, 0)
+
+    # -- 2. ...but it is not a way past the closed window ---------
+
+    def test_auto_confirm_does_not_bypass_the_application_window(self):
+        trial = self._trial(
+            auto_confirm=True,
+            application_deadline=datetime(2030, 6, 1, 12, 0, tzinfo=IST),
+        )
+        player = self._user("late_player", "Late")
+
+        # The deadline has passed; the trial itself has not started.
+        with patch(
+            "django.utils.timezone.now",
+            return_value=datetime(2030, 6, 10, 9, 0, tzinfo=IST),
+        ):
+            with self.assertRaises(DRFValidationError) as caught:
+                self._apply(trial, player)
+
+        self.assertIn(
+            "The application deadline has passed.",
+            str(caught.exception.detail),
+        )
+        self.assertFalse(
+            RecruitmentApplication.objects.filter(recruitment=trial).exists()
+        )
+
+        trial.refresh_from_db()
+        self.assertEqual(trial.confirmed_count, 0)
+
+    # -- 3. birth years, not ages ---------------------------------
+
+    def test_birth_year_range_filters_and_reports_who_it_hid(self):
+        trial = self._trial()
+
+        self._application(
+            trial, self._user("born_2010", "A", date(2010, 3, 1))
+        )
+        self._application(
+            trial, self._user("born_2012", "B", date(2012, 9, 20))
+        )
+        undated = self._application(
+            trial, self._user("no_birthdate", "C")
+        )
+
+        page, total, no_birth_year = ApplicationSelector.list_applications(
+            recruitment=trial, birth_year_min=2011, birth_year_max=2013
+        )
+
+        self.assertEqual(total, 1)
+        self.assertEqual(
+            [a.applicant.username for a in page], ["born_2012"]
+        )
+        # The applicant with no birthdate is excluded - and COUNTED, or the
+        # org never learns the range hid somebody.
+        self.assertEqual(no_birth_year, 1)
+        self.assertNotIn(
+            undated.id, [a.id for a in page]
+        )
+
+        # No range active: nothing is hidden, so nothing is reported.
+        page, total, no_birth_year = ApplicationSelector.list_applications(
+            recruitment=trial
+        )
+        self.assertEqual(total, 3)
+        self.assertEqual(no_birth_year, 0)
+
+        # Sorted by birth year, the unknown sorts LAST either way.
+        for sort in ("birth_year", "-birth_year"):
+            page, _, _ = ApplicationSelector.list_applications(
+                recruitment=trial, sort=sort
+            )
+            self.assertEqual(
+                [a.applicant.username for a in page][-1], "no_birthdate"
+            )
+
+
+
+# =====================================================================
+# ANNOUNCEMENTS - the request writes, the cron sends
+# =====================================================================
+
+from django.core.management import call_command
+
+from apps.notifications.models import Notification as NotificationModel
+from apps.recruitments.models import (
+    AnnouncementDelivery,
+    RecruitmentAnnouncement,
+)
+from apps.recruitments.services.announcement_service import (
+    MAX_PER_DAY,
+    AnnouncementService,
+)
+
+
+class AnnouncementOutboxTests(APITestCase):
+    """
+    An announcement is WRITTEN by the request and SENT by a cron job, and
+    that split is the feature, not an implementation detail: sending to 340
+    people from a web request would be 340 daemon email threads and 340
+    inline FCM calls (see AnnouncementDelivery's docstring).
+
+    So the first test here asserts a NEGATIVE - that creating one sends
+    nothing at all - and the rest check that the outbox drains exactly once.
+    """
+
+    TRIAL_DATE = date(2030, 7, 12)
+    SECOND_DATE = date(2030, 7, 19)
+
+    def setUp(self):
+        self.owner = self._user("ann_owner", "Owner")
+        self.org = Organization.objects.create(
+            name="Announce FC", username="announcefc",
+            type=Organization.Type.CLUB,
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Rugby", icon_name="mdi:rugby")
+        self.org_actor = Actor(
+            actor_type="organization",
+            organization=self.org,
+            organization_member=self.member,
+        )
+
+    # -- factories ------------------------------------------------
+
+    def _user(self, username, name, email=None):
+        user = User.objects.create_user(
+            email=(f"{username}@example.com" if email is None else email),
+            password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _trial(self, dates=(TRIAL_DATE,), **overrides):
+        data = dict(
+            organization=self.org, sport=self.sport,
+            title="Announce Trial", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        data.update(overrides)
+        recruitment = Recruitment.objects.create(**data)
+        for day in dates:
+            TrialSession.objects.create(recruitment=recruitment, date=day)
+        RecruitmentService._sync_trial_window(recruitment)
+        recruitment.refresh_from_db()
+        return recruitment
+
+    def _application(self, recruitment, user, **overrides):
+        data = dict(
+            recruitment=recruitment, applicant=user,
+            shared_name="P", shared_phone="9999999999",
+        )
+        data.update(overrides)
+        return RecruitmentApplication.objects.create(**data)
+
+    def _payload(self, **overrides):
+        data = {
+            "title": "Venue has changed",
+            "body": "We've moved to Corporation Stadium, Gate 3.",
+            "audience": RecruitmentAnnouncement.Audience.ALL_APPLICANTS,
+        }
+        data.update(overrides)
+        return data
+
+    def _create(self, recruitment, **overrides):
+        return AnnouncementService.create(
+            self.org_actor, recruitment, self._payload(**overrides)
+        )
+
+    # -- 1. it writes rows and sends NOTHING ----------------------
+
+    def test_create_writes_the_outbox_and_sends_nothing(self):
+        trial = self._trial()
+        self._application(trial, self._user("ann_a", "A"))
+        self._application(trial, self._user("ann_b", "B"))
+
+        with patch(
+            "utils.emails.send_email_async"
+        ) as async_email, patch(
+            "utils.emails.send_email"
+        ) as blocking_email:
+            announcement = self._create(trial)
+
+        # THE POINT OF THE WHOLE DESIGN: not one email, by either path...
+        async_email.assert_not_called()
+        blocking_email.assert_not_called()
+        # ...and not one notification row.
+        self.assertFalse(
+            NotificationModel.objects.filter(
+                type=NotificationModel.Type.RECRUITMENT_ANNOUNCEMENT
+            ).exists()
+        )
+
+        # ...and not one Goatza message either: the dm channel is written
+        # here and sent by the drain, like everything else.
+        self.assertFalse(Message.objects.exists())
+
+        # What it DID write: one row per person per channel, all pending.
+        self.assertEqual(announcement.recipients_count, 2)
+        deliveries = announcement.deliveries.all()
+        self.assertEqual(deliveries.count(), 6)
+        self.assertEqual(
+            set(deliveries.values_list("channel", flat=True)),
+            {"dm", "notification", "email"},
+        )
+        self.assertEqual(
+            set(deliveries.values_list("state", flat=True)), {"pending"}
+        )
+
+    # -- 2. who each audience means -------------------------------
+
+    def test_each_audience_resolves_to_its_own_people(self):
+        trial = self._trial()
+
+        applied = self._application(trial, self._user("aud_applied", "A"))
+        confirmed = self._application(
+            trial, self._user("aud_confirmed", "C"),
+            status=RecruitmentApplication.Status.TRIAL_CONFIRMED,
+        )
+        selected = self._application(
+            trial, self._user("aud_selected", "S"),
+            status=RecruitmentApplication.Status.SELECTED,
+        )
+        not_selected = self._application(
+            trial, self._user("aud_not_selected", "N"),
+            status=RecruitmentApplication.Status.NOT_SELECTED,
+        )
+        # Withdrew: on nobody's list, not even "all applicants".
+        self._application(
+            trial, self._user("aud_withdrawn", "W"),
+            status=RecruitmentApplication.Status.WITHDRAWN,
+        )
+
+        def ids(audience):
+            return set(
+                AnnouncementService.audience_queryset(
+                    trial, audience
+                ).values_list("id", flat=True)
+            )
+
+        self.assertEqual(
+            ids(RecruitmentAnnouncement.Audience.ALL_APPLICANTS),
+            {applied.id, confirmed.id, selected.id, not_selected.id},
+        )
+        # Everyone CALLED to the trial - including the people already given a
+        # result, who are still on the day's list.
+        self.assertEqual(
+            ids(RecruitmentAnnouncement.Audience.CONFIRMED),
+            {confirmed.id, selected.id, not_selected.id},
+        )
+        self.assertEqual(
+            ids(RecruitmentAnnouncement.Audience.SELECTED), {selected.id}
+        )
+
+    # -- 3. narrowing to one date ---------------------------------
+
+    def test_a_session_narrows_the_audience_to_that_date(self):
+        trial = self._trial(
+            dates=(self.TRIAL_DATE, self.SECOND_DATE),
+            session_mode=Recruitment.SessionMode.CHOOSE_ONE,
+        )
+        kochi, calicut = list(trial.sessions.order_by("date"))
+
+        here = self._application(
+            trial, self._user("sess_here", "H"), session=kochi
+        )
+        self._application(
+            trial, self._user("sess_there", "T"), session=calicut
+        )
+
+        announcement = self._create(trial, session=kochi)
+
+        self.assertEqual(announcement.session_id, kochi.id)
+        self.assertEqual(announcement.recipients_count, 1)
+        self.assertEqual(
+            list(announcement.deliveries.values_list(
+                "application_id", flat=True
+            ).distinct()),
+            [here.id],
+        )
+
+    # -- 4. the drain sends once, and only once -------------------
+
+    def test_the_drain_sends_each_row_once(self):
+        trial = self._trial()
+        self._application(trial, self._user("drain_a", "A"))
+        announcement = self._create(trial)
+
+        with patch(
+            "apps.recruitments.management.commands."
+            "dispatch_announcements.send_announcement_email",
+            return_value=True,
+        ) as send_email:
+            call_command("dispatch_announcements", verbosity=0)
+
+        self.assertEqual(send_email.call_count, 1)
+        self.assertEqual(
+            set(announcement.deliveries.values_list("state", flat=True)),
+            {"sent"},
+        )
+        for delivery in announcement.deliveries.all():
+            self.assertIsNotNone(delivery.sent_at)
+            self.assertEqual(delivery.attempts, 1)
+
+        # The notification went out through the ordinary service path.
+        self.assertEqual(
+            NotificationModel.objects.filter(
+                type=NotificationModel.Type.RECRUITMENT_ANNOUNCEMENT
+            ).count(),
+            1,
+        )
+
+        # A SECOND RUN IS A NO-OP. Only PENDING rows are claimed and SENT is
+        # terminal, so nobody is emailed twice.
+        with patch(
+            "apps.recruitments.management.commands."
+            "dispatch_announcements.send_announcement_email",
+            return_value=True,
+        ) as second_send:
+            call_command("dispatch_announcements", verbosity=0)
+
+        second_send.assert_not_called()
+        self.assertEqual(
+            NotificationModel.objects.filter(
+                type=NotificationModel.Type.RECRUITMENT_ANNOUNCEMENT
+            ).count(),
+            1,
+        )
+        for delivery in announcement.deliveries.all():
+            self.assertEqual(delivery.attempts, 1)
+
+    # -- 5. a skip is WRITTEN, never omitted ----------------------
+
+    def test_a_recipient_with_no_email_gets_a_skipped_row(self):
+        trial = self._trial()
+        # A phone-only account: real on this product (signup takes either),
+        # and the one recipient an email channel genuinely cannot reach. The
+        # row still has to exist, or the delivery summary stops adding up to
+        # recipients_count.
+        no_email = User.objects.create_user(
+            phone="+919876500000", password="pass1234",
+            username="no_email_player",
+        )
+        accept_current_terms(no_email)
+        UserProfile.objects.create(user=no_email, name="No Email")
+        self._application(trial, no_email)
+
+        announcement = self._create(trial)
+
+        self.assertEqual(announcement.recipients_count, 1)
+        self.assertEqual(announcement.deliveries.count(), 3)
+        self.assertEqual(
+            announcement.deliveries.get(channel="email").state, "skipped"
+        )
+        # The other two channels are unaffected - no address is not no
+        # account, and a Goatza message needs neither.
+        self.assertEqual(
+            announcement.deliveries.get(channel="notification").state,
+            "pending",
+        )
+        self.assertEqual(
+            announcement.deliveries.get(channel="dm").state, "pending"
+        )
+
+        summary = AnnouncementService.delivery_summaries([announcement.id])
+        self.assertEqual(summary[str(announcement.id)]["skipped"], 1)
+        self.assertEqual(summary[str(announcement.id)]["pending"], 2)
+
+    # -- 6. the daily cap -----------------------------------------
+
+    def test_the_sixth_announcement_in_a_day_is_refused(self):
+        trial = self._trial()
+        self._application(trial, self._user("cap_a", "A"))
+
+        for index in range(MAX_PER_DAY):
+            self._create(trial, title=f"Update {index}")
+
+        with self.assertRaises(DRFValidationError) as caught:
+            self._create(trial, title="One too many")
+
+        self.assertIn("You can send more from midnight", str(caught.exception.detail))
+        self.assertEqual(
+            RecruitmentAnnouncement.objects.filter(recruitment=trial).count(),
+            MAX_PER_DAY,
+        )
+
+        # Soft-deleting one does NOT buy another send: it was still sent.
+        AnnouncementService.delete(
+            self.org_actor,
+            RecruitmentAnnouncement.objects.filter(recruitment=trial).first(),
+        )
+        with self.assertRaises(DRFValidationError):
+            self._create(trial, title="Still one too many")
+
+
+# =====================================================================
+# GOATZA DM FAN-OUT, REMINDERS, THE PASS
+# =====================================================================
+
+from apps.messaging.models import Conversation, ConversationParticipant, Message
+from apps.messaging.services.conversation_service import ConversationService
+from apps.moderation.models import Block
+from apps.moderation.services.block_guard import BlockedError
+from apps.recruitments.services.recruitment_message_service import (
+    RecruitmentMessageService,
+)
+from apps.recruitments.pass_code import mint_for
+
+
+class RecruitmentMessagingTests(APITestCase):
+    """
+    Trial updates reach players INSIDE Goatza.
+
+    The load-bearing bit is ``force_active``: without it the org's first
+    message to an applicant who does not follow them lands in a message
+    REQUEST folder, and an update saying the venue moved that nobody opens
+    has failed at the only job it had. Applying to the trial is the consent
+    signal that earns the bypass — and a block still outranks it.
+    """
+
+    TRIAL_DATE = date(2030, 9, 14)
+
+    def setUp(self):
+        self.owner = self._user("dm_owner", "Owner")
+        self.player = self._user("dm_player", "Player")
+        self.org = Organization.objects.create(
+            name="DM FC", username="dmfc", type=Organization.Type.CLUB,
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Tennis", icon_name="mdi:tennis")
+        self.org_actor = Actor(
+            actor_type="organization",
+            organization=self.org,
+            organization_member=self.member,
+        )
+        self.trial = self._trial()
+        self.application = self._application(self.trial, self.player)
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _trial(self, dates=(TRIAL_DATE,), **overrides):
+        data = dict(
+            organization=self.org, sport=self.sport, title="DM Trial",
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        data.update(overrides)
+        recruitment = Recruitment.objects.create(**data)
+        for day in dates:
+            TrialSession.objects.create(recruitment=recruitment, date=day)
+        RecruitmentService._sync_trial_window(recruitment)
+        recruitment.refresh_from_db()
+        return recruitment
+
+    def _application(self, recruitment, user, **overrides):
+        data = dict(
+            recruitment=recruitment, applicant=user,
+            shared_name="P", shared_phone="9999999999",
+        )
+        data.update(overrides)
+        return RecruitmentApplication.objects.create(**data)
+
+    # -- 1. the request gate, lifted ------------------------------
+
+    def test_force_active_opens_a_thread_the_gate_would_have_held(self):
+        # No mutual follow, so the ordinary path makes a REQUEST.
+        plain, _ = ConversationService.get_or_create_conversation(
+            actor_org=self.org, target_user=self._user("dm_other", "Other"),
+        )
+        self.assertEqual(plain.status, Conversation.Status.REQUESTED)
+        self.assertEqual(
+            sorted(
+                plain.participants.values_list("has_accepted", flat=True)
+            ),
+            [False, True],
+        )
+
+        # Same relationship, but this player APPLIED — so the thread opens.
+        conversation, _ = ConversationService.get_or_create_conversation(
+            actor_org=self.org, target_user=self.player, force_active=True,
+        )
+        self.assertEqual(conversation.status, Conversation.Status.ACTIVE)
+        self.assertEqual(
+            list(
+                conversation.participants.values_list("has_accepted", flat=True)
+            ),
+            [True, True],
+        )
+
+        # ...and an ALREADY-REQUESTED thread is lifted, not left behind.
+        stale = self._user("dm_stale", "Stale")
+        requested, _ = ConversationService.get_or_create_conversation(
+            actor_org=self.org, target_user=stale,
+        )
+        self.assertEqual(requested.status, Conversation.Status.REQUESTED)
+
+        lifted, created = ConversationService.get_or_create_conversation(
+            actor_org=self.org, target_user=stale, force_active=True,
+        )
+        self.assertFalse(created)
+        self.assertEqual(lifted.id, requested.id)
+        lifted.refresh_from_db()
+        self.assertEqual(lifted.status, Conversation.Status.ACTIVE)
+        self.assertTrue(
+            ConversationParticipant.objects
+            .get(conversation=lifted, user=stale).has_accepted
+        )
+
+    # -- 2. a block still wins ------------------------------------
+
+    def test_force_active_does_not_bypass_the_block_guard(self):
+        Block.objects.create(blocker_user=self.player, blocked_org=self.org)
+
+        with self.assertRaises(BlockedError):
+            ConversationService.get_or_create_conversation(
+                actor_org=self.org,
+                target_user=self.player,
+                force_active=True,
+            )
+
+        # ...and the fan-out reports that ONE recipient as skipped rather
+        # than failing the whole send.
+        sent, skipped = RecruitmentMessageService.fan_out(
+            self.trial, [self.application],
+            body="Venue moved", message_type=Message.Type.TEXT,
+        )
+        self.assertEqual(sent, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertFalse(Message.objects.exists())
+
+    # -- 3. the dm channel writes a real card message -------------
+
+    def test_the_dm_channel_sends_a_shared_recruitment_message(self):
+        announcement = AnnouncementService.create(
+            self.org_actor, self.trial,
+            {
+                "title": "Venue has changed",
+                "body": "Gate 3.",
+                "audience": RecruitmentAnnouncement.Audience.ALL_APPLICANTS,
+                "session": None,
+            },
+        )
+
+        # A dm row was queued alongside the other two channels...
+        self.assertEqual(
+            set(announcement.deliveries.values_list("channel", flat=True)),
+            {"dm", "notification", "email"},
+        )
+        # ...and nothing was sent by the request.
+        self.assertFalse(Message.objects.exists())
+
+        with patch(
+            "apps.recruitments.management.commands."
+            "dispatch_announcements.send_announcement_email",
+            return_value=True,
+        ):
+            call_command("dispatch_announcements", verbosity=0)
+
+        message = Message.objects.get()
+        self.assertEqual(message.message_type, Message.Type.SHARED_RECRUITMENT)
+        # The FK the DB CheckConstraint ties to that type, and every other
+        # shared_* column null.
+        self.assertEqual(message.shared_recruitment_id, self.trial.id)
+        self.assertIsNone(message.shared_post_id)
+        self.assertIsNone(message.shared_profile_user_id)
+        self.assertIsNone(message.shared_profile_org_id)
+        self.assertEqual(message.sender_org_id, self.org.id)
+        self.assertIn("Venue has changed", message.content)
+
+        # The thread it landed in is ACTIVE, not a request.
+        self.assertEqual(
+            message.conversation.status, Conversation.Status.ACTIVE
+        )
+
+    # -- 4. message selected queues, and sends nothing ------------
+
+    def test_message_selected_queues_rows_and_sends_nothing(self):
+        with patch("utils.emails.send_email_async") as async_email:
+            result = AnnouncementService.create_direct(
+                self.org_actor, self.trial,
+                [self.application.id], "Come at 7 instead of 8.",
+            )
+
+        self.assertEqual(result["queued"], 1)
+        async_email.assert_not_called()
+        self.assertFalse(Message.objects.exists())
+
+        # A direct row: no announcement, the body on the row itself.
+        delivery = AnnouncementDelivery.objects.get()
+        self.assertIsNone(delivery.announcement_id)
+        self.assertEqual(delivery.channel, "dm")
+        self.assertEqual(delivery.direct_body, "Come at 7 instead of 8.")
+        self.assertEqual(delivery.created_by_member_id, self.member.id)
+
+        call_command("dispatch_announcements", verbosity=0)
+
+        # TEXT, not a card: "come at 7 instead of 8" gains nothing from one.
+        message = Message.objects.get()
+        self.assertEqual(message.message_type, Message.Type.TEXT)
+        self.assertIsNone(message.shared_recruitment_id)
+        self.assertEqual(message.content, "Come at 7 instead of 8.")
+
+    # -- 5. the reminder, once ------------------------------------
+
+    def test_the_reminder_goes_out_once_for_a_trial_tomorrow(self):
+        tomorrow = date(2030, 9, 14)
+        evening = datetime(2030, 9, 13, 19, 0, tzinfo=IST)
+
+        application = self._application(
+            self._trial(dates=(tomorrow,), title="Tomorrow"),
+            self._user("rem_player", "Rem"),
+            status=RecruitmentApplication.Status.TRIAL_CONFIRMED,
+        )
+
+        with patch(
+            "apps.recruitments.management.commands."
+            "send_trial_reminders.send_trial_reminder_email",
+            return_value=True,
+        ) as email:
+            call_command(
+                "send_trial_reminders", now=evening.isoformat(), verbosity=0
+            )
+
+        self.assertEqual(email.call_count, 1)
+        application.refresh_from_db()
+        self.assertIsNotNone(application.trial_reminder_sent_at)
+        stamped_at = application.trial_reminder_sent_at
+
+        # A SECOND RUN IS A NO-OP — a stamped row is not selected again.
+        with patch(
+            "apps.recruitments.management.commands."
+            "send_trial_reminders.send_trial_reminder_email",
+            return_value=True,
+        ) as second:
+            call_command(
+                "send_trial_reminders", now=evening.isoformat(), verbosity=0
+            )
+
+        second.assert_not_called()
+        application.refresh_from_db()
+        self.assertEqual(application.trial_reminder_sent_at, stamped_at)
+
+        # ...and before 18:00 it does not act at all.
+        application.trial_reminder_sent_at = None
+        application.save(update_fields=["trial_reminder_sent_at"])
+        with patch(
+            "apps.recruitments.management.commands."
+            "send_trial_reminders.send_trial_reminder_email",
+            return_value=True,
+        ) as too_early:
+            call_command(
+                "send_trial_reminders",
+                now=datetime(2030, 9, 13, 9, 0, tzinfo=IST).isoformat(),
+                verbosity=0,
+            )
+        too_early.assert_not_called()
+
+    # -- 6. moving the date voids the reminder --------------------
+
+    def test_moving_a_session_clears_the_reminder_stamp(self):
+        trial = self._trial(dates=(date(2030, 9, 20),), title="Movable")
+        session = trial.sessions.get()
+        application = self._application(
+            trial, self._user("move_player", "Move"),
+            status=RecruitmentApplication.Status.TRIAL_CONFIRMED,
+            trial_reminder_sent_at=timezone.now(),
+        )
+
+        # Same rows, same ids — only the DATE moves.
+        RecruitmentService._sync_trial_sessions(trial, [
+            {"id": session.id, "date": date(2030, 9, 21), "display_order": 0},
+        ])
+
+        application.refresh_from_db()
+        self.assertIsNone(application.trial_reminder_sent_at)
+
+        # A venue-only edit does NOT void it: the player still turns up
+        # tomorrow, and re-reminding them would be noise.
+        application.trial_reminder_sent_at = timezone.now()
+        application.save(update_fields=["trial_reminder_sent_at"])
+        changes = RecruitmentService._sync_trial_sessions(trial, [
+            {
+                "id": session.id, "date": date(2030, 9, 21),
+                "venue_name": "New Ground", "display_order": 0,
+            },
+        ])
+        application.refresh_from_db()
+        self.assertIsNotNone(application.trial_reminder_sent_at)
+        self.assertIn("session_venue", changes)
+
+    # -- 7. the pass is personal ----------------------------------
+
+    def test_the_pass_is_404_for_anybody_but_the_applicant(self):
+        self.application.status = (
+            RecruitmentApplication.Status.TRIAL_CONFIRMED
+        )
+        self.application.save(update_fields=["status"])
+        # Confirmation is what mints the code; this fixture writes the status
+        # directly, so it mints through the same helper the status path uses.
+        mint_for(self.application)
+
+        url = f"/recruitments/applications/{self.application.id}/pass"
+
+        # The applicant reads their own.
+        self.client.force_authenticate(user=self.player)
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            resp.data["data"]["application_id"], str(self.application.id)
+        )
+        # The booking reference, always present on a confirmed application.
+        self.assertEqual(
+            resp.data["data"]["pass_code"], self.application.pass_code
+        )
+
+        # Anybody else gets 404 — never 403, which would confirm the id.
+        self.client.force_authenticate(user=self._user("nosy", "Nosy"))
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# =====================================================================
+# THE PASS CODE - the booking reference
+# =====================================================================
+
+
+class PassCodeTests(APITestCase):
+    """
+    The code on a confirmed player's pass.
+
+    It is a BOOKING REFERENCE, not a check-in code: nothing scans it and
+    nothing checks anybody in against it. It is minted once, at confirmation,
+    and never re-issued - a player may already have screenshotted it.
+    """
+
+    # THE TRIAL IS TODAY, which is the only day both halves of this read:
+    # confirming players needs a trial that has not ended, and results open
+    # on the trial day. The clock is pinned to it rather than chosen relative
+    # to the real date, so these tests read the same in a year.
+    TRIAL_DATE = date(2030, 3, 14)
+    TRIAL_DAY_MORNING = datetime(2030, 3, 14, 10, 0, tzinfo=IST)
+
+    def setUp(self):
+        clock = patch(
+            "django.utils.timezone.now", return_value=self.TRIAL_DAY_MORNING
+        )
+        clock.start()
+        self.addCleanup(clock.stop)
+
+        self.owner = self._user("pass_owner", "Owner")
+        self.org = Organization.objects.create(
+            name="Pass FC", username="passfc", type=Organization.Type.CLUB,
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Boxing", icon_name="mdi:boxing")
+
+        self.org_actor = Actor(
+            actor_type="organization",
+            organization=self.org,
+            organization_member=self.member,
+        )
+
+        self.trial = self._trial()
+
+    # -- factories ------------------------------------------------
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _trial(self, **overrides):
+        data = dict(
+            organization=self.org, sport=self.sport, title="Pass Trial",
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        data.update(overrides)
+        recruitment = Recruitment.objects.create(**data)
+        TrialSession.objects.create(
+            recruitment=recruitment, date=self.TRIAL_DATE
+        )
+        RecruitmentService._sync_trial_window(recruitment)
+        recruitment.refresh_from_db()
+        return recruitment
+
+    def _application(self, recruitment, username, **overrides):
+        data = dict(
+            recruitment=recruitment, applicant=self._user(username, username),
+            shared_name=username, shared_phone="9999999999",
+        )
+        data.update(overrides)
+        return RecruitmentApplication.objects.create(**data)
+
+    def _confirm(self, application):
+        """Through the real status path, so the code is minted the real way."""
+        ApplicationService.change_status(
+            actor=self.org_actor,
+            recruitment=application.recruitment,
+            application_ids=[application.id],
+            to_status=RecruitmentApplication.Status.TRIAL_CONFIRMED,
+        )
+        application.refresh_from_db()
+        return application
+
+    # -- 1. the code is minted once, and kept ---------------------
+
+    def test_a_code_is_minted_on_confirm_and_survives_a_round_trip(self):
+        application = self._application(self.trial, "code_player")
+        self.assertEqual(application.pass_code, "")
+
+        self._confirm(application)
+        code = application.pass_code
+
+        self.assertTrue(code)
+        # XXXX-XXXX, from the confusion-free alphabet: no 0/O, no 1/I/L.
+        # It is read aloud and written down by a person, which is why the
+        # alphabet still matters with nobody scanning it.
+        self.assertRegex(code, r"^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$")
+
+        # OUT of confirmed and back must NOT re-issue: the player may already
+        # have screenshotted the first one.
+        ApplicationService.change_status(
+            actor=self.org_actor, recruitment=self.trial,
+            application_ids=[application.id],
+            to_status=RecruitmentApplication.Status.SHORTLISTED,
+        )
+        self._confirm(application)
+
+        self.assertEqual(application.pass_code, code)
+
+    # -- 2. a code belongs to ONE application ---------------------
+
+    def test_two_confirmations_on_one_trial_get_different_codes(self):
+        first = self._confirm(self._application(self.trial, "first_player"))
+        second = self._confirm(self._application(self.trial, "second_player"))
+
+        self.assertTrue(first.pass_code)
+        self.assertNotEqual(first.pass_code, second.pass_code)
+
+    # -- 3. any confirmed applicant can be selected ---------------
+
+    def test_any_confirmed_applicant_can_be_selected(self):
+        """
+        The app does not know who turned up - the org does. Nothing about a
+        player's day at the ground gates the selection, so a whole batch of
+        confirmed applicants goes through with no skips.
+        """
+        one = self._confirm(self._application(self.trial, "sel_one"))
+        two = self._confirm(self._application(self.trial, "sel_two"))
+
+        result = ApplicationService.change_status(
+            actor=self.org_actor, recruitment=self.trial,
+            application_ids=[one.id, two.id],
+            to_status=RecruitmentApplication.Status.SELECTED,
+        )
+
+        self.assertEqual(result["updated"], [str(one.id), str(two.id)])
+        self.assertEqual(result["skipped"], [])
+
+        # ...and their codes survive the move: the pass is still theirs.
+        one.refresh_from_db()
+        self.assertTrue(one.pass_code)
+
+
+# =====================================================================
+# LEGACY STATUS VALUES - what a stale client still sends
+# =====================================================================
+
+
+class LegacyStatusMappingTests(APITestCase):
+    """
+    Goatza is an installed PWA: old JavaScript lives on phones for days after
+    a deploy, and it still POSTs `invited` and `rejected`. The server accepts
+    those words and translates them, because the alternative is a 400 and an
+    org's decision silently lost.
+
+    `rejected` is the interesting one — it splits on WHEN the org decided.
+    Before the trial nobody ever saw the player (not_shortlisted); on or after
+    it they watched them play (not_selected). Getting that backwards tells a
+    player they were rejected on the day when nobody ever saw them.
+    """
+
+    TRIAL_DATE = date(2031, 4, 18)
+    # Two clocks either side of the trial day, both pinned.
+    BEFORE = datetime(2031, 4, 15, 11, 0, tzinfo=IST)
+    ON_THE_DAY = datetime(2031, 4, 18, 11, 0, tzinfo=IST)
+
+    def setUp(self):
+        self.owner = self._user("legacy_owner", "Owner")
+        self.org = Organization.objects.create(
+            name="Legacy FC", username="legacyfc",
+            type=Organization.Type.CLUB,
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Kabaddi", icon_name="mdi:run")
+        self.org_actor = Actor(
+            actor_type="organization",
+            organization=self.org,
+            organization_member=self.member,
+        )
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _trial(self, **overrides):
+        data = dict(
+            organization=self.org, sport=self.sport, title="Legacy Trial",
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        data.update(overrides)
+        recruitment = Recruitment.objects.create(**data)
+        TrialSession.objects.create(
+            recruitment=recruitment, date=self.TRIAL_DATE
+        )
+        RecruitmentService._sync_trial_window(recruitment)
+        recruitment.refresh_from_db()
+        return recruitment
+
+    def _application(self, recruitment, username):
+        return RecruitmentApplication.objects.create(
+            recruitment=recruitment, applicant=self._user(username, username),
+            shared_name=username, shared_phone="9999999999",
+        )
+
+    def _send_rejected(self, recruitment, application, now):
+        """What a phone that has not reloaded since the v3 deploy sends."""
+        with patch("django.utils.timezone.now", return_value=now):
+            return ApplicationService.change_status(
+                actor=self.org_actor,
+                recruitment=recruitment,
+                application_ids=[application.id],
+                to_status="rejected",
+            )
+
+    # -- 1. before the trial: nobody ever saw them ----------------
+
+    def test_rejected_before_the_trial_lands_as_not_shortlisted(self):
+        trial = self._trial()
+        application = self._application(trial, "legacy_early")
+
+        result = self._send_rejected(trial, application, self.BEFORE)
+
+        # ACCEPTED, not refused — the whole point of the grace release.
+        self.assertEqual(result["updated"], [str(application.id)])
+        self.assertEqual(result["skipped"], [])
+
+        application.refresh_from_db()
+        self.assertEqual(
+            application.status,
+            RecruitmentApplication.Status.NOT_SHORTLISTED,
+        )
+
+        # THE AUDIT TRAIL RECORDS WHAT HAPPENED, not the word that was sent.
+        history = application.status_history.order_by("-created_at").first()
+        self.assertEqual(
+            history.to_status,
+            RecruitmentApplication.Status.NOT_SHORTLISTED,
+        )
+
+    # -- 2. on the day: they came and did not make it -------------
+
+    def test_rejected_on_or_after_the_trial_lands_as_not_selected(self):
+        trial = self._trial()
+        application = self._application(trial, "legacy_late")
+
+        # ON the trial day, not after it: a decision made on the day itself is
+        # a real result, which is the boundary every date rule here uses.
+        result = self._send_rejected(trial, application, self.ON_THE_DAY)
+
+        self.assertEqual(result["updated"], [str(application.id)])
+        application.refresh_from_db()
+        self.assertEqual(
+            application.status, RecruitmentApplication.Status.NOT_SELECTED
+        )
+
+        # ...and a posting with no trial day at all is never "before" one.
+        looking = Recruitment.objects.create(
+            organization=self.org, sport=self.sport, title="Looking",
+            recruitment_type="player_looking",
+            status=Recruitment.Status.ACTIVE,
+        )
+        other = self._application(looking, "legacy_looking")
+        self._send_rejected(looking, other, self.BEFORE)
+
+        other.refresh_from_db()
+        self.assertEqual(
+            other.status, RecruitmentApplication.Status.NOT_SELECTED
+        )
+
+        # `invited` has no date question — it is always trial_confirmed.
+        invited = self._application(trial, "legacy_invited")
+        with patch("django.utils.timezone.now", return_value=self.BEFORE):
+            ApplicationService.change_status(
+                actor=self.org_actor, recruitment=trial,
+                application_ids=[invited.id], to_status="invited",
+            )
+        invited.refresh_from_db()
+        self.assertEqual(
+            invited.status, RecruitmentApplication.Status.TRIAL_CONFIRMED
+        )
+
+
+# =====================================================================
+# TRIAL FEEDBACK - the player's own account of how it went
+# =====================================================================
+
+
+class TrialFeedbackTests(APITestCase):
+    """
+    The player is asked too, because the org will not reliably come back.
+
+    A HINT, NEVER THE TRUTH. Every test here is ultimately about one line:
+    nothing a player submits may move `application.status`. The org's decision
+    stays the org's, and the self-report only tells them where to look.
+    """
+
+    TRIAL_DATE = date(2030, 5, 10)
+    # Two pinned clocks either side of the trial's last day. The rule is the
+    # CALENDAR day in IST, so "the trial ran this morning" is still too early.
+    DAY_BEFORE = datetime(2030, 5, 9, 10, 0, tzinfo=IST)
+    DAY_AFTER = datetime(2030, 5, 11, 10, 0, tzinfo=IST)
+
+    def setUp(self):
+        self.owner = self._user("fb_owner", "Owner")
+        self.org = Organization.objects.create(
+            name="Feedback FC", username="feedbackfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Rugby", icon_name="mdi:rugby")
+        self.trial = self._trial()
+
+    # -- factories ------------------------------------------------
+
+    def _user(self, username, name):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password="pass1234",
+            username=username,
+        )
+        accept_current_terms(user)
+        UserProfile.objects.create(user=user, name=name)
+        return user
+
+    def _trial(self):
+        recruitment = Recruitment.objects.create(
+            organization=self.org, sport=self.sport, title="Feedback Trial",
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        TrialSession.objects.create(
+            recruitment=recruitment, date=self.TRIAL_DATE
+        )
+        RecruitmentService._sync_trial_window(recruitment)
+        recruitment.refresh_from_db()
+        return recruitment
+
+    def _application(self, username, status_value):
+        return RecruitmentApplication.objects.create(
+            recruitment=self.trial,
+            applicant=self._user(username, username),
+            shared_name=username, shared_phone="9999999999",
+            status=status_value,
+        )
+
+    def _post(self, application, body, when=None):
+        self.client.force_authenticate(user=application.applicant)
+        url = f"/recruitments/applications/{application.id}/feedback"
+        with patch(
+            "django.utils.timezone.now", return_value=when or self.DAY_AFTER
+        ):
+            return self.client.post(url, body, format="json")
+
+    # -- 1. the happy path ----------------------------------------
+
+    def test_a_confirmed_applicant_can_answer_once_the_trial_has_ended(self):
+        application = self._application(
+            "fb_came", RecruitmentApplication.Status.TRIAL_CONFIRMED
+        )
+
+        resp = self._post(application, {
+            "attended": True,
+            "outcome": "selected",
+            "rating": 5,
+            "feedback": "  Well run, good pitch.  ",
+        })
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        application.refresh_from_db()
+        self.assertTrue(application.attended_self_reported)
+        self.assertEqual(application.outcome_self_reported, "selected")
+        self.assertEqual(application.trial_rating, 5)
+        self.assertEqual(application.trial_feedback, "Well run, good pitch.")
+        self.assertIsNotNone(application.feedback_at)
+
+    # -- 2. too early is a 400, not a 404 -------------------------
+
+    def test_answering_before_the_trial_ends_is_refused_with_400(self):
+        """
+        The application IS theirs; only the timing is wrong. A 404 here would
+        read as "your application vanished" the day before a trial.
+        """
+        application = self._application(
+            "fb_early", RecruitmentApplication.Status.TRIAL_CONFIRMED
+        )
+
+        resp = self._post(
+            application,
+            {"attended": True, "outcome": "waiting", "rating": 4},
+            when=self.DAY_BEFORE,
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        application.refresh_from_db()
+        self.assertIsNone(application.feedback_at)
+
+    # -- 3. never called in, never asked --------------------------
+
+    def test_a_not_shortlisted_applicant_is_refused_with_404(self):
+        """
+        Asking somebody who was never called to the trial how the trial went
+        is a bad question. 404, not 403 - the refusal leaks nothing either.
+        """
+        application = self._application(
+            "fb_never", RecruitmentApplication.Status.NOT_SHORTLISTED
+        )
+
+        resp = self._post(
+            application, {"attended": True, "outcome": "waiting", "rating": 3}
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+        application.refresh_from_db()
+        self.assertIsNone(application.feedback_at)
+
+    # -- 4. did not attend is an ANSWER, not an error -------------
+
+    def test_not_attending_clears_the_outcome_and_the_rating(self):
+        application = self._application(
+            "fb_absent", RecruitmentApplication.Status.TRIAL_CONFIRMED
+        )
+
+        # Whatever the client left in the form rides along and is dropped:
+        # rating a trial you did not attend is meaningless, and so is an
+        # outcome.
+        resp = self._post(application, {
+            "attended": False,
+            "outcome": "selected",
+            "rating": 5,
+            "feedback": "Could not make it, work.",
+        })
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        application.refresh_from_db()
+        self.assertFalse(application.attended_self_reported)
+        self.assertEqual(application.outcome_self_reported, "")
+        self.assertIsNone(application.trial_rating)
+        # The note survives - "could not make it, work" is worth reading.
+        self.assertEqual(
+            application.trial_feedback, "Could not make it, work."
+        )
+        # Stamped, so "did not attend" is distinguishable from "never
+        # answered".
+        self.assertIsNotNone(application.feedback_at)
+
+    # -- 5. answering again updates in place ----------------------
+
+    def test_answering_twice_updates_in_place_and_re_stamps(self):
+        """
+        "Still waiting to hear" stops being true the week the org calls.
+        """
+        application = self._application(
+            "fb_again", RecruitmentApplication.Status.TRIAL_CONFIRMED
+        )
+
+        self._post(
+            application, {"attended": True, "outcome": "waiting", "rating": 4}
+        )
+        application.refresh_from_db()
+        first_stamp = application.feedback_at
+        self.assertEqual(application.outcome_self_reported, "waiting")
+
+        later = datetime(2030, 6, 1, 10, 0, tzinfo=IST)
+        resp = self._post(
+            application,
+            {"attended": True, "outcome": "selected", "rating": 5},
+            when=later,
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        # ONE row, rewritten - not a second answer sitting beside a stale one.
+        self.assertEqual(
+            RecruitmentApplication.objects.filter(
+                recruitment=self.trial
+            ).count(),
+            1,
+        )
+        application.refresh_from_db()
+        self.assertEqual(application.outcome_self_reported, "selected")
+        self.assertEqual(application.trial_rating, 5)
+        self.assertGreater(application.feedback_at, first_stamp)
+
+    # -- 6. THE WHOLE DESIGN --------------------------------------
+
+    def test_answering_never_changes_the_application_status(self):
+        """
+        A player saying "I was selected" does not select them. If this ever
+        fails, the separation the whole feature rests on is gone.
+        """
+        application = self._application(
+            "fb_status", RecruitmentApplication.Status.TRIAL_CONFIRMED
+        )
+
+        self._post(
+            application, {"attended": True, "outcome": "selected", "rating": 5}
+        )
+
+        application.refresh_from_db()
+        self.assertEqual(
+            application.status,
+            RecruitmentApplication.Status.TRIAL_CONFIRMED,
+        )
+        # ...and no audit row either: that trail answers "who changed the
+        # status", and this was not a status change.
+        self.assertFalse(
+            RecruitmentApplicationStatusHistory.objects.filter(
+                application=application
+            ).exists()
+        )

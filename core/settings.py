@@ -359,6 +359,12 @@ REST_FRAMEWORK = {
         # and withdraw, which are three answers to one question.
         'guardian_consent_read': '20/hour',
         'guardian_consent_write': '10/hour',
+        # The player's own account of a trial (recruitments.throttles.
+        # TrialFeedbackThrottle). Per ACTOR, and modest: the honest
+        # shape is one answer per trial plus a later correction, but it
+        # is a write any logged-in player can reach, so it gets a
+        # ceiling of its own rather than the shared 'user' budget.
+        'recruitment_feedback': '20/min',
         'message_share': '30/min',   # per actor — see messaging.throttles
         'chat_media': '30/min',      # per actor — chat photo uploads
         # Feed impression flushes (see feed.throttles). Its own scope so a long
@@ -619,8 +625,24 @@ _REDIS_URL = os.getenv("REDIS_URL")
 if _REDIS_URL:
     CACHES = {
         "default": {
-            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            # NOT django.core.cache.backends.redis.RedisCache directly.
+            # Django's own backend has no IGNORE_EXCEPTIONS (that is a
+            # django-redis feature), so an unreachable Redis raised
+            # ConnectionError into the view and /user/token/refresh
+            # answered 500. See core/cache/resilient.py and the
+            # "Cache and Redis" section of CLAUDE.md.
+            "BACKEND": "core.cache.resilient.ResilientRedisCache",
             "LOCATION": _REDIS_URL,
+            "OPTIONS": {
+                # Passed straight to redis-py's ConnectionPool.from_url.
+                # SHORT ON PURPOSE: the circuit breaker means only the
+                # first request in a cooldown window dials Redis at all,
+                # and this is what bounds that one. The default is no
+                # timeout, which is how a dead Redis hangs a request
+                # instead of failing it.
+                "socket_connect_timeout": 1,
+                "socket_timeout": 1,
+            },
         }
     }
 else:
@@ -629,6 +651,13 @@ else:
             "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         }
     }
+
+# Seconds this process stops dialling Redis after a cache failure.
+# Mirrors CELERY_DISPATCH_FAILURE_COOLDOWN below, and for the same
+# reason: without it every request pays the connect timeout and a dead
+# Redis makes the app unusably slow rather than merely degraded.
+CACHE_FAILURE_COOLDOWN = int(os.getenv("CACHE_FAILURE_COOLDOWN") or 30)
+
 # ------ CACHE END ------/
 
 # ------ CELERY (background jobs) ------/

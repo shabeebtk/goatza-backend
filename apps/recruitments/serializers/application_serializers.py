@@ -5,14 +5,21 @@ from rest_framework import serializers
 from apps.accounts.models import User
 from apps.organization.models import Organization
 from apps.recruitments.models import (
-    RecruitmentQuestion, RecruitmentApplication, Recruitment
+    RecruitmentQuestion, RecruitmentApplication, Recruitment,
+    RecruitmentApplicationStatusHistory,
 )
 from apps.sports.serializers.sports_serializers import SportSerializer
 # Reuse the exact same E.164-ish phone pattern the recruitment contact
 # validation already uses, so the two can never drift.
 from apps.recruitments.serializers.recruitment_serializers import PHONE_RE
+from apps.recruitments.legacy_status import LEGACY_STATUSES
 from apps.recruitments.serializers.recruitment_list_serializers import (
     ApplicationAgeCategorySerializer,
+    application_session_payload,
+)
+from apps.recruitments.feedback_window import (
+    can_give_feedback,
+    prompt_window_open,
 )
 
 
@@ -61,6 +68,16 @@ class RecruitmentApplySerializer(serializers.Serializer):
     # (older clients, and eligibility is never enforced by the platform) — the
     # client requires a choice in the UI when the recruitment has groups.
     age_category = serializers.UUIDField(
+        required=False,
+        allow_null=True
+    )
+
+    # The trial date they are attending. Required, belongs-to-this-trial,
+    # not-cancelled and not-past are all decided by
+    # ApplicationService._resolve_session, under the recruitment row lock
+    # — a date that is open when the form renders can be cancelled before
+    # it is submitted, so the shape is all this field can honestly check.
+    session = serializers.UUIDField(
         required=False,
         allow_null=True
     )
@@ -283,6 +300,13 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
     # null when the recruitment had no age groups, or the applicant applied
     # before groups existed / the group was deleted on a later edit.
     age_category = ApplicationAgeCategorySerializer(read_only=True)
+    # Which date they said they would come to, on a choose_one trial.
+    # Null on every other posting — there is nothing to pick.
+    session = serializers.SerializerMethodField()
+    # The trial fee as the gate recorded it. INFORMATION, never a gate:
+    # nothing reads it to decide whether somebody may be confirmed or
+    # selected.
+    fee_marked_by = serializers.SerializerMethodField()
 
     class Meta:
         model = RecruitmentApplication
@@ -296,7 +320,41 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
             "applicant",
             "highlights_count",
             "age_category",
+            "session",
+            "fee_paid",
+            "fee_paid_at",
+            "fee_marked_by",
+            # THE PLAYER'S OWN ACCOUNT, enough for a chip on the row. A HINT:
+            # it is what the player says, never what the org decided —
+            # `status` above is the only thing that carries a decision. The
+            # rating and the written note are DETAIL-only, so a list the org
+            # scans does not show a number next to a face.
+            "attended_self_reported",
+            "outcome_self_reported",
+            "feedback_at",
+            # Birth year outside the chosen group when they applied. A column,
+            # computed server-side by ApplicationService.apply — no query.
+            "age_mismatch_at_apply",
         ]
+
+    def get_session(self, obj):
+        return application_session_payload(obj)
+
+    def get_fee_marked_by(self, obj):
+        """
+        The member who marked it, for the tooltip. SET_NULL, so an
+        member who has since left reads as null rather than taking the
+        fee record with them. select_related by the list selector.
+        """
+        member = obj.fee_marked_by
+        if member is None:
+            return None
+
+        profile = getattr(member.user, "profile", None)
+        return {
+            "id": str(member.id),
+            "name": getattr(profile, "name", "") or member.user.username or "",
+        }
 
     def get_highlights_count(self, obj):
         """
@@ -315,15 +373,71 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
         return counts.get(obj.applicant_id, 0)
 
 
+# STATUS HISTORY ENTRY — one move in an application's pipeline, for the
+# drawer's timeline. `changed_by` is the org member who made it, or null for
+# the applicant's own moves and for system writes (the v3 status migration).
+# The member → user → profile chain is select_related on the prefetch in
+# ApplicationSelector.get_application_detail, so this issues no queries.
+class ApplicationStatusHistorySerializer(serializers.ModelSerializer):
+    changed_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RecruitmentApplicationStatusHistory
+        fields = [
+            "id",
+            "from_status",
+            "to_status",
+            "note",
+            "created_at",
+            "changed_by",
+        ]
+
+    def get_changed_by(self, obj):
+        member = obj.changed_by
+        if member is None:
+            return None
+
+        profile = getattr(member.user, "profile", None)
+        return {
+            "id": str(member.id),
+            "name": getattr(profile, "name", "") or member.user.username or "",
+        }
+
+
 # DETAIL — list-item fields + the answered custom questions. The stored answers
 # are one row per question for text/number/single-choice and one row PER OPTION
 # for checkbox; get_answers regroups them into a single object per question,
 # ordered by the question's display_order.
 class ApplicationDetailSerializer(ApplicantListItemSerializer):
     answers = serializers.SerializerMethodField()
+    applicant_birth_year = serializers.SerializerMethodField()
+    # Newest first — the prefetch in get_application_detail sets the order.
+    status_history = ApplicationStatusHistorySerializer(
+        many=True, read_only=True
+    )
 
     class Meta(ApplicantListItemSerializer.Meta):
-        fields = ApplicantListItemSerializer.Meta.fields + ["answers"]
+        fields = ApplicantListItemSerializer.Meta.fields + [
+            "answers",
+            "applicant_birth_year",
+            "status_history",
+            # THE OWNING ORG ONLY. This serializer is already behind the
+            # ownership gate on the detail view, and that gate is what keeps
+            # a rating private — there is no `is_public` column deciding it.
+            # If ratings ever go public, it is this line that changes.
+            "trial_rating",
+            "trial_feedback",
+        ]
+
+    def get_applicant_birth_year(self, obj):
+        """
+        The LIVE profile birth year, next to the frozen age_mismatch_at_apply,
+        so the drawer can tell "mismatched at apply" from "since corrected".
+        applicant__profile is select_related by the detail selector.
+        """
+        profile = getattr(obj.applicant, "profile", None)
+        birthdate = getattr(profile, "birthdate", None)
+        return birthdate.year if birthdate else None
 
     def get_answers(self, obj):
         # obj.answers is prefetched (ordered by question display_order) with
@@ -401,6 +515,11 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
     # history); this flag is how the row says the day has passed. A property
     # over event_date, so it costs nothing on the select_related row.
     is_trial_over = serializers.BooleanField(read_only=True)
+    # The other half of the window: when applications stopped, which on an
+    # "attend every date" trial is the FIRST date, not the last.
+    trial_end_date = serializers.DateTimeField(read_only=True)
+    applications_close_at = serializers.DateTimeField(read_only=True)
+    session_mode = serializers.CharField(read_only=True)
 
     class Meta:
         model = Recruitment
@@ -413,6 +532,14 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
             "event_date",
             "application_deadline",
             "is_trial_over",
+            "trial_end_date",
+            "applications_close_at",
+            "session_mode",
+            # The player's row shows a fee line only when there is a
+            # fee to show.
+            "is_paid",
+            "fee_amount",
+            "fee_currency",
             "organization",
             "sport",
         ]
@@ -422,6 +549,17 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
 class MyApplicationListSerializer(serializers.ModelSerializer):
     recruitment = MyApplicationRecruitmentSerializer(read_only=True)
     age_category = ApplicationAgeCategorySerializer(read_only=True)
+    # The date they picked, with its venue resolved — the one thing a
+    # player on a city tour needs the row to say. Null unless choose_one.
+    session = serializers.SerializerMethodField()
+    # Read-only for the player: whether the org has marked their fee
+    # collected. Nothing here is theirs to change.
+    fee_paid = serializers.BooleanField(read_only=True)
+    # THEIR OWN ANSWERS, handed back so the client shows "You rated this 4★"
+    # instead of asking again. Never another player's — this serializer is
+    # only ever built from the caller's own rows.
+    can_give_feedback = serializers.SerializerMethodField()
+    feedback_window_open = serializers.SerializerMethodField()
 
     class Meta:
         model = RecruitmentApplication
@@ -432,29 +570,160 @@ class MyApplicationListSerializer(serializers.ModelSerializer):
             "updated_at",
             "recruitment",
             "age_category",
+            "session",
+            "fee_paid",
+            "attended_self_reported",
+            "outcome_self_reported",
+            "trial_rating",
+            "trial_feedback",
+            "feedback_at",
+            # SHOULD WE ASK. Computed server-side so the client never
+            # re-derives "trial over, and my status is one of these three"
+            # from dates and statuses and gets it subtly wrong — which is
+            # how a prompt appears that then 400s. Show the prompt when
+            # BOTH are true; see feedback_window.py.
+            "can_give_feedback",
+            "feedback_window_open",
         ]
+
+    def get_session(self, obj):
+        return application_session_payload(obj)
+
+    def get_can_give_feedback(self, obj):
+        return can_give_feedback(obj, obj.recruitment)
+
+    def get_feedback_window_open(self, obj):
+        return prompt_window_open(obj.recruitment)
 
 
 # =========================================================
 # ORG STATUS-CHANGE REQUEST SERIALIZERS
 # =========================================================
 
-# Bulk multi-select targets (Invited is single-only, per product decision #3).
+# Bulk multi-select targets. Mirrors ApplicationService.STATUS_CHANGE_TARGETS,
+# in pipeline order: `invited` and `rejected` stay valid values on old rows but
+# are no longer settable.
 BULK_STATUS_TARGETS = [
     RecruitmentApplication.Status.REVIEWING,
     RecruitmentApplication.Status.SHORTLISTED,
+    RecruitmentApplication.Status.TRIAL_CONFIRMED,
+    RecruitmentApplication.Status.NOT_SHORTLISTED,
     RecruitmentApplication.Status.SELECTED,
-    RecruitmentApplication.Status.REJECTED,
+    RecruitmentApplication.Status.NOT_SELECTED,
 ]
 
-# Single-change (drawer) targets — free transitions. `invited` is reserved for
-# the future personal-invite feature and is NOT offered in the org UI/API.
-SINGLE_STATUS_TARGETS = [
-    RecruitmentApplication.Status.REVIEWING,
-    RecruitmentApplication.Status.SHORTLISTED,
-    RecruitmentApplication.Status.SELECTED,
-    RecruitmentApplication.Status.REJECTED,
-]
+# Single-change (drawer) targets — free transitions, same set as bulk.
+SINGLE_STATUS_TARGETS = list(BULK_STATUS_TARGETS)
+
+# WHAT THE ENDPOINTS ACCEPT, which is deliberately wider than what they OFFER.
+#
+# Goatza is an installed PWA: old JavaScript lives on phones for days after a
+# deploy and still sends `invited` or `rejected`. A ChoiceField that refuses
+# them 400s before ApplicationService ever sees the request, and the mapping
+# that exists precisely to rescue those calls never runs — so the accepted set
+# includes them and the service translates
+# (ApplicationService._map_legacy_target).
+#
+# The TARGETS lists above stay clean: they are what the client renders as
+# buttons, and nothing should offer a retired status to somebody choosing one.
+ACCEPTED_STATUS_VALUES = [*BULK_STATUS_TARGETS, *LEGACY_STATUSES]
+
+
+# =========================================================
+# TRIAL FEEDBACK REQUEST SERIALIZER (the player's own account)
+# =========================================================
+
+class TrialFeedbackSerializer(serializers.Serializer):
+    """
+    "How did the trial go?", as the PLAYER answers it.
+
+    DID NOT ATTEND IS AN ACCEPTED ANSWER, not an error. Rating a trial you
+    did not go to is meaningless and so is an outcome, so both are forced
+    empty here rather than argued with — the request succeeds and the org
+    learns something true.
+
+    The rating is required of somebody who DID attend: a row that says "I
+    came" and nothing else tells the org nothing they did not already have.
+    The written note stays optional, always — most people will not write one,
+    and demanding prose is how you get "good".
+    """
+
+    attended = serializers.BooleanField()
+    outcome = serializers.ChoiceField(
+        choices=RecruitmentApplication.SelfOutcome.choices,
+        required=False,
+        allow_blank=True,
+    )
+    rating = serializers.IntegerField(
+        min_value=1, max_value=5, required=False, allow_null=True,
+    )
+    feedback = serializers.CharField(
+        max_length=1000, required=False, allow_blank=True,
+    )
+
+    def validate_feedback(self, value):
+        return (value or "").strip()
+
+    def validate(self, attrs):
+        if not attrs["attended"]:
+            # NOT an error — see the class docstring. Anything the client
+            # left in the form is dropped here so the columns cannot
+            # disagree with the answer.
+            attrs["outcome"] = ""
+            attrs["rating"] = None
+            return attrs
+
+        if attrs.get("rating") is None:
+            raise serializers.ValidationError(
+                {"rating": "Rate the trial from 1 to 5."}
+            )
+
+        # REQUIRED of an attendee, because the three choices cover every
+        # state a player can be in — including not knowing yet, which is
+        # what `waiting` is for. A blank outcome on somebody who attended
+        # would be a hole in the org's filter.
+        if not attrs.get("outcome"):
+            raise serializers.ValidationError(
+                {"outcome": "Tell us how it went."}
+            )
+
+        return attrs
+
+
+# =========================================================
+# TRIAL FEE REQUEST SERIALIZERS
+# =========================================================
+
+class ApplicationFeeSerializer(serializers.Serializer):
+    """One application's fee flag. `false` unmarks it."""
+    fee_paid = serializers.BooleanField()
+
+
+class MessageApplicantsSerializer(serializers.Serializer):
+    """"Message these players." Capped at the same 100 the bulk status uses."""
+
+    application_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=False,
+        max_length=100,
+    )
+    body = serializers.CharField(max_length=1000)
+
+    def validate_body(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Write something to send.")
+        return value
+
+
+class BulkApplicationFeeSerializer(serializers.Serializer):
+    """Same shape as the bulk status request, capped the same way."""
+    application_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=False,
+        max_length=100,
+    )
+    fee_paid = serializers.BooleanField()
 
 
 class BulkApplicationStatusSerializer(serializers.Serializer):
@@ -463,7 +732,7 @@ class BulkApplicationStatusSerializer(serializers.Serializer):
         allow_empty=False,
         max_length=100,
     )
-    status = serializers.ChoiceField(choices=BULK_STATUS_TARGETS)
+    status = serializers.ChoiceField(choices=ACCEPTED_STATUS_VALUES)
     note = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -473,7 +742,7 @@ class BulkApplicationStatusSerializer(serializers.Serializer):
 
 
 class SingleApplicationStatusSerializer(serializers.Serializer):
-    status = serializers.ChoiceField(choices=SINGLE_STATUS_TARGETS)
+    status = serializers.ChoiceField(choices=ACCEPTED_STATUS_VALUES)
     note = serializers.CharField(
         required=False,
         allow_blank=True,

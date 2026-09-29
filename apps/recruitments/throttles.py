@@ -22,3 +22,21 @@ class SaveRecruitmentThrottle(ActorScopedThrottle):
     """
 
     scope = "recruitment_save"
+
+
+class TrialFeedbackThrottle(ActorScopedThrottle):
+    """
+    20/min on the player's own account of a trial (``recruitment_feedback``
+    in DEFAULT_THROTTLE_RATES).
+
+    Per ACTOR like its neighbour, though in practice this is always a player
+    acting as themselves — an org has no reason to call it.
+
+    MODEST rather than loose. Nobody spams their own feedback: the honest
+    shape is one answer per trial, plus a correction weeks later when
+    "waiting" turns into "selected". But it is a write open to any logged-in
+    player, so it gets a ceiling. Its own scope so a burst never drains the
+    shared 'user' budget that applying to the next trial draws on.
+    """
+
+    scope = "recruitment_feedback"

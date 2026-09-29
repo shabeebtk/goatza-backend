@@ -5,6 +5,10 @@ class ActorScopedThrottle(SimpleRateThrottle):
     """
     Rate-limits per ACTOR, not per user.
 
+    NOTE, for every subclass of this across the app: the bucket lives in the
+    cache, so with Redis down this fails OPEN rather than raising. See
+    core.throttles for why that trade was made and what surfaces it.
+
     UserRateThrottle keys on the user's pk, which would make one person's org
     actions and personal actions drain the same bucket. The dual-actor rule
     says those are different actors, so they get different buckets.

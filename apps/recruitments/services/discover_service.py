@@ -19,10 +19,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from django.core.cache import cache
-from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.recruitments.models import RecruitmentDiscoverImpression
 from apps.recruitments.selectors.player_context_selectors import (
     PlayerContextSelector,
 )
@@ -283,74 +281,6 @@ class RecruitmentDiscoverService:
         if parsed <= 0:
             return DEFAULT_MAX_DISTANCE_KM
         return min(parsed, MAX_DISTANCE_KM_CEILING)
-
-    # ------------------------------------------------------------ #
-    # METRICS (§8)
-    # ------------------------------------------------------------ #
-
-    @classmethod
-    def record_impressions(cls, actor, sections, now=None):
-        """
-        Log (player, recruitment, score, section) for a served page.
-
-        Written on cache MISS only. The cached payload is literally the same
-        page, so the 10-minute cache window doubles as the de-duplication
-        window for "this was served" — and paying 40 inserts on a response that
-        otherwise costs one Redis read would be the most expensive thing on the
-        endpoint.
-
-        Fire-and-forget: a metrics failure must never turn a working discover
-        page into a 500.
-        """
-        if actor is None or not actor.is_user:
-            # Org actors browse discovery; they do not generate player-outcome
-            # training data, and §8's metrics are all per-player.
-            return 0
-
-        now = now or timezone.now()
-
-        rows = [
-            (section, recruitment, match)
-            for section in SECTION_ORDER
-            for recruitment, match in sections.get(section, [])
-        ]
-        if not rows:
-            return 0
-
-        try:
-            # UPDATE-then-INSERT, the same shape as FeedImpressionService.record:
-            # ON CONFLICT DO UPDATE assigns the EXCLUDED value, so it would reset
-            # served_count to 1 instead of counting it.
-            seen_filter = Q()
-            for section, recruitment, _ in rows:
-                seen_filter |= Q(section=section, recruitment_id=recruitment.id)
-
-            RecruitmentDiscoverImpression.objects.filter(
-                seen_filter, user=actor.user
-            ).update(served_count=F("served_count") + 1, last_served_at=now)
-
-            RecruitmentDiscoverImpression.objects.bulk_create(
-                [
-                    RecruitmentDiscoverImpression(
-                        user=actor.user,
-                        recruitment=recruitment,
-                        section=section,
-                        match_score=match.score,
-                        is_eligible=match.is_eligible,
-                        first_served_at=now,
-                        last_served_at=now,
-                    )
-                    for section, recruitment, match in rows
-                ],
-                ignore_conflicts=True,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                f"RecruitmentDiscoverService | impression log failed | {exc}"
-            )
-            return 0
-
-        return len(rows)
 
     # ------------------------------------------------------------ #
     # "ALL" TAB (§4) — same scorer, flat list

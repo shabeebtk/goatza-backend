@@ -21,13 +21,19 @@ class DashboardSelector:
     such filter.
     """
 
-    # Statuses shown in the funnel, in pipeline order. Rejected/withdrawn are
-    # returned too (as muted totals) but never part of the funnel itself.
+    # Statuses shown in the funnel, in pipeline order. The negative outcomes
+    # and withdrawals are returned too (as muted totals) but are never part of
+    # the funnel itself.
+    #
+    # `invited` became `trial_confirmed` in the v3 split and is gone from the
+    # choices; the funnel names its replacement. Historical rows still holding
+    # the old value simply fall outside the funnel until the backfill rewrites
+    # them, which is the same place `rejected` rows have always sat.
     FUNNEL_STATUSES = [
         RecruitmentApplication.Status.APPLIED,
         RecruitmentApplication.Status.REVIEWING,
         RecruitmentApplication.Status.SHORTLISTED,
-        RecruitmentApplication.Status.INVITED,
+        RecruitmentApplication.Status.TRIAL_CONFIRMED,
         RecruitmentApplication.Status.SELECTED,
     ]
 
@@ -192,7 +198,7 @@ class DashboardSelector:
             .values(
                 "id", "title", "recruitment_type", "status",
                 "views_count", "applications_count",
-                "shortlisted_count", "selected_count",
+                "confirmed_count", "selected_count",
                 "application_deadline", "event_date",
             )[:10]
         )

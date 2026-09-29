@@ -22,6 +22,7 @@ LIST_PREFETCH_RELATED = (
     "media",
     "age_categories",
     "benefits",
+    "sessions",
 )
 
 
@@ -441,7 +442,9 @@ class RecruitmentSelector:
             Recruitment.objects
             .filter(id=recruitment_id, is_deleted=False)
             .select_related("organization")
-            .prefetch_related("questions__options", "age_categories")
+            .prefetch_related(
+                "questions__options", "age_categories", "sessions"
+            )
             .first()
         )
 
@@ -468,6 +471,7 @@ class RecruitmentSelector:
             "questions__options",
             "applications",
             "age_categories",
+            "sessions",
             "contacts",
             "benefits",
             "requirements",

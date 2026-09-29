@@ -81,7 +81,7 @@ class PublicRecruitmentDetailAPIView(PublicAPIView):
             # twice over: this payload is cacheable and shareable by every
             # layer between us and the browser, and the owner-only fields
             # (views_count, saves_count, status, max_applications,
-            # shortlisted_count, selected_count) are precisely the ones that
+            # confirmed_count, selected_count) are precisely the ones that
             # must never appear on a URL a stranger can open. An org admin who
             # wants their numbers has /recruitments/<id>/details, which is
             # authenticated and un-cacheable, and the frontend sends them

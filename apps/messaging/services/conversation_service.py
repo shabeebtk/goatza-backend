@@ -27,18 +27,43 @@ class ConversationService:
         actor_user=None,
         actor_org=None,
         target_user=None,
-        target_org=None
+        target_org=None,
+        force_active=False
     ):
         """
         Entry point:
         - prevents duplicate conversations
         - applies follow/request logic
+
+        ``force_active`` OPENS THE THREAD WITHOUT THE REQUEST GATE: the
+        conversation is created ACTIVE with both participants accepted, and
+        an existing REQUESTED one is lifted to ACTIVE.
+
+        WHY THAT IS ALLOWED. The request gate approximates consent with a
+        mutual follow. Its one caller here has something strictly stronger
+        and more specific: the recipient APPLIED to this organization's
+        recruitment. They asked this club to get in touch about this trial.
+        A message saying the venue moved, delivered into a Requests folder
+        the player may never open, has failed at the only job it had.
+
+        WHAT IT DOES NOT DO:
+          * It does NOT bypass the block guard. That runs below, first,
+            unchanged, for every caller.
+          * It does not make the org followed, does not make the thread
+            permanently open, and takes nothing away from the player: they
+            can block or report exactly as before.
+          * It is NOT general-purpose. The only caller is
+            ``RecruitmentMessageService.fan_out``, which asserts the sender
+            is an organization and the recipient has a live application on
+            the recruitment being messaged. Anything else passing True here
+            is a bug — it would turn the request gate into a suggestion.
         """
 
         # BLOCK GUARD — before the lookup, so a blocked pair can neither open a
         # new thread nor re-surface an old one as a message request. Raises
         # BlockedError (403); ShareService guards its own recipients first with
         # the MessageError flavour so a fan-out still reports per target.
+        # AHEAD OF force_active ON PURPOSE: a block outranks an application.
         require_not_blocked(
             actor_user or actor_org, target_user or target_org
         )
@@ -51,12 +76,40 @@ class ConversationService:
         )
 
         if conversation:
+            if force_active:
+                ConversationService._lift_to_active(
+                    conversation, target_user, target_org
+                )
             return conversation, False
 
         # CREATE NEW
         return ConversationService._create_conversation(
-            actor_user, actor_org, target_user, target_org
+            actor_user, actor_org, target_user, target_org,
+            force_active=force_active
         ), True
+
+    @staticmethod
+    def _lift_to_active(conversation, target_user, target_org):
+        """
+        Take an existing REQUESTED thread out of the Requests folder.
+
+        Only the RECIPIENT's participant row is touched — the sender's was
+        already accepted when they opened the thread. A BLOCKED
+        conversation is left alone: the block guard above has already
+        refused this call, so reaching here with one would be a bug, and
+        quietly reviving it is the last thing to do about that.
+        """
+        if conversation.status != Conversation.Status.REQUESTED:
+            return
+
+        conversation.status = Conversation.Status.ACTIVE
+        conversation.save(update_fields=["status"])
+
+        ConversationParticipant.objects.filter(
+            conversation=conversation,
+            user=target_user,
+            org=target_org,
+        ).update(has_accepted=True)
 
     # FIND EXISTING 
     
@@ -103,7 +156,9 @@ class ConversationService:
 
     # CREATE CONVERSATION
     @staticmethod
-    def _create_conversation(actor_user, actor_org, target_user, target_org):
+    def _create_conversation(
+        actor_user, actor_org, target_user, target_org, force_active=False
+    ):
 
         with transaction.atomic():
 
@@ -118,10 +173,16 @@ class ConversationService:
             ).first()
 
             if existing:
+                if force_active:
+                    ConversationService._lift_to_active(
+                        existing, target_user, target_org
+                    )
                 return existing
 
-            # CHECK RELATIONSHIP
-            is_active = FollowService.is_mutual_follow(
+            # CHECK RELATIONSHIP. force_active short-circuits it: the
+            # caller already has a stronger consent signal than a mutual
+            # follow (see get_or_create_conversation).
+            is_active = force_active or FollowService.is_mutual_follow(
                 actor_user, actor_org, target_user, target_org
             )
 
@@ -142,8 +203,17 @@ class ConversationService:
                     }
                 )
             except IntegrityError:
-                # RACE CONDITION SAFE
-                return Conversation.objects.get(direct_pair_key=pair_key)
+                # RACE CONDITION SAFE. The winner may have created it as a
+                # REQUESTED thread, so lift it here too — otherwise whether
+                # a trial update reaches the player depends on who won.
+                conversation = Conversation.objects.get(
+                    direct_pair_key=pair_key
+                )
+                if force_active:
+                    ConversationService._lift_to_active(
+                        conversation, target_user, target_org
+                    )
+                return conversation
 
             if created:
                 ConversationService._create_participants(

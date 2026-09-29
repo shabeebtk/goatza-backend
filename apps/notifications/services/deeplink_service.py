@@ -126,6 +126,23 @@ def build_notification_url(notification) -> str:
         recruitment_id = notification.recruitment_id or data.get("recruitment_id", "")
         return f"{base}/recruitments/{recruitment_id}" if recruitment_id else fallback
 
+    if ntype == Notification.Type.TRIAL_REMINDER:
+        # Straight to the PASS, not the posting: at 6pm the night
+        # before, the one thing the player needs is the thing they show
+        # at the gate.
+        application_id = data.get("application_id", "")
+        return (
+            f"{base}/applications/{application_id}/pass"
+            if application_id else fallback
+        )
+
+    if ntype == Notification.Type.RECRUITMENT_ANNOUNCEMENT:
+        # The posting, not an announcement route: announcements render on the
+        # recruitment page, and a player tapping "the venue has moved" wants
+        # the posting with the new venue on it.
+        recruitment_id = notification.recruitment_id or data.get("recruitment_id", "")
+        return f"{base}/recruitments/{recruitment_id}" if recruitment_id else fallback
+
     if ntype == Notification.Type.CAREER_ADD_PROMPT:
         # An action, not a destination: the in-app row opens CareerAddPromptSheet
         # in place, so the notifications list is exactly where the working

@@ -1,0 +1,27 @@
+{% extends "emails/base.html" %}
+{% comment %}
+An announcement: the org speaking, in its own words, to the people on one
+recruitment — "the venue has moved", "bring your own water", "results are up".
+
+DELIBERATELY PLAIN. Every other recruitment email has a badge and a headline
+this app wrote; this one has a heading and a paragraph the CLUB wrote, and the
+template's job is to stay out of the way. The recruitment card underneath is
+what tells the reader WHICH trial this is about, and it is the shared include
+so it can never drift from the other two.
+
+`announcement_body` arrives as plain text and is rendered with `linebreaks`,
+so an org's newlines survive and its angle brackets are escaped. It is never
+marked safe — this is the one email whose body is user input.
+
+Context: announcement_title, announcement_body, player_name, session_line
+(optional, "Kochi round · Sat 10 Oct"), plus the shared recruitment-card values.
+{% endcomment %}
+{% block preheader %}{{ announcement_title }}{% endblock %}
+{% block content %}<span style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:11px;letter-spacing:1px;text-transform:uppercase;border-radius:999px;padding:5px 12px;background-color:#eef2ee;color:#007a3d;">Update</span><div style="height:12px;line-height:12px;">&nbsp;</div><div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">{{ announcement_title }}</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Hi <b style="color:#111111;">{{ player_name }}</b>, <b style="color:#007a3d;">{{ org_name }}</b> posted an update about:</p>{% include "emails/_recruitment_card.html" %}{% if session_line %}<p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#555555;line-height:1.65;">This update is about <b style="color:#111111;">{{ session_line }}</b>.</p>{% endif %}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;">
+  <tr><td style="border-left:3px solid #00B562;padding:2px 0 2px 14px;">
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#333333;line-height:1.65;">{{ announcement_body|linebreaks }}</div>
+  </td></tr></table><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#00B562;border-radius:10px;">
+    <a href="{{ frontend_base_url }}/recruitments/{{ recruitment_id }}" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#ffffff;text-decoration:none;letter-spacing:0.4px;">View details</a>
+  </td></tr></table>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because you applied to this recruitment on Goatza.{% endblock %}

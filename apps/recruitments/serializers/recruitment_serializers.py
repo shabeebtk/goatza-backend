@@ -1,4 +1,8 @@
 import re
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
+
+from django.conf import settings
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
@@ -239,6 +243,72 @@ class RecruitmentLocationInputSerializer(serializers.Serializer):
     longitude = serializers.FloatField(required=False, allow_null=True)
 
 
+# TRIAL SESSION INPUT
+# One date an open trial runs on. `id` is optional and only meaningful on
+# update — the service diff-syncs on it so an edit moves a date in place
+# instead of recreating it (which would drop the date every applicant picked).
+# The venue block is the same place payload the recruitment itself takes;
+# leaving it out means "inherit the recruitment's venue".
+class TrialSessionInputSerializer(serializers.Serializer):
+
+    id = serializers.UUIDField(required=False)
+    title = serializers.CharField(
+        max_length=120, required=False, allow_blank=True
+    )
+    date = serializers.DateField()
+    start_time = serializers.TimeField(required=False, allow_null=True)
+    end_time = serializers.TimeField(required=False, allow_null=True)
+    venue_name = serializers.CharField(
+        max_length=255, required=False, allow_blank=True
+    )
+    venue_link = serializers.URLField(
+        max_length=500, required=False, allow_blank=True
+    )
+    location = RecruitmentLocationInputSerializer(required=False)
+    is_cancelled = serializers.BooleanField(default=False)
+    display_order = serializers.IntegerField(default=0)
+
+    def validate(self, attrs):
+        start_time = attrs.get("start_time")
+        end_time = attrs.get("end_time")
+
+        if start_time and end_time and end_time <= start_time:
+            raise serializers.ValidationError(
+                "The end time must be after the start time."
+            )
+
+        return attrs
+
+
+def session_starts_at(session):
+    """
+    A validated session payload row as an aware datetime, the same way
+    ``TrialSession.starts_at`` reads a stored one: its start time, or 23:59
+    when it carries none. Used here to check the deadline against the first
+    date BEFORE the row exists.
+    """
+    return datetime.combine(
+        session["date"],
+        session.get("start_time") or time(23, 59),
+        tzinfo=ZoneInfo(settings.RECRUITMENT_TIMEZONE),
+    )
+
+
+def first_session(sessions):
+    """The non-cancelled session a trial starts on, or None."""
+    live = [s for s in sessions if not s.get("is_cancelled")]
+    if not live:
+        return None
+    return min(
+        live,
+        key=lambda s: (
+            s["date"],
+            s.get("start_time") or time(23, 59),
+            s.get("display_order", 0),
+        ),
+    )
+
+
 # CREATE RECRUITMENT SERIALIZER
 class RecruitmentCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
@@ -254,6 +324,17 @@ class RecruitmentCreateSerializer(serializers.Serializer):
     recruitment_type = serializers.ChoiceField(
         choices=Recruitment.Type.choices
     )
+    # Only means anything with 2+ dates; validate() forces it back to
+    # `all` below when there are fewer, rather than erroring.
+    session_mode = serializers.ChoiceField(
+        choices=Recruitment.SessionMode.choices,
+        default=Recruitment.SessionMode.ALL
+    )
+    # An open-trial setting. validate() forces it off on every other type
+    # rather than erroring: it is a checkbox the wizard hides, so a stray
+    # true is a stale draft, not something the org asked for and should be
+    # argued with.
+    auto_confirm = serializers.BooleanField(default=False)
     # Draft vs publish on create only. Other transitions (close/cancel/reopen)
     # go through the /status endpoint state machine, so update ignores this.
     status = serializers.ChoiceField(
@@ -348,6 +429,10 @@ class RecruitmentCreateSerializer(serializers.Serializer):
             required=False
         )
     )
+    sessions = TrialSessionInputSerializer(
+        many=True,
+        required=False
+    )
     contacts = (
         RecruitmentContactInputSerializer(
             many=True,
@@ -396,6 +481,54 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         event_date = attrs.get("event_date")
         application_deadline = attrs.get("application_deadline")
         positions = attrs.get("positions", [])
+        recruitment_type = attrs.get("recruitment_type")
+
+        # TRIAL DATES
+        sessions = attrs.get("sessions", [])
+        live_sessions = [
+            session for session in sessions
+            if not session.get("is_cancelled")
+        ]
+
+        if recruitment_type == Recruitment.Type.OPEN_TRIAL:
+            if not sessions:
+                raise serializers.ValidationError(
+                    "Add at least one trial date."
+                )
+            if not live_sessions:
+                raise serializers.ValidationError(
+                    "Every trial date is cancelled. Add a date, or "
+                    "close the trial instead."
+                )
+        elif sessions:
+            # player_looking (and the retired legacy types) have no trial
+            # day at all, so a date sent for one is a client bug, not
+            # something to silently drop.
+            raise serializers.ValidationError(
+                "Only an open trial can have trial dates."
+            )
+
+        # No two live dates may sit at the same date AND time — that is a
+        # duplicated row, not a second round.
+        slots = [
+            (session["date"], session.get("start_time"))
+            for session in live_sessions
+        ]
+        if len(slots) != len(set(slots)):
+            raise serializers.ValidationError(
+                "Two trial dates are the same. Remove the duplicate."
+            )
+
+        # session_mode is a question only a multi-date trial can answer.
+        # With one date there is nothing to choose between, so force `all`
+        # rather than reject a stale value the wizard left behind.
+        if len(live_sessions) < 2:
+            attrs["session_mode"] = Recruitment.SessionMode.ALL
+
+        # AN OPEN-TRIAL-ONLY SETTING. Silently forced off elsewhere — see
+        # the field declaration.
+        if recruitment_type != Recruitment.Type.OPEN_TRIAL:
+            attrs["auto_confirm"] = False
 
         # AGE CATEGORY VALIDATION
         age_categories = attrs.get("age_categories", [])
@@ -456,8 +589,26 @@ class RecruitmentCreateSerializer(serializers.Serializer):
                 "Application deadline cannot be in the past"
             )
 
-        # deadline <= event_date always (also a DB CheckConstraint)
-        if (
+        # deadline <= event_date always (also the valid_application_deadline
+        # DB CheckConstraint). event_date is DERIVED from the first
+        # non-cancelled session, so when dates are sent it is that session
+        # the deadline is measured against — an edit that moves day one
+        # earlier can otherwise put an already-stored deadline in breach
+        # and blow up on the constraint with nothing readable to show.
+        # The deadline is never silently clamped: the org set it on purpose.
+        opening_session = first_session(sessions)
+        if application_deadline and opening_session:
+            starts_at = session_starts_at(opening_session)
+            if application_deadline > starts_at:
+                local = starts_at.astimezone(
+                    ZoneInfo(settings.RECRUITMENT_TIMEZONE)
+                )
+                raise serializers.ValidationError(
+                    "The application deadline is after the first trial "
+                    "date. Move the deadline to on or before "
+                    f"{local.strftime('%d %b %Y')}."
+                )
+        elif (
             application_deadline
             and event_date
             and application_deadline > event_date

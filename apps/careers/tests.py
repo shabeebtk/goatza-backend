@@ -1058,7 +1058,11 @@ class CareerFromApplicationPrefillTests(CareerFromApplicationTestCase):
             organization=self.club,
             sport=self.football,
             title="Academy Scholarship",
-            recruitment_type=Recruitment.Type.SCHOLARSHIP,
+            # A LITERAL: `scholarship` was retired from Recruitment.Type (a
+            # scholarship is a benefit on an open trial), but rows written
+            # before the backfill still carry the string and a career entry
+            # built from one has to keep working.
+            recruitment_type="scholarship",
             status=Recruitment.Status.ACTIVE,
         )
         application = self._select(
@@ -1158,7 +1162,9 @@ class CareerFromApplicationGuardTests(CareerFromApplicationTestCase):
             self.actor, application.id
         )
 
-        application.status = RecruitmentApplication.Status.REJECTED
+        # A LITERAL, for the same reason: `rejected` is gone from the
+        # choices but still sits in rows the backfill has not reached.
+        application.status = "rejected"
         application.save(update_fields=["status"])
 
         again, created = CareerEntryService.create_from_application(
@@ -1302,9 +1308,7 @@ class CareerAddPromptTests(CareerFromApplicationTestCase):
         self._change_status(
             application, RecruitmentApplication.Status.SELECTED
         )
-        self._change_status(
-            application, RecruitmentApplication.Status.REJECTED
-        )
+        self._change_status(application, "rejected")
         self._change_status(
             application, RecruitmentApplication.Status.SELECTED
         )

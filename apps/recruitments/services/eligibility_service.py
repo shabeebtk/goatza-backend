@@ -148,6 +148,19 @@ def birth_year_in_category(category, birth_year):
     return True
 
 
+def is_age_mismatch(category, birth_year):
+    """
+    Whether ``birth_year`` falls outside the ONE group an applicant chose.
+
+    Recorded on the application (``age_mismatch_at_apply``), never enforced.
+    No group chosen, or no known birth year → False: an unknown age is not a
+    mismatch, the same stance as every check in this module.
+    """
+    if category is None or birth_year is None:
+        return False
+    return not birth_year_in_category(category, birth_year)
+
+
 def _age_badge_text(categories):
     """"U-17 only" · "U-17 / U-19 only" — the groups it IS open to."""
     titles = [c.title.strip() for c in categories if c.title.strip()]

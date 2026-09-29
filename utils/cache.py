@@ -1,5 +1,23 @@
 from django.core.cache import cache
 
+
+def cache_is_degraded():
+    """
+    True when the cache backend is knowingly skipping Redis right now.
+
+    THE ONE PLACE anything outside core.cache asks that question, so no caller
+    has to know which backend is configured. LocMemCache has no such state and
+    answers False — correct: there is nothing to be down.
+
+    Ask this wherever a MISS and a FAILURE mean different things. Two places
+    do: the /healthz component report, and the Places budget guard, where
+    "nothing spent today" and "I cannot tell you what was spent" must not be
+    treated the same way. See core/cache/resilient.py.
+    """
+    checker = getattr(cache, "is_degraded", None)
+    return bool(checker()) if callable(checker) else False
+
+
 def cache_get(key):
     return cache.get(key)
 
