@@ -669,6 +669,104 @@ class RecruitmentValidationTests(APITestCase):
         self.assertNotIn(draft.id, [r.id for r in qs])
 
 
+class RecruitmentListOrderingTests(APITestCase):
+    """
+    The plain list is ordered by WHAT and WHEN, not by when it was posted.
+
+    ``-published_at`` put a June posting for October above last week's posting
+    for this Saturday, and let a finished trial outrank a live one. See
+    ``RecruitmentSelector.order_for_list``.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            email="ord_o@example.com", password="pass1234", username="ord_owner",
+        )
+        accept_current_terms(self.owner)
+        self.org = Organization.objects.create(
+            name="Order FC", username="orderfc", type=Organization.Type.CLUB,
+        )
+        # The username only resolves once UsernameRegistry holds it.
+        UsernameService.claim(self.org.username, organization=self.org)
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.owner_actor = Actor(
+            actor_type="organization", user=self.owner, organization=self.org,
+        )
+        self.now = timezone.now()
+
+    def _trial(self, title, *, published_days_ago, event_in_days=None,
+               status_value=Recruitment.Status.ACTIVE, deadline=None):
+        """One posting. ``event_in_days`` may be negative — a finished trial."""
+        event_date = trial_end = None
+        if event_in_days is not None:
+            event_date = self.now + timedelta(days=event_in_days)
+            # What _sync_trial_window would have written for a one-day trial.
+            trial_end = event_date
+        return Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            status=status_value,
+            visibility=Recruitment.Visibility.PUBLIC,
+            title=title, recruitment_type="open_trial",
+            published_at=self.now - timedelta(days=published_days_ago),
+            event_date=event_date,
+            trial_end_date=trial_end,
+            application_deadline=deadline,
+        )
+
+    def _titles(self, actor=None):
+        queryset, _ = RecruitmentSelector.list_recruitments(
+            actor=actor if actor is not None else self.owner_actor,
+            username=self.org.username,
+            limit=50,
+        )
+        return [row.title for row in queryset]
+
+    def test_an_old_posting_for_a_near_trial_outranks_a_new_one_for_a_far_trial(self):
+        # The bug, stated: posted in June for October vs posted yesterday for
+        # this Saturday. The reader wants Saturday first.
+        self._trial("October trial", published_days_ago=120, event_in_days=100)
+        self._trial("Saturday trial", published_days_ago=1, event_in_days=3)
+
+        self.assertEqual(
+            self._titles(), ["Saturday trial", "October trial"],
+        )
+
+    def test_a_finished_trial_sinks_below_every_live_one_however_recent(self):
+        # Published today, but its day has been and gone.
+        self._trial("Finished yesterday", published_days_ago=0, event_in_days=-1)
+        # Published long ago, still to happen.
+        self._trial("Still to come", published_days_ago=200, event_in_days=60)
+        # Active, trial ahead, but applications have closed: bucket 2, so it
+        # sits under the accepting one and above anything finished.
+        self._trial(
+            "Closed to applications", published_days_ago=200,
+            event_in_days=30,
+            deadline=self.now - timedelta(days=1),
+        )
+
+        self.assertEqual(
+            self._titles(),
+            ["Still to come", "Closed to applications", "Finished yesterday"],
+        )
+
+    def test_finished_trials_come_back_most_recent_first(self):
+        # The two-sort-column trap: buckets 1 and 2 sort ASCENDING and buckets
+        # 0 and 3 DESCENDING. One shared key would hand these back oldest-first.
+        self._trial("Ended long ago", published_days_ago=300, event_in_days=-200)
+        self._trial("Ended last week", published_days_ago=300, event_in_days=-7)
+        self._trial("Ended yesterday", published_days_ago=300, event_in_days=-1)
+
+        self.assertEqual(
+            self._titles(),
+            ["Ended yesterday", "Ended last week", "Ended long ago"],
+        )
+
+
 class RecruitmentApplicationLifecycleTests(APITestCase):
     """Withdraw + reapply, org bulk/single status changes, and the player
     status-change notifications."""

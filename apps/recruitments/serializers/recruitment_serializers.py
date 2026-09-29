@@ -569,6 +569,13 @@ class RecruitmentCreateSerializer(serializers.Serializer):
             # non-external methods must not carry a stray apply URL
             attrs["external_apply_url"] = ""
 
+        if apply_method != Recruitment.ApplyMethod.GOATZA:
+            # Only the in-app apply form ever ASKS custom questions, so a
+            # posting that sends players elsewhere cannot collect answers to
+            # them; dropped rather than rejected, because a stale client is one
+            # that has not caught up and a 400 would block a valid edit.
+            attrs.pop("questions", None)
+
         # DATE VALIDATION
         now = timezone.now()
 

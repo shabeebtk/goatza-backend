@@ -14,6 +14,7 @@ thousands however many users there are (§1). Cost grows with recruitments, not
 with pageviews.
 """
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
@@ -96,7 +97,7 @@ class RecruitmentDiscoverService:
     # ------------------------------------------------------------ #
 
     @classmethod
-    def discover(cls, actor, max_distance_km=None, now=None):
+    def discover(cls, actor, max_distance_km=None, now=None, context=None):
         """
         Build the four sections for ``actor``.
 
@@ -106,11 +107,16 @@ class RecruitmentDiscoverService:
         through to the non-personalized signals (freshness, deadline, distance).
         A valid payload plus ``is_personalized: false`` is a far better answer
         than a 400 the client would have to special-case.
+
+        ``context`` is accepted pre-resolved because the caller needs it to
+        build the cache key (see ``cache_key``). Passing it back in is what
+        keeps the cache-MISS path at exactly one resolve, as before.
         """
         now = now or timezone.now()
         max_distance_km = cls.normalize_max_distance(max_distance_km)
 
-        context = PlayerContextSelector.resolve(actor)
+        if context is None:
+            context = PlayerContextSelector.resolve(actor)
 
         # BLOCK EXCLUSION — a recruitment is owned by an org, so only the
         # org side applies. Before the candidate cap, so a blocked club cannot
@@ -249,11 +255,50 @@ class RecruitmentDiscoverService:
             }
 
     @staticmethod
-    def cache_key(actor, max_distance_km):
+    def profile_fingerprint(context):
         """
-        Per-actor, per-filter. Keyed on the ACTOR and not the user, because the
-        same person browsing as their club gets a different payload (different
-        location, different follow graph) and must not be served the player one.
+        A short stable digest of the four profile fields the payload is built
+        from — the same four ``PlayerContext.missing_fields`` names.
+
+        Location is folded in as a BOOLEAN, not as coordinates: it is what
+        decides whether "near you" can be answered at all and whether the
+        client is told to add a location. Keying on the coordinates themselves
+        would make the key change on every GPS jitter and shred the hit rate
+        for a ranking that tolerates being ten minutes old.
+
+        Sorted before hashing so set iteration order cannot produce two keys
+        for one profile, and ``str()``-ed so a UUID and its string form agree.
+        """
+        parts = (
+            ",".join(sorted(str(value) for value in context.sport_ids)),
+            ",".join(sorted(str(value) for value in context.position_ids)),
+            str(context.birth_year),
+            "1" if context.center else "0",
+        )
+        digest = hashlib.blake2b(
+            "|".join(parts).encode("utf-8"), digest_size=8
+        )
+        return digest.hexdigest()
+
+    @staticmethod
+    def cache_key(actor, context, max_distance_km):
+        """
+        Per-actor, per-profile, per-filter. Keyed on the ACTOR and not the user,
+        because the same person browsing as their club gets a different payload
+        (different location, different follow graph) and must not be served the
+        player one.
+
+        The PROFILE fingerprint is in the key because the payload is built from
+        the profile: sport alone is worth +40 of a ~100 point scale. Without it,
+        a player who has just added their primary sport would keep both the
+        "complete your profile" prompt naming that field AND the unranked
+        ordering behind it for up to ten minutes. Patching the prompt on a cache
+        hit — the way ``refresh_saved_state`` patches ``is_saved`` — would hide
+        the prompt and leave the ranking stale, which is worse: the symptom goes
+        and the wrong answer stays, with nothing left to explain it.
+
+        A profile edit simply lands on a new key. Old-format keys are never
+        read again and expire on their own TTL; there is no invalidation pass.
         """
         if actor is None:
             who = "anon"
@@ -261,7 +306,11 @@ class RecruitmentDiscoverService:
             who = f"u:{actor.user.id}"
         else:
             who = f"o:{actor.organization.id}"
-        return f"recruit:discover:{CACHE_VERSION}:{who}:d{max_distance_km}"
+        fingerprint = RecruitmentDiscoverService.profile_fingerprint(context)
+        return (
+            f"recruit:discover:{CACHE_VERSION}:{who}"
+            f":p{fingerprint}:d{max_distance_km}"
+        )
 
     @staticmethod
     def get_cached(key):

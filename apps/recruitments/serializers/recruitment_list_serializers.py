@@ -219,6 +219,10 @@ class RecruitmentListSerializer(
     sport = SportSerializer(read_only=True)
     positions = RecruitmentPositionMiniSerializer(many=True, read_only=True)
     cover_media = serializers.SerializerMethodField()
+    # How many photos there are, so the card's media slot can badge "1/4".
+    # Counted off the ALREADY-PREFETCHED list, never a second query — see
+    # LIST_PREFETCH_RELATED. `.count()` here would be one query per row.
+    media_count = serializers.SerializerMethodField()
     # The list selector already prefetches age_categories, so the card's age
     # chip costs no extra query. An empty list means "open to all ages".
     age_categories = RecruitmentAgeCategorySerializer(many=True, read_only=True)
@@ -248,6 +252,7 @@ class RecruitmentListSerializer(
             "sport",
             "positions",
             "cover_media",
+            "media_count",
             "age_categories",
             # The card's deadline countdown and its fee cell. Both are plain
             # columns on the row the selector already fetches, so neither adds
@@ -293,6 +298,9 @@ class RecruitmentListSerializer(
             "file_url": first_media.file_url,
             "thumbnail_url": first_media.thumbnail_url,
         }
+
+    def get_media_count(self, obj):
+        return len(obj.media.all())
     
 
 
