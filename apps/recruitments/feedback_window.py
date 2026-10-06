@@ -19,10 +19,12 @@ trial. Asking somebody who was never called in how the trial went is a bad
 question and an unkind one.
 
 WHEN. Only once the trial's LAST day has ended — ``trial_window.is_trial_over``
-on the cached ``trial_end_date``, so it is the calendar day in
-RECRUITMENT_TIMEZONE, exactly the rule the rest of the app uses. A recruitment
-with no trial dates at all (a ``player_looking`` post) therefore never opens:
-it has no trial to report on.
+on the cached ``trial_end_date``, which is a STORED INSTANT that already
+carries the day boundary for that trial's own country (resolved at write time
+by ``_sync_trial_window``). So this is a plain UTC comparison with no timezone
+in it, and a London player is asked at midnight London while an Indian one is
+asked at midnight IST. A recruitment with no trial dates at all (a
+``player_looking`` post) therefore never opens: it has no trial to report on.
 
 TWO FLAGS, NOT ONE, and the client needs both:
 
@@ -69,8 +71,8 @@ def status_allows_feedback(status):
 
 def trial_is_over(recruitment, now=None):
     """
-    Has the trial's last day ended? The shared calendar-day rule, so a trial
-    that ran this morning is not reportable until midnight.
+    Has the trial's last day ended? The shared rule, so a trial that ran this
+    morning is not reportable until midnight AT ITS VENUE.
     """
     return is_trial_over(recruitment.trial_end_date, now=now)
 

@@ -1,7 +1,5 @@
 from datetime import datetime, time
-from zoneinfo import ZoneInfo
 
-from django.conf import settings
 from django.db import models
 from django.db.models import Q, F
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -12,6 +10,12 @@ from apps.organization.models import Organization, OrganizationMember
 from apps.accounts.models import User
 from apps.sports.models import Sport, SportPosition
 from apps.recruitments.trial_window import is_trial_over
+from utils.timezones import (
+    TIMEZONE_MAX_LENGTH,
+    default_timezone,
+    validate_timezone,
+    zone,
+)
 # Create your models here.
 
 
@@ -126,6 +130,29 @@ class Recruitment(BaseUUIDModel):
         blank=True
     )
 
+    # THE CALENDAR THIS TRIAL RUNS ON — an IANA name, copied from the
+    # organization when the recruitment is created and editable afterwards,
+    # because a London club can post a trial in Dubai.
+    #
+    # ONE RECRUITMENT = ONE TIMEZONE, deliberately not one per date. A
+    # multi-city tour inside a country shares a zone, and a club running
+    # trials in two countries under one posting can post twice. A per-date
+    # override would be purely additive later (TrialSession would grow a
+    # nullable `timezone` falling back to this one) and nothing here would
+    # have to change.
+    #
+    # EVERYTHING DOWNSTREAM READS THE STORED INSTANTS, NOT THIS. The
+    # timezone maths happens once, at write time: _sync_trial_window builds
+    # event_date and trial_end_date IN this zone and stores the UTC instant,
+    # so "is the trial over" is a plain UTC comparison with no timezone in
+    # it. This column is for building those instants and for FORMATTING a
+    # date the way the venue reads it.
+    timezone = models.CharField(
+        max_length=TIMEZONE_MAX_LENGTH,
+        default=default_timezone,
+        validators=[validate_timezone],
+    )
+
     # Recruitment logistics
     application_deadline = models.DateTimeField(
         null=True,
@@ -136,14 +163,22 @@ class Recruitment(BaseUUIDModel):
     # by RecruitmentService._sync_trial_window. Kept as a column (and kept
     # on every payload) because the card, the ordering and the
     # valid_application_deadline constraint all read it.
+    #
+    # Built in THIS recruitment's `timezone` and stored, like everything
+    # else, as the UTC instant.
     event_date = models.DateTimeField(
         null=True,
         blank=True
     )
 
-    # DERIVED too: 23:59:59 of the LAST non-cancelled session's day. This,
-    # not event_date, is what "the trial is over" means - a three-weekend
-    # trial is not over after weekend one (trial_window.is_trial_over).
+    # DERIVED too: 23:59:59 of the LAST non-cancelled session's day, in this
+    # recruitment's `timezone`. This, not event_date, is what "the trial is
+    # over" means - a three-weekend trial is not over after weekend one
+    # (trial_window.is_trial_over).
+    #
+    # Because the day boundary is resolved HERE, at write time, the read is
+    # just `trial_end_date < now()`: a London trial ends at midnight London
+    # and an Indian one at midnight IST, with no timezone in the query.
     trial_end_date = models.DateTimeField(
         null=True,
         blank=True
@@ -289,14 +324,16 @@ class Recruitment(BaseUUIDModel):
             raise ValidationError(
                 "External apply URL required."
             )
+        validate_timezone(self.timezone)
 
     @property
     def is_trial_over(self):
         """
-        Whether the WHOLE trial window has closed — the LAST session's day
-        has ended in RECRUITMENT_TIMEZONE. The rule itself lives in
-        ``trial_window`` next to its queryset twin, ``trial_not_over_q``.
-        No trial_end_date → never over.
+        Whether the WHOLE trial window has closed — the stored end instant
+        has passed. ``trial_end_date`` is already 23:59:59 of the last
+        session's day IN THIS RECRUITMENT'S OWN ZONE, so this needs no
+        timezone of its own. The rule lives in ``trial_window`` next to its
+        queryset twin, ``trial_not_over_q``. No trial_end_date → never over.
 
         This is NOT the apply gate: applications usually close earlier
         (``applications_close_at``), and on an "attend every date" trial
@@ -366,6 +403,24 @@ class Recruitment(BaseUUIDModel):
 
         return True
 
+    @property
+    def zoneinfo(self):
+        """This recruitment's ``ZoneInfo``. The venue's calendar, not ours."""
+        return zone(self.timezone)
+
+    def save(self, *args, **kwargs):
+        """
+        Validate the timezone on the way in — see ``Organization.save`` for
+        why the field validator alone is not enough.
+        """
+        fields = kwargs.get("update_fields")
+        if (
+            (fields is None or "timezone" in fields)
+            and "timezone" not in self.get_deferred_fields()
+        ):
+            validate_timezone(self.timezone)
+        return super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.title} ({self.organization.name})"
 
@@ -381,6 +436,11 @@ class TrialSession(BaseUUIDModel):
     (the first non-cancelled session) and ``trial_end_date`` (23:59:59 of the
     last one). Which of the two closes applications depends on
     ``Recruitment.session_mode`` — see ``applications_close_at``.
+
+    THE DATE IS A CALENDAR DATE AT THE VENUE, and the TIME a wall clock
+    there. Both are read in ``Recruitment.timezone`` — deliberately NOT a
+    per-session zone: a tour inside one country shares a clock, and a club
+    running trials in two countries posts twice. See that field's comment.
 
     The venue fields are OVERRIDES, blank by default: a session with no venue
     of its own inherits the recruitment's. That is the common case (three
@@ -432,14 +492,23 @@ class TrialSession(BaseUUIDModel):
         ]
 
     def _local(self, at):
-        return datetime.combine(
-            self.date, at, tzinfo=ZoneInfo(settings.RECRUITMENT_TIMEZONE)
-        )
+        """
+        ``date`` + a wall-clock time, read in the PARENT RECRUITMENT'S zone.
+
+        No query in the usual case: a session loaded through
+        ``recruitment.sessions`` already carries that recruitment as its
+        known related object, so ``self.recruitment`` is the in-memory row
+        the caller is holding. A session fetched on its own (through
+        ``application.session``, say) should have its parent primed — see
+        ``send_trial_reminders._session_for`` — or this costs one SELECT.
+        """
+        return datetime.combine(self.date, at, tzinfo=self.recruitment.zoneinfo)
 
     @property
     def starts_at(self):
         """
-        The session's start as an aware datetime in RECRUITMENT_TIMEZONE.
+        The session's start as an aware datetime in the recruitment's zone,
+        which Django stores as the corresponding UTC instant.
 
         A session with no time starts at 23:59 — the same date-only sentinel
         the wizard writes for a trial with no time (frontend
@@ -450,7 +519,12 @@ class TrialSession(BaseUUIDModel):
 
     @property
     def ends_at(self):
-        """23:59:59 of the session's day — the instant it stops being today."""
+        """
+        23:59:59 of the session's day, AT THE VENUE — the instant it stops
+        being today there. This is what makes the trial-over read a plain
+        UTC comparison: a London date ends five and a half hours after an
+        Indian one with the same calendar date.
+        """
         return self._local(time(23, 59, 59))
 
     def __str__(self):

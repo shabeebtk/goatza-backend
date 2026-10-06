@@ -173,13 +173,22 @@ def application_session_payload(application):
 
 class TrialSessionsMixin(metaclass=serializers.SerializerMetaclass):
     """
-    The three trial-window fields every recruitment payload carries, plus the
-    dates themselves.
+    The trial-window fields every recruitment payload carries, plus the dates
+    themselves.
 
     ``event_date`` stays exactly where it already is on each payload — it is
     still the first session and a lot of the client reads it. What is new is
     that ``applications_close_at`` is NOT the same instant: on an "attend
     every date" trial applications close on day one while the trial runs on.
+
+    ``timezone`` is here because the client CANNOT FORMAT ANY OF THE OTHERS
+    CORRECTLY WITHOUT IT. A trial's instants are stored for its own country,
+    so rendering them on the viewer's clock is how a player in Dubai reads a
+    London trial as starting at 1pm. It is also the zone the wizard's date
+    input interprets typed times in, and what decides whether a time needs a
+    "(London)" suffix beside it. Carried on a player_looking post too, where
+    there is no trial to format: one field on every payload beats a field
+    that is sometimes there.
 
     THE METACLASS IS LOAD-BEARING. DRF collects declared fields off a base
     class only when that base carries ``_declared_fields``, which only
@@ -192,6 +201,7 @@ class TrialSessionsMixin(metaclass=serializers.SerializerMetaclass):
 
     sessions = serializers.SerializerMethodField()
     session_mode = serializers.CharField(read_only=True)
+    timezone = serializers.CharField(read_only=True)
     trial_end_date = serializers.DateTimeField(read_only=True)
     applications_close_at = serializers.DateTimeField(read_only=True)
 
@@ -200,6 +210,9 @@ class TrialSessionsMixin(metaclass=serializers.SerializerMetaclass):
     SESSION_FIELDS = [
         "sessions",
         "session_mode",
+        # The venue's calendar. Every date and time on this payload is an
+        # instant resolved in it — see the class docstring.
+        "timezone",
         "trial_end_date",
         "applications_close_at",
         # An open-trial-only setting, and a public one: a player deciding

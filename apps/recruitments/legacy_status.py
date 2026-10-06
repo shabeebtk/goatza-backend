@@ -25,10 +25,6 @@ THIS MODULE OUTLIVES THE CHOICES. A later deploy removes ``invited`` and
 its whole job is turning a word that no longer exists into one that does.
 """
 
-from zoneinfo import ZoneInfo
-
-from django.conf import settings
-
 # The retired values, as STRING LITERALS rather than enum members. They are
 # deliberately not in Status.choices any more, so there is nothing to
 # reference — and that is the point: this module is what still understands
@@ -39,12 +35,18 @@ LEGACY_REJECTED = "rejected"
 LEGACY_STATUSES = (LEGACY_INVITED, LEGACY_REJECTED)
 
 
-def local_date(value):
-    """A stored datetime as its calendar date in RECRUITMENT_TIMEZONE."""
-    return value.astimezone(ZoneInfo(settings.RECRUITMENT_TIMEZONE)).date()
+def local_date(value, tzinfo):
+    """
+    A stored datetime as its calendar date in ``tzinfo``.
+
+    The zone is the RECRUITMENT'S, passed in by the caller — a decision on a
+    London trial is dated on the London calendar, whatever the server is set
+    to. There is no default on purpose: forgetting it was the bug.
+    """
+    return value.astimezone(tzinfo).date()
 
 
-def is_before_trial(*, recruitment_type, trial_starts_at, decided_on):
+def is_before_trial(*, recruitment_type, trial_starts_at, decided_on, tzinfo):
     """
     Was this decision made BEFORE the trial began?
 
@@ -54,9 +56,11 @@ def is_before_trial(*, recruitment_type, trial_starts_at, decided_on):
     backwards tells a player they were rejected on the day when nobody ever
     saw them, or the reverse.
 
-    BY CALENDAR DAY in RECRUITMENT_TIMEZONE, matching every other date rule
-    here: a decision made ON the trial day is a real result, not a pre-trial
-    screening.
+    BY CALENDAR DAY IN THE RECRUITMENT'S OWN ZONE (``tzinfo``), which is
+    where its trial is actually held: a decision made ON the trial day is a
+    real result, not a pre-trial screening. ``decided_on`` must be a date
+    read in that same zone, or the two sides of the comparison are on
+    different calendars.
 
     ``recruitment_type`` must be the EFFECTIVE type (what the recruitment is
     after the v3 type fold), because only an open trial has a trial day at
@@ -70,10 +74,12 @@ def is_before_trial(*, recruitment_type, trial_starts_at, decided_on):
     if trial_starts_at is None:
         return False
 
-    return decided_on < local_date(trial_starts_at)
+    return decided_on < local_date(trial_starts_at, tzinfo)
 
 
-def map_legacy_status(status, *, recruitment_type, trial_starts_at, decided_on):
+def map_legacy_status(
+    status, *, recruitment_type, trial_starts_at, decided_on, tzinfo
+):
     """
     A legacy status value as the one that replaced it, or None when the value
     was never legacy (every current status passes straight through untouched).
@@ -93,6 +99,7 @@ def map_legacy_status(status, *, recruitment_type, trial_starts_at, decided_on):
             recruitment_type=recruitment_type,
             trial_starts_at=trial_starts_at,
             decided_on=decided_on,
+            tzinfo=tzinfo,
         )
         return (
             RecruitmentApplication.Status.NOT_SHORTLISTED

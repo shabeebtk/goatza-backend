@@ -4038,19 +4038,44 @@ class TrialOverTests(APITestCase):
 
     # ── the rule itself ──────────────────────────────────────────
 
-    def test_start_of_today_is_midnight_in_the_recruitment_timezone(self):
-        # 20:00 IST on the 15th → 00:00 IST on the 15th, however it is spelled.
-        start = trial_window.start_of_today(self.EVENING.astimezone(timezone.UTC))
-        self.assertEqual(start, self.TRIAL_DAY)
+    def test_the_rule_is_the_stored_instant_passing(self):
+        """
+        The whole comparison, and there is no timezone in it. The day
+        boundary was resolved when the row was WRITTEN — the end instant
+        below is already 23:59:59 IST, because that is this recruitment's
+        zone — so the read is just "has it gone by".
+        """
+        ends_at = self._date_only_trial().trial_end_date
+        self.assertEqual(ends_at.astimezone(IST).hour, 23)
+
+        self.assertFalse(trial_window.is_trial_over(ends_at, self.EVENING))
+        self.assertTrue(trial_window.is_trial_over(ends_at, self.NEXT_MORNING))
 
     @override_settings(RECRUITMENT_TIMEZONE="UTC")
-    def test_the_timezone_setting_moves_the_boundary(self):
-        # 00:30 IST on the 16th is still 19:00 UTC on the 15th, so under a UTC
-        # rule the 23:59-IST trial (18:29 UTC) has NOT reached the day's end.
+    def test_the_setting_cannot_move_an_existing_trial(self):
+        """
+        RECRUITMENT_TIMEZONE is the default for a NEW ORG and nothing else.
+
+        It used to be the rule for every trial everywhere, which is the bug
+        all of this replaced. A row already carries its own zone and its own
+        end instant, so changing the setting under it must not move its
+        boundary by a second — if this ever fails, something has started
+        reading the setting again.
+        """
+        # Stated explicitly, the way a row written before the setting
+        # changed carries it.
+        trial = self._date_only_trial(timezone="Asia/Kolkata")
+
+        # 00:30 IST on the 16th is 19:00 UTC on the 15th, so a UTC-wide rule
+        # would say this trial's day has NOT ended. It has: the trial is in
+        # IST, which is where it is held.
         self.assertTrue(
             trial_window.is_trial_over(
-                datetime(2026, 9, 15, 23, 59, tzinfo=IST), now=self.NEXT_MORNING
-            ) is False
+                trial.trial_end_date, now=self.NEXT_MORNING
+            )
+        )
+        self.assertNotIn(
+            str(trial.id), self._ids(self._list(self.NEXT_MORNING))
         )
 
     def test_date_only_trial_is_visible_all_day_and_over_the_next_day(self):

@@ -316,8 +316,8 @@ class RecruitmentSelector:
                 visibility_filter
             )
 
-            # TRIAL OVER — a trial whose day has ended (in
-            # RECRUITMENT_TIMEZONE) is gone from every player-facing list:
+            # TRIAL OVER — a trial whose last day has ended AT ITS OWN
+            # VENUE is gone from every player-facing list:
             # the All tab, the ranked list, search, and another org's profile
             # tab. Sits inside the non-owner branch on purpose: the owning
             # org's own list keeps ended trials, the same way it keeps drafts
@@ -497,8 +497,8 @@ class RecruitmentSelector:
 
         The payload this feeds is cached per actor for CACHE_TTL_SECONDS (ten
         minutes), so a trial can linger in a cached page for up to that long
-        after midnight in RECRUITMENT_TIMEZONE. Accepted: it is the same
-        tolerance the cache already grants a deadline that passes mid-window.
+        after midnight at its venue. Accepted: it is the same tolerance the
+        cache already grants a deadline that passes mid-window.
         """
         now = now or timezone.now()
 

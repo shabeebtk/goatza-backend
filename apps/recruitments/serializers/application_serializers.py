@@ -520,6 +520,10 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
     trial_end_date = serializers.DateTimeField(read_only=True)
     applications_close_at = serializers.DateTimeField(read_only=True)
     session_mode = serializers.CharField(read_only=True)
+    # The venue's calendar — what the card formats every date above in. A
+    # player who applied to a London trial must not read its time on their
+    # own clock. See TrialSessionsMixin.
+    timezone = serializers.CharField(read_only=True)
 
     class Meta:
         model = Recruitment
@@ -535,6 +539,7 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
             "trial_end_date",
             "applications_close_at",
             "session_mode",
+            "timezone",
             # The player's row shows a fee line only when there is a
             # fee to show.
             "is_paid",

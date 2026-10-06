@@ -18,8 +18,11 @@ straight back into the All tab, search, discover and the public org bundle.
 What it does, for every open_trial that has an ``event_date`` and NO sessions:
 
   1. SESSION   creates exactly ONE TrialSession from the stored date:
-                 date        the event_date's calendar day in
-                             RECRUITMENT_TIMEZONE
+                 date        the event_date's calendar day in THAT
+                             RECRUITMENT'S OWN timezone — the same zone
+                             _sync_trial_window will read the new row back
+                             in, so the derived instants land where they
+                             were read from
                  start_time  its time — or NULL when the stored time is the
                              23:59 or 00:00 date-only sentinel the wizard
                              writes for a trial with no time (see the
@@ -46,9 +49,7 @@ Characteristics:
 """
 
 from datetime import time
-from zoneinfo import ZoneInfo
 
-from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
@@ -97,7 +98,6 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         self.dry_run = options["dry_run"]
         self.batch_size = max(1, options["batch_size"])
-        self.tz = ZoneInfo(settings.RECRUITMENT_TIMEZONE)
 
         self.created = 0
         self.timed = 0
@@ -156,7 +156,13 @@ class Command(BaseCommand):
                     if recruitment.sessions.exists():
                         continue
 
-                    local = recruitment.event_date.astimezone(self.tz)
+                    # Read back in the recruitment's OWN zone. Reading
+                    # every row on one clock is what would shift a London
+                    # trial's date by a day and its time by five and a half
+                    # hours, permanently, in the row this command creates.
+                    local = recruitment.event_date.astimezone(
+                        recruitment.zoneinfo
+                    )
                     start_time = local.time().replace(microsecond=0)
 
                     if start_time in DATE_ONLY_SENTINELS:

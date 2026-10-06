@@ -12,7 +12,7 @@ This command rewrites them, in this order:
                gains a "Scholarship" benefit row, so the posting still says so.
   2. STATUSES  invited → trial_confirmed. selected / rejected are resolved by
                WHEN the org set them, against the trial day, by calendar day
-               in RECRUITMENT_TIMEZONE:
+               IN EACH RECRUITMENT'S OWN TIMEZONE:
                  open_trial, set before the trial day   → trial_confirmed /
                                                           not_shortlisted
                  open_trial, set on/after it, or with
@@ -57,6 +57,7 @@ from collections import Counter
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.db.models import Count, Max, Q
+from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.recruitments.models import (
@@ -67,7 +68,6 @@ from apps.recruitments.models import (
 )
 from apps.recruitments.legacy_status import is_before_trial, local_date
 from apps.recruitments.services.eligibility_service import is_age_mismatch
-from apps.recruitments.trial_window import start_of_today
 
 Status = RecruitmentApplication.Status
 Type = Recruitment.Type
@@ -121,13 +121,16 @@ def effective_type(recruitment_type, event_date):
     return recruitment_type
 
 
-def resolve_status(status, recruitment_type, event_date, set_at, today):
+def resolve_status(status, recruitment_type, event_date, set_at, now, tzinfo):
     """
     (new_status, bucket) for one application in a SOURCE status.
 
+    ``tzinfo`` is the RECRUITMENT'S zone and every date below is read in it,
+    so "before the trial" means before it on the club's own calendar.
+
     ``set_at`` is when the org set the current status, or None when nothing
-    records it — then ``today`` (a date in RECRUITMENT_TIMEZONE) stands in, so
-    a trial day already reached counts as "set after".
+    records it — then ``now`` stands in (read in the same zone), so a trial
+    day already reached counts as "set after".
     """
     if status == LEGACY_INVITED:
         return Status.TRIAL_CONFIRMED, "invited_confirmed"
@@ -140,7 +143,8 @@ def resolve_status(status, recruitment_type, event_date, set_at, today):
     before_trial = is_before_trial(
         recruitment_type=effective_type(recruitment_type, event_date),
         trial_starts_at=event_date,
-        decided_on=local_date(set_at) if set_at else today,
+        decided_on=local_date(set_at or now, tzinfo),
+        tzinfo=tzinfo,
     )
 
     if status == Status.SELECTED:
@@ -194,7 +198,10 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         self.dry_run = options["dry_run"]
         self.batch_size = max(1, options["batch_size"])
-        self.today = start_of_today().date()
+        # The INSTANT, not a local date. Every row turns it into its own
+        # venue's calendar day — there is no one "today" to precompute once
+        # a recruitment carries its own timezone.
+        self.now = timezone.now()
 
         self.type_counts = Counter()
         self.benefits_created = 0
@@ -349,7 +356,8 @@ class Command(BaseCommand):
                 recruitment.event_date,
                 entered_at.get((application.id, application.status))
                 or application.reviewed_at,
-                self.today,
+                self.now,
+                recruitment.zoneinfo,
             )
             self.status_counts[bucket] += 1
             if new_status == application.status:
@@ -513,21 +521,31 @@ class Command(BaseCommand):
         The §21 metric. Read-only, never writes, and identical whether the
         passes above wrote or not: open_trial is counted by the type a
         recruitment HAS AFTER this command (a legacy type with an event_date
-        becomes one), and "passed" is the trial-over rule — the trial day
-        ended in RECRUITMENT_TIMEZONE.
+        becomes one), and "passed" means the stored ``event_date`` instant
+        has gone by.
+
+        ONE DELIBERATE IMPRECISION, and it is confined to this metric. These
+        two counts are QUERIES across every recruitment at once, so there is
+        no per-row zone to compare against — the whole reason the real rule
+        does its timezone maths at write time. ``event_date`` is the trial's
+        START, so a timed trial counts as "passed" from its start time
+        rather than from midnight that night. For a report that exists to
+        say roughly how much history is stale, a few hours either way
+        changes nothing; anything that must be exact reads
+        ``trial_end_date`` through ``trial_window`` instead.
         """
-        today = start_of_today()
+        now = self.now
         live = Recruitment.objects.filter(is_deleted=False)
 
         total = live.count()
         active = live.filter(status=Recruitment.Status.ACTIVE).count()
         past_trials = live.filter(
             recruitment_type__in=(Type.OPEN_TRIAL, *LEGACY_TYPES),
-            event_date__lt=today,
+            event_date__lt=now,
         ).count()
         stale = (
             live
-            .filter(event_date__lt=today, applications__status=Status.APPLIED)
+            .filter(event_date__lt=now, applications__status=Status.APPLIED)
             .distinct()
             .count()
         )

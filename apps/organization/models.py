@@ -6,6 +6,11 @@ from django.core.validators import RegexValidator
 from shared.models import BaseUUIDModel, Location
 from apps.accounts.models import User
 from apps.sports.models import Sport
+from utils.timezones import (
+    TIMEZONE_MAX_LENGTH,
+    default_timezone,
+    validate_timezone,
+)
 
 
 class Organization(BaseUUIDModel):
@@ -57,6 +62,24 @@ class Organization(BaseUUIDModel):
     # because every org read path now filters on it.
     is_suspended = models.BooleanField(default=False, db_index=True)
 
+    # THE ORG'S CALENDAR, and the seed for every recruitment it posts.
+    #
+    # An IANA name ("Asia/Kolkata", "Europe/London"), never an offset: an
+    # offset cannot survive a DST boundary, and a trial posted in March for
+    # August would be an hour out. Validated against tzdata on save — a typo
+    # here silently reschedules every trial this org runs.
+    #
+    # The default is settings.RECRUITMENT_TIMEZONE, suggested from the org's
+    # primary location on create (see timezone_for_country) and editable in
+    # org settings. It is a SEED, not a lock: Recruitment.timezone is copied
+    # from it at create time and an org posting abroad changes it there,
+    # per recruitment, without touching this.
+    timezone = models.CharField(
+        max_length=TIMEZONE_MAX_LENGTH,
+        default=default_timezone,
+        validators=[validate_timezone],
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -72,6 +95,28 @@ class Organization(BaseUUIDModel):
     def clean(self):
         if self.username:
             self.username = self.username.lower().strip()
+        validate_timezone(self.timezone)
+
+    def save(self, *args, **kwargs):
+        """
+        Validate the timezone on the way in, on EVERY write path.
+
+        The field validator above only runs under ``full_clean()``, and most
+        of this codebase saves without it. A bad zone cannot be caught by a
+        DB constraint either — the tz list is not in SQL — so this is what
+        makes "a typo cannot be stored" actually true.
+
+        Skipped when the column is deferred or left out of ``update_fields``:
+        reading ``self.timezone`` would otherwise cost a query on a save that
+        was never going to touch it.
+        """
+        fields = kwargs.get("update_fields")
+        if (
+            (fields is None or "timezone" in fields)
+            and "timezone" not in self.get_deferred_fields()
+        ):
+            validate_timezone(self.timezone)
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} (@{self.username})"

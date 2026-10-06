@@ -1,8 +1,6 @@
 import re
 from datetime import datetime, time
-from zoneinfo import ZoneInfo
 
-from django.conf import settings
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
@@ -14,6 +12,12 @@ from apps.recruitments.models import (
 )
 from apps.sports.models import SportPosition, Sport
 from shared.models import Location
+from utils.timezones import (
+    TIMEZONE_MAX_LENGTH,
+    default_timezone,
+    validate_timezone,
+    zone,
+)
 
 # E.164-ish phone: optional leading +, then 7–15 digits (separators stripped).
 PHONE_RE = re.compile(r"^\+?\d{7,15}$")
@@ -280,17 +284,23 @@ class TrialSessionInputSerializer(serializers.Serializer):
         return attrs
 
 
-def session_starts_at(session):
+def session_starts_at(session, tzinfo):
     """
     A validated session payload row as an aware datetime, the same way
     ``TrialSession.starts_at`` reads a stored one: its start time, or 23:59
     when it carries none. Used here to check the deadline against the first
     date BEFORE the row exists.
+
+    ``tzinfo`` is the RECRUITMENT'S zone — the same one ``_sync_trial_window``
+    will build ``event_date`` in once the rows are written, so the deadline is
+    checked against the instant that is actually about to be stored. Passed in
+    rather than looked up because on a create the recruitment does not exist
+    yet; ``RecruitmentCreateSerializer._resolve_timezone`` decides it.
     """
     return datetime.combine(
         session["date"],
         session.get("start_time") or time(23, 59),
-        tzinfo=ZoneInfo(settings.RECRUITMENT_TIMEZONE),
+        tzinfo=tzinfo,
     )
 
 
@@ -353,6 +363,14 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         required=False
     )
     sport_id = serializers.UUIDField()
+    # THE TRIAL'S CALENDAR. Optional on the wire: omitted, it is inherited
+    # from the recruitment being edited, else from the posting org. The
+    # wizard shows it pre-filled and quiet — most orgs never think about it,
+    # and the one posting abroad has to be able to change it.
+    timezone = serializers.CharField(
+        required=False,
+        max_length=TIMEZONE_MAX_LENGTH,
+    )
     experience_level = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -474,6 +492,42 @@ class RecruitmentCreateSerializer(serializers.Serializer):
             )
         return value
 
+    def validate_timezone(self, value):
+        """An IANA name this machine knows, or a 400 naming the problem."""
+        try:
+            return validate_timezone(value.strip())
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages[0])
+
+    def _resolve_timezone(self, attrs):
+        """
+        The zone this recruitment will be stored with.
+
+        The payload wins; then the recruitment being edited (an edit that
+        says nothing about the timezone must not move the trial); then the
+        posting organization, which is where a new recruitment inherits from;
+        then the settings default, which is only reachable for an actor-less
+        call such as a test building the serializer directly.
+
+        Resolved ONCE, here, and written into ``attrs`` — so the deadline
+        check below, the stored column and ``_sync_trial_window`` all read
+        the same answer. Nothing downstream re-derives it.
+        """
+        if attrs.get("timezone"):
+            return attrs["timezone"]
+
+        instance = self.context.get("recruitment")
+        if instance is not None and instance.timezone:
+            return instance.timezone
+
+        request = self.context.get("request")
+        actor = getattr(request, "actor", None)
+        organization = getattr(actor, "organization", None)
+        if organization is not None and organization.timezone:
+            return organization.timezone
+
+        return default_timezone()
+
     def validate(self, attrs):
         sport_id = attrs.get("sport_id")
         is_paid = attrs.get("is_paid")
@@ -482,6 +536,14 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         application_deadline = attrs.get("application_deadline")
         positions = attrs.get("positions", [])
         recruitment_type = attrs.get("recruitment_type")
+
+        # THE TRIAL'S CALENDAR, resolved before anything reads a date.
+        # Written back into attrs so the column is always explicitly set —
+        # create_recruitment passes **validated_data straight through and
+        # update_recruitment setattrs it, so an inherited zone is stored
+        # just like one the org picked.
+        attrs["timezone"] = self._resolve_timezone(attrs)
+        trial_zone = zone(attrs["timezone"])
 
         # TRIAL DATES
         sessions = attrs.get("sessions", [])
@@ -605,11 +667,11 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         # The deadline is never silently clamped: the org set it on purpose.
         opening_session = first_session(sessions)
         if application_deadline and opening_session:
-            starts_at = session_starts_at(opening_session)
+            starts_at = session_starts_at(opening_session, trial_zone)
             if application_deadline > starts_at:
-                local = starts_at.astimezone(
-                    ZoneInfo(settings.RECRUITMENT_TIMEZONE)
-                )
+                # The date as the ORG reads it — at its own venue, not on
+                # the server's clock.
+                local = starts_at.astimezone(trial_zone)
                 raise serializers.ValidationError(
                     "The application deadline is after the first trial "
                     "date. Move the deadline to on or before "

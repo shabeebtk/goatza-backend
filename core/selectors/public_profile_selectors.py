@@ -325,8 +325,8 @@ def public_recruitments_for(organization, now=None):
 
     Ended trials are dropped too (``trial_not_over_q``), the same rule the
     signed-in org profile tab applies. The bundle is cached for
-    PUBLIC_BUNDLE_TTL (60s), so a trial can outlive midnight in
-    RECRUITMENT_TIMEZONE by up to a minute on this page — accepted.
+    PUBLIC_BUNDLE_TTL (60s), so a trial can outlive midnight at its venue by
+    up to a minute on this page — accepted.
     ``now`` is for tests only.
     """
     return (

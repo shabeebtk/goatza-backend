@@ -685,7 +685,7 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE") or "Asia/Kolkata"
 CELERY_ENABLE_UTC = True
 
-# PUBLISH SIDE � the settings that keep a sick broker from freezing a request.
+# PUBLISH SIDE � the settings that keep a sick broker from freezing a request.
 # socket_connect_timeout is the load-bearing one; without it a blackholed Redis
 # blocks apply_async for minutes.
 CELERY_BROKER_TRANSPORT_OPTIONS = {
@@ -801,13 +801,20 @@ APPLICANT_ALERT_TIERS = [
     (None, 14400), # applicants 8+ : at most one alert per 4 hours
 ]
 
-# ------ RECRUITMENT TRIAL WINDOW ------/
-# The zone whose calendar decides when a trial day is OVER. A trial is hidden
-# from player-facing lists once its event_date's calendar day has ended here,
-# so a trial later today stays visible all day (TIME_ZONE stays UTC — this is
-# a product rule, not the server clock). The frontend saves a date-only trial
-# as 23:59 local time, so "day over" and "event_date passed" agree.
-# Read by apps/recruitments/trial_window.py; nothing else should consult it.
+# ------ DEFAULT TIMEZONE FOR A NEW ORGANIZATION ------/
+# THIS IS NOT THE RULE FOR ANYBODY'S TRIAL. It is the fallback value a new
+# Organization.timezone starts on when its country does not unambiguously name
+# a zone (utils/timezones.COUNTRY_TIMEZONES), and nothing else.
+#
+# The calendar a trial runs on is Recruitment.timezone, seeded from the org's
+# and editable per posting. When a trial is OVER is a plain UTC comparison
+# against trial_end_date, which already carries that recruitment's own day
+# boundary — see apps/recruitments/trial_window.py. One global zone is exactly
+# the bug this replaced: it ended a London trial at 6:30pm London time.
+#
+# READ IN ONE PLACE: utils/timezones.default_timezone(). Nothing else may
+# consult it — a second reader is a second global calendar.
+# (TIME_ZONE stays UTC; every datetime is stored in UTC and always was.)
 RECRUITMENT_TIMEZONE = os.getenv("RECRUITMENT_TIMEZONE") or "Asia/Kolkata"
 
 # ------ GOOGLE PLACES (city + venue search) ------/

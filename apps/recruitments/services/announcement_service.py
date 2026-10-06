@@ -22,9 +22,7 @@ implementation that agrees with the first until someone edits one of them.
 
 import logging
 from datetime import timedelta
-from zoneinfo import ZoneInfo
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Count
 from django.db.models.functions import TruncMinute
@@ -77,10 +75,11 @@ WRITTEN_CHANNELS = (Channel.DM, Channel.NOTIFICATION, Channel.EMAIL)
 # again would be two notifications for one thing the org said once.
 DIRECT_CHANNELS = (Channel.DM,)
 
-# Announcements one recruitment may send per calendar day in
-# RECRUITMENT_TIMEZONE. A cap, not a rate limit: the failure mode this guards
-# is an org treating announcements as a chat window, and the cost of that is
-# every applicant muting their notifications.
+# Announcements one recruitment may send per calendar day — the
+# RECRUITMENT'S day, which is close enough to the org's and one less concept
+# to carry. A cap, not a rate limit: the failure mode this guards is an org
+# treating announcements as a chat window, and the cost of that is every
+# applicant muting their notifications.
 MAX_PER_DAY = 5
 
 # Applicants one direct message may name. The same ceiling the bulk status
@@ -95,8 +94,9 @@ REVIEWER_ROLES = (
 )
 
 
-def _local_now():
-    return timezone.now().astimezone(ZoneInfo(settings.RECRUITMENT_TIMEZONE))
+def _local_now(recruitment):
+    """Now, on the recruitment's own clock. The only reason the cap needs one."""
+    return timezone.now().astimezone(recruitment.zoneinfo)
 
 
 class AnnouncementService:
@@ -204,8 +204,9 @@ class AnnouncementService:
     @staticmethod
     def _check_daily_limit(recruitment):
         """
-        At most MAX_PER_DAY announcements per recruitment per calendar day in
-        RECRUITMENT_TIMEZONE — the same clock every other date rule here uses.
+        At most MAX_PER_DAY announcements per recruitment per calendar day
+        IN THAT RECRUITMENT'S OWN TIMEZONE — a London trial's budget resets
+        at midnight London, not at 4:30am when the server's day turns over.
 
         Soft-deleted announcements COUNT. They were sent; deleting one takes
         nothing back, so letting a delete buy another send would make the cap
@@ -216,7 +217,7 @@ class AnnouncementService:
         would just mean ten sends a day through whichever one had budget
         left, which is the thing the cap exists to stop.
         """
-        local_now = _local_now()
+        local_now = _local_now(recruitment)
         start_of_day = local_now.replace(
             hour=0, minute=0, second=0, microsecond=0
         )

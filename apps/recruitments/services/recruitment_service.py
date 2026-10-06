@@ -941,6 +941,13 @@ class RecruitmentService:
                          writes; see the frontend's wizardDate.ts)
           trial_end_date 23:59:59 of the LAST session's day
 
+        BOTH ARE BUILT IN ``recruitment.timezone`` and stored as the UTC
+        instant — this is THE place the trial's calendar is resolved, and the
+        reason every read of these columns is a plain UTC comparison with no
+        timezone in it (``trial_window``). A London trial's end instant lands
+        five and a half hours after an Indian one carrying the same calendar
+        date, which is the whole point.
+
         No sessions at all, or every one cancelled, makes BOTH null — which
         is also why a player_looking recruitment, which never has sessions,
         carries neither.
@@ -953,6 +960,15 @@ class RecruitmentService:
             .filter(is_cancelled=False)
             .order_by("date", "start_time", "display_order")
         )
+
+        # ``starts_at`` / ``ends_at`` read the zone off the parent, so hand
+        # each row the instance we are already holding. Not just to save a
+        # query per session: on an edit that CHANGED the timezone, the
+        # in-memory value is the new one and a re-fetched parent would still
+        # carry the old zone, writing a window for the country the org has
+        # just moved away from.
+        for session in sessions:
+            session.recruitment = recruitment
 
         if sessions:
             event_date = sessions[0].starts_at

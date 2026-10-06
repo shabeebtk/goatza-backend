@@ -1,7 +1,5 @@
 # recruitments/services/application_service.py
 import logging
-from zoneinfo import ZoneInfo
-from django.conf import settings
 from django.db import transaction, IntegrityError
 from django.db.models import F
 from django.db.models.functions import Greatest
@@ -17,10 +15,9 @@ from apps.recruitments.models import (
 from apps.recruitments.pass_code import mint_for
 from apps.recruitments.legacy_status import (
     LEGACY_STATUSES,
-    local_date,
     map_legacy_status,
 )
-from apps.recruitments.trial_window import is_trial_over, start_of_today
+from apps.recruitments.trial_window import is_trial_over
 from apps.sports.models import SportPosition
 from apps.connections.services.follow_services import FollowService
 from core.constant import TYPE_ORGANIZATION
@@ -487,9 +484,12 @@ class ApplicationService:
                 "That date has been cancelled. Pick another."
             )
 
-        # By calendar day in RECRUITMENT_TIMEZONE, like every other date rule
-        # here: today's date is still pickable all day.
-        if session.date < start_of_today().date():
+        # By calendar day AT THE VENUE: today's date is still pickable all
+        # day there. ``session.date`` is a calendar date in the
+        # recruitment's own zone, so "today" has to be read in that zone too
+        # — on the server's clock a Dubai player could lose a London date
+        # four hours early.
+        if session.date < _today_at_venue(recruitment):
             raise ValidationError("That date has passed. Pick another.")
 
         return session.id
@@ -845,7 +845,10 @@ class ApplicationService:
             # The same helper the results guard reads, so "has the trial
             # started" has one answer on this code path.
             trial_starts_at=ApplicationService._trial_starts_at(recruitment),
-            decided_on=local_date(timezone.now()),
+            # Both dates read at the VENUE, so "before the trial" is the
+            # club's own calendar — the same zone the backfill reads them in.
+            decided_on=_today_at_venue(recruitment),
+            tzinfo=recruitment.zoneinfo,
         )
 
         # INFO, not DEBUG: this line is the signal for whether it is safe to
@@ -959,7 +962,13 @@ class ApplicationService:
 
     @staticmethod
     def _trial_ends_at(recruitment):
-        """The trial's last day — it is over once that day ends."""
+        """
+        The trial's last day — it is over once that INSTANT has passed.
+
+        Already 23:59:59 at the venue (``_sync_trial_window`` resolved the
+        day boundary when it was written), so ``is_trial_over`` compares it
+        against ``now()`` with no timezone of its own.
+        """
         return recruitment.trial_end_date or recruitment.event_date
 
     @staticmethod
@@ -974,15 +983,20 @@ class ApplicationService:
 
         if to_status in ApplicationService.RESULT_STATUSES:
             starts_at = ApplicationService._trial_starts_at(recruitment)
-            today = start_of_today()
-            # By calendar day in RECRUITMENT_TIMEZONE, like the trial-over
-            # rule: results open on the trial day itself, whatever its time.
+            # BY CALENDAR DAY AT THE VENUE: results open on the trial day
+            # itself, whatever its time. ``starts_at`` was already built in
+            # this recruitment's zone, so reading both sides back in that
+            # zone is what makes "has the trial day arrived" mean the same
+            # thing to the club as to the server.
+            venue_zone = recruitment.zoneinfo
             if (
                 starts_at is not None
-                and starts_at.astimezone(today.tzinfo).date() > today.date()
+                and starts_at.astimezone(venue_zone).date()
+                > _today_at_venue(recruitment)
             ):
                 raise ValidationError(
-                    f"Results open on {_trial_day_label(starts_at)}. "
+                    f"Results open on "
+                    f"{_trial_day_label(starts_at, venue_zone)}. "
                     "If that date is wrong, edit the trial."
                 )
 
@@ -996,7 +1010,24 @@ class ApplicationService:
             )
 
 
-def _trial_day_label(value):
-    """"Sun 12 Oct" — a trial day as the org would say it, in its timezone."""
-    local = value.astimezone(ZoneInfo(settings.RECRUITMENT_TIMEZONE))
-    return dateformat.format(local, "D j M")
+def _today_at_venue(recruitment):
+    """
+    Today's calendar date in the RECRUITMENT'S zone.
+
+    The one spot where a timezone still has to be read on a request path,
+    and only ever to turn "now" into a DAY. Every comparison against a
+    stored instant is plain UTC — see ``trial_window``.
+    """
+    return timezone.now().astimezone(recruitment.zoneinfo).date()
+
+
+def _trial_day_label(value, tzinfo):
+    """
+    "Sun 12 Oct" — a trial day as the ORG would say it.
+
+    Formatted in the recruitment's zone, never the server's: an error
+    message that names the wrong day is worse than no message, and a club
+    in London being told its trial is on the 13th because the server is on
+    IST is exactly that.
+    """
+    return dateformat.format(value.astimezone(tzinfo), "D j M")
