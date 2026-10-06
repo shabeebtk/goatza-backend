@@ -25,6 +25,14 @@ process with a dead database still satisfies.
 WHAT IT DOES NOT DO: no exception text, no hostnames, no connection strings in
 the body — this URL is open to the internet. Failures are named by COMPONENT
 and the detail goes to the log (and therefore to Sentry, at ERROR).
+
+ONLY THE DATABASE DECIDES THE HTTP STATUS. Render recycles a container that
+answers non-200 here, and since the cache became resilient
+(core/cache/resilient.py) a dead Redis no longer stops the app serving — it
+makes it slower. Recycling the web service over it would turn a degradation
+into an outage, and the replacement container would come up just as unable to
+reach Redis. So a degraded cache is reported as a named component at 200, and
+only an unreachable Postgres is a 503.
 """
 
 import logging
@@ -34,6 +42,8 @@ from django.db import connection
 from django.http import JsonResponse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
+
+from utils.cache import cache_is_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +55,9 @@ _PROBE_TTL = 10
 
 OK = "ok"
 ERROR = "error"
+# Reachable but not in use: the breaker is open, so reads miss and writes drop.
+# A warning, never a reason to recycle the container.
+DEGRADED = "degraded"
 
 
 def _check_database():
@@ -64,19 +77,37 @@ def _check_database():
 
 def _check_cache():
     """
-    True if the cache round-trips a value.
+    True if the cache is actually serving.
 
-    A round trip, not a bare ``set``: the Redis client buffers and a set that
-    never reaches the server can still return without raising, so the read back
-    is the part that proves anything. In production this cache is REDIS_URL; on
-    a checkout with no REDIS_URL it is LocMemCache, which passes trivially —
-    correct, because there is nothing to be down.
+    TWO QUESTIONS, BOTH NECESSARY.
+
+    ``cache_is_degraded()`` is the backend's own breaker state. It is the
+    authoritative answer now that the backend swallows RedisError: the probe
+    below would otherwise sail through a total Redis outage, reporting healthy
+    at exactly the moment the truth matters.
+
+    The round trip is still here because the breaker cannot see everything. A
+    set that the client buffered and never delivered raises nothing and opens
+    no window, and the read back is the only thing that catches it. So: not
+    degraded AND the value comes back.
+
+    In production this cache is REDIS_URL; on a checkout with no REDIS_URL it
+    is LocMemCache, which has no breaker and round-trips fine — correct,
+    because there is nothing to be down.
     """
+    if cache_is_degraded():
+        # Already logged at ERROR by the backend, once for the whole outage.
+        # Logging again per probe would be a line every few seconds forever.
+        return False
+
     try:
         probe = str(id(object()))
         cache.set(_PROBE_KEY, probe, _PROBE_TTL)
         return cache.get(_PROBE_KEY) == probe
     except Exception:
+        # The resilient backend does not raise RedisError, so reaching here
+        # means something else did — a serialization bug, a misconfiguration.
+        # Worth its own line.
         logger.error("healthz | cache (redis) check failed", exc_info=True)
         return False
 
@@ -85,31 +116,46 @@ def _check_cache():
 @require_GET
 def healthz(request):
     """
-    GET /healthz → 200 {"status": "ok", "db": "ok", "redis": "ok"}
-                   503 {"status": "degraded", "db": "ok", "redis": "error"}
+    GET /healthz → 200 {"status": "ok",       "db": "ok",    "redis": "ok"}
+                   200 {"status": "degraded", "db": "ok",    "redis": "degraded"}
+                   503 {"status": "degraded", "db": "error", "redis": "ok"}
 
-    Each check is independently guarded so a dead Redis still reports the true
-    state of the database — a probe that stops at the first failure tells you
-    one thing is broken and hides whether the other is too.
+    THE DATABASE ALONE DECIDES THE STATUS CODE. Postgres is the system of
+    record: without it this process can serve nothing and deserves to be
+    replaced. Redis is an optimisation the app now runs without, so a dead one
+    is reported and not acted on — recycling the container would replace a
+    slow service with an equally slow service, having dropped every in-flight
+    request to do it.
+
+    Both checks still run and both are still reported. A probe that stops at
+    the first failure tells you one thing is broken and hides whether the
+    other is too.
     """
     db_ok = _check_database()
     cache_ok = _check_cache()
+
+    # The status WORD covers both components; the status CODE covers only the
+    # one Render should act on.
     healthy = db_ok and cache_ok
 
-    if not healthy:
+    if not db_ok:
         # ERROR level, so the Sentry logging integration raises an event —
         # this is the line that pages somebody.
         logger.error(
-            "healthz | degraded | db=%s | redis=%s",
-            OK if db_ok else ERROR,
-            OK if cache_ok else ERROR,
+            "healthz | database unreachable | db=%s | redis=%s",
+            ERROR, OK if cache_ok else DEGRADED,
         )
+    elif not cache_ok:
+        # WARNING, not ERROR: the backend already logged the outage itself at
+        # ERROR, once, and /healthz is polled every few seconds — an ERROR
+        # here would be a Sentry event per poll for the whole outage.
+        logger.warning("healthz | cache degraded, still serving | db=ok")
 
     return JsonResponse(
         {
-            "status": "ok" if healthy else "degraded",
+            "status": OK if healthy else DEGRADED,
             "db": OK if db_ok else ERROR,
-            "redis": OK if cache_ok else ERROR,
+            "redis": OK if cache_ok else DEGRADED,
         },
-        status=200 if healthy else 503,
+        status=200 if db_ok else 503,
     )

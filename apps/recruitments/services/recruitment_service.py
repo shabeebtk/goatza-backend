@@ -4,6 +4,7 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from apps.recruitments.models import (
     Recruitment,
+    RecruitmentApplication,
     RecruitmentPosition,
     RecruitmentQuestion,
     RecruitmentQuestionOption,
@@ -12,7 +13,8 @@ from apps.recruitments.models import (
     RecruitmentRequirement,
     RecruitmentBenefit,
     RecruitmentContact,
-    RecruitmentEligibilityCriteria
+    RecruitmentEligibilityCriteria,
+    TrialSession,
 )
 from apps.sports.models import Sport
 from services.location.location_service import LocationService
@@ -125,6 +127,7 @@ class RecruitmentService:
         media_data = validated_data.pop("media", [])
 
         age_categories_data = validated_data.pop("age_categories", [])
+        sessions_data = validated_data.pop("sessions", [])
         contacts_data = validated_data.pop("contacts", [])
         benefits_data = validated_data.pop("benefits", [])
         requirements_data = validated_data.pop("requirements", [])
@@ -198,6 +201,17 @@ class RecruitmentService:
             recruitment, eligibility_criteria_data
         )
 
+        # DATES LAST. The sessions have to exist before the window can be
+        # derived from them, and event_date / trial_end_date are derived,
+        # never authored — whatever the payload carried for event_date is
+        # overwritten here.
+        RecruitmentService._sync_trial_sessions(recruitment, sessions_data)
+        RecruitmentService._sync_trial_window(recruitment)
+
+        # Nothing "changed" on a create — there is no previous schedule and
+        # nobody has applied yet.
+        recruitment.schedule_changed_fields = []
+
         return recruitment
 
     @staticmethod
@@ -209,6 +223,7 @@ class RecruitmentService:
         media_data = validated_data.pop("media", [])
 
         age_categories_data = validated_data.pop("age_categories", [])
+        sessions_data = validated_data.pop("sessions", [])
         contacts_data = validated_data.pop("contacts", [])
         benefits_data = validated_data.pop("benefits", [])
         requirements_data = validated_data.pop("requirements", [])
@@ -256,6 +271,16 @@ class RecruitmentService:
             location_data
         )
 
+        # The recruitment's OWN venue, captured BEFORE the setattr loop
+        # below overwrites it — this is the only moment the stored value and
+        # the incoming one both exist.
+        venue_changed = (
+            recruitment.venue_name != validated_data.get("venue_name", "")
+            or recruitment.venue_link != validated_data.get("venue_link", "")
+            or str(recruitment.location_id or "")
+            != str(getattr(location, "id", "") or "")
+        )
+
         # SCALAR FIELDS
         recruitment.sport = sport
         recruitment.location = location
@@ -295,7 +320,48 @@ class RecruitmentService:
             recruitment, eligibility_criteria_data
         )
 
+        # DATES LAST. The sessions have to exist before the window can be
+        # derived from them, and event_date / trial_end_date are derived,
+        # never authored — whatever the payload carried for event_date is
+        # overwritten here.
+        schedule_changes = RecruitmentService._sync_trial_sessions(
+            recruitment, sessions_data
+        )
+        RecruitmentService._sync_trial_window(recruitment)
+
+        # The recruitment's OWN venue is part of the schedule too: "same date,
+        # new ground" is exactly the thing applicants have to be told.
+        if venue_changed:
+            schedule_changes.add("venue")
+
+        recruitment.schedule_changed_fields = (
+            RecruitmentService._schedule_changed_fields(
+                recruitment, schedule_changes
+            )
+        )
+
         return recruitment
+
+    @staticmethod
+    def _schedule_changed_fields(recruitment, changes):
+        """
+        What changed that applicants would want to hear about, as a sorted
+        list. The client uses it to offer a pre-filled announcement.
+
+        EMPTY WHEN THERE IS NOBODY TO TELL. A recruitment with no applications
+        has no audience, so prompting the org to announce a date change to
+        zero people is pure friction — and the announcement endpoint would
+        write zero deliveries anyway.
+        """
+        if not changes:
+            return []
+
+        if not recruitment.applications.exclude(
+            status=RecruitmentApplication.Status.WITHDRAWN
+        ).exists():
+            return []
+
+        return sorted(changes)
 
     @staticmethod
     @transaction.atomic
@@ -671,6 +737,257 @@ class RecruitmentService:
             RecruitmentAgeCategory.objects.bulk_create(
                 to_create
             )
+
+    # Which session columns count as the SCHEDULE moving, for
+    # schedule_changed_fields and for voiding reminders. Split because the two
+    # have different consequences: a date change invalidates a reminder, a
+    # venue change does not (the player still turns up tomorrow).
+    _SESSION_TIMING_FIELDS = frozenset({"date", "start_time", "end_time"})
+    _SESSION_VENUE_FIELDS = frozenset(
+        {"venue_name", "venue_link", "location", "city", "latitude", "longitude"}
+    )
+
+    @staticmethod
+    def _clear_reminders(recruitment, moved_session_ids):
+        """
+        Void the evening-before reminder for everyone whose date just moved.
+
+        A reminder that named a date the trial is no longer on is worse than
+        no reminder: the player either turns up on the wrong day or stops
+        trusting the next one. Clearing the stamp puts them back in
+        ``send_trial_reminders``'s queue so the NEW date earns its own.
+
+        WHO is affected depends on the mode. In choose_one an application
+        names its own date, so only that date's applicants are touched. In
+        `all` mode every confirmed applicant is coming to every date, so any
+        date moving moves the trial for all of them.
+        """
+        if not moved_session_ids:
+            return
+
+        applications = RecruitmentApplication.objects.filter(
+            recruitment=recruitment,
+            trial_reminder_sent_at__isnull=False,
+        )
+
+        if recruitment.session_mode == Recruitment.SessionMode.CHOOSE_ONE:
+            applications = applications.filter(session_id__in=moved_session_ids)
+
+        applications.update(trial_reminder_sent_at=None)
+
+    @staticmethod
+    def _sync_trial_sessions(recruitment, sessions_data):
+        """
+        DIFF sync, not the delete-and-recreate the sibling helpers use — same
+        reason ``_sync_age_categories`` diff-syncs, and just as load-bearing.
+
+        Applications point at these rows (``RecruitmentApplication.session``),
+        so recreating them on every edit would SET_NULL the date every
+        applicant picked: an org fixing a typo in a venue would silently wipe
+        which city each of its applicants said they were coming to. Instead:
+        payload rows carrying an `id` are updated in place, rows without one
+        are created, and rows the payload dropped are deleted.
+
+        An `id` this recruitment does not own is REJECTED rather than adopted,
+        so an edit can never steal another recruitment's date.
+
+        Callers must follow this with ``_sync_trial_window``.
+
+        Returns the set of SCHEDULE-ish changes it made — which dates
+        moved, which were added, removed or cancelled, and whether a
+        per-date venue changed. ``update_recruitment`` surfaces it as
+        ``schedule_changed_fields`` so the client can offer to tell the
+        applicants, and the moved dates are also what clears each
+        affected applicant's reminder stamp.
+        """
+        existing = {
+            str(session.id): session
+            for session in recruitment.sessions.all()
+        }
+
+        seen_ids = set()
+        to_create = []
+        to_update = []
+        changes = set()
+        # Sessions whose DATE or TIME moved. The applicants attached to
+        # these are the ones whose reminder is now about the wrong day.
+        moved_session_ids = set()
+
+        for idx, data in enumerate(sessions_data):
+            raw_id = data.get("id")
+            fields = RecruitmentService._session_fields(data, idx)
+
+            if raw_id is None:
+                to_create.append(
+                    TrialSession(recruitment=recruitment, **fields)
+                )
+                changes.add("session_added")
+                continue
+
+            session_id = str(raw_id)
+
+            if session_id in seen_ids:
+                raise ValidationError(
+                    f"Duplicate trial date id: {session_id}"
+                )
+
+            session = existing.get(session_id)
+            if session is None:
+                raise ValidationError(
+                    f"Invalid trial date id: {session_id}"
+                )
+
+            seen_ids.add(session_id)
+
+            # Compare BEFORE overwriting: this is the only moment both the
+            # stored and the incoming value exist together.
+            for field, value in fields.items():
+                if getattr(session, field) == value:
+                    continue
+
+                if field in RecruitmentService._SESSION_TIMING_FIELDS:
+                    changes.add("session_date")
+                    moved_session_ids.add(session.id)
+                elif field in RecruitmentService._SESSION_VENUE_FIELDS:
+                    changes.add("session_venue")
+                elif field == "is_cancelled":
+                    changes.add(
+                        "session_cancelled" if value else "session_restored"
+                    )
+                    moved_session_ids.add(session.id)
+
+            for field, value in fields.items():
+                setattr(session, field, value)
+            to_update.append(session)
+
+        removed_ids = set(existing) - seen_ids
+        if removed_ids:
+            changes.add("session_removed")
+            # Their applications are about to lose the date they picked
+            # (SET_NULL), so whatever reminder they were promised is void.
+            RecruitmentApplication.objects.filter(
+                session_id__in=removed_ids
+            ).update(trial_reminder_sent_at=None)
+            recruitment.sessions.filter(id__in=removed_ids).delete()
+
+        if to_update:
+            TrialSession.objects.bulk_update(
+                to_update, list(RecruitmentService._SESSION_FIELDS)
+            )
+
+        if to_create:
+            TrialSession.objects.bulk_create(to_create)
+
+        RecruitmentService._clear_reminders(
+            recruitment, moved_session_ids
+        )
+
+        return changes
+
+    # The columns _sync_trial_sessions writes — one list, so a create and an
+    # update can never write different sets.
+    _SESSION_FIELDS = (
+        "title",
+        "date",
+        "start_time",
+        "end_time",
+        "venue_name",
+        "venue_link",
+        "location",
+        "city",
+        "latitude",
+        "longitude",
+        "is_cancelled",
+        "display_order",
+    )
+
+    @staticmethod
+    def _session_fields(data, idx):
+        """
+        One payload row -> the column values for it.
+
+        The venue block is resolved exactly the way the recruitment's own is
+        (``_resolve_location``), so a per-date venue gets the same Location FK
+        and therefore the same coordinate refresh. An absent block means "no
+        venue of its own" — the session inherits the recruitment's.
+        """
+        location, location_fields = RecruitmentService._resolve_location(
+            data.get("location")
+        )
+
+        return {
+            "title": data.get("title", ""),
+            "date": data["date"],
+            "start_time": data.get("start_time"),
+            "end_time": data.get("end_time"),
+            "venue_name": data.get("venue_name", ""),
+            "venue_link": data.get("venue_link", ""),
+            "location": location,
+            "city": location_fields["city"],
+            "latitude": location_fields["latitude"],
+            "longitude": location_fields["longitude"],
+            "is_cancelled": data.get("is_cancelled", False),
+            "display_order": data.get("display_order", idx),
+        }
+
+    @staticmethod
+    def _sync_trial_window(recruitment):
+        """
+        Re-derive the two denormalized date columns from the non-cancelled
+        sessions. Call after EVERY session write — create, update, cancel.
+
+          event_date     the FIRST session's start (its time, or 23:59 when it
+                         carries none — the date-only sentinel the wizard
+                         writes; see the frontend's wizardDate.ts)
+          trial_end_date 23:59:59 of the LAST session's day
+
+        BOTH ARE BUILT IN ``recruitment.timezone`` and stored as the UTC
+        instant — this is THE place the trial's calendar is resolved, and the
+        reason every read of these columns is a plain UTC comparison with no
+        timezone in it (``trial_window``). A London trial's end instant lands
+        five and a half hours after an Indian one carrying the same calendar
+        date, which is the whole point.
+
+        No sessions at all, or every one cancelled, makes BOTH null — which
+        is also why a player_looking recruitment, which never has sessions,
+        carries neither.
+
+        Writes only when something actually changed, so an edit that leaves
+        the dates alone costs no UPDATE.
+        """
+        sessions = list(
+            recruitment.sessions
+            .filter(is_cancelled=False)
+            .order_by("date", "start_time", "display_order")
+        )
+
+        # ``starts_at`` / ``ends_at`` read the zone off the parent, so hand
+        # each row the instance we are already holding. Not just to save a
+        # query per session: on an edit that CHANGED the timezone, the
+        # in-memory value is the new one and a re-fetched parent would still
+        # carry the old zone, writing a window for the country the org has
+        # just moved away from.
+        for session in sessions:
+            session.recruitment = recruitment
+
+        if sessions:
+            event_date = sessions[0].starts_at
+            trial_end_date = sessions[-1].ends_at
+        else:
+            event_date = None
+            trial_end_date = None
+
+        if (
+            recruitment.event_date == event_date
+            and recruitment.trial_end_date == trial_end_date
+        ):
+            return recruitment
+
+        recruitment.event_date = event_date
+        recruitment.trial_end_date = trial_end_date
+        recruitment.save(update_fields=["event_date", "trial_end_date"])
+
+        return recruitment
 
     @staticmethod
     def _sync_contacts(recruitment, contacts_data):

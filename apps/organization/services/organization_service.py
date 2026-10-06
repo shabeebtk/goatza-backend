@@ -8,6 +8,7 @@ from apps.usernames.services.username_service import (
     GENERATE_CLAIM_ATTEMPTS,
     UsernameService,
 )
+from utils.timezones import timezone_for_country
 from apps.organization.models import (
     Organization,
     OrganizationProfile,
@@ -128,6 +129,21 @@ class OrganizationService:
                     longitude=columns["longitude"],
                     is_primary=True
                 )
+
+                # TIMEZONE, SUGGESTED FROM THE COUNTRY. The country lives on
+                # the LOCATION, not on Organization, so this is the only
+                # moment on create when one is known — and only for an org
+                # that gave a location at all.
+                #
+                # A SUGGESTION, NEVER A GUESS: a country that keeps more than
+                # one clock (US, AU, BR…) is not in the map and leaves the
+                # field on its default, because a wrong zone looks
+                # authoritative and nobody re-checks it. Editable in org
+                # settings either way.
+                suggested = timezone_for_country(columns["country_code"])
+                if suggested != org.timezone:
+                    org.timezone = suggested
+                    org.save(update_fields=["timezone", "updated_at"])
 
             # SPORTS (optional)
             sport_ids = data.get("sport_ids", [])

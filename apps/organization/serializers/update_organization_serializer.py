@@ -1,6 +1,8 @@
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 from apps.organization.models import Organization, OrganizationProfile
 from apps.usernames.services.username_service import UsernameService
+from utils.timezones import TIMEZONE_MAX_LENGTH, validate_timezone
 from utils.validations import validate_username_format
 
 
@@ -9,6 +11,12 @@ class UpdateOrganizationSerializer(serializers.Serializer):
     name = serializers.CharField(required=False, max_length=255)
     username = serializers.CharField(required=False, max_length=50)
     type = serializers.ChoiceField(choices=Organization.Type.choices, required=False)
+    # THE ORG'S CALENDAR, and the seed every new recruitment inherits.
+    # Changing it does NOT move an existing recruitment: each one carries its
+    # own copy, resolved when it was created.
+    timezone = serializers.CharField(
+        required=False, max_length=TIMEZONE_MAX_LENGTH
+    )
 
     # Profile fields
     headline = serializers.CharField(required=False, allow_blank=True, max_length=150)
@@ -19,6 +27,13 @@ class UpdateOrganizationSerializer(serializers.Serializer):
         required=False,
         allow_blank=True
     )
+
+    def validate_timezone(self, value):
+        """An IANA name this machine knows, or a 400 naming the problem."""
+        try:
+            return validate_timezone(value.strip())
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages[0])
 
     def validate_name(self, value):
         if not value.strip():

@@ -12,6 +12,13 @@ pass just as happily against a throttled endpoint.
 The failure cases patch the view's OWN references to ``cache`` and
 ``connection`` rather than the real backends: the point under test is that the
 view degrades, not that Django's Redis client raises what we think it raises.
+
+ONLY THE DATABASE DECIDES THE STATUS CODE. That changed when the cache became
+resilient (core/cache/resilient.py): the app now serves without Redis, so
+answering 503 over it would have Render recycle a container that is working,
+and replace it with one equally unable to reach Redis. A degraded cache is
+therefore a named component at 200. An unreachable Postgres is still a 503,
+because without it this process can serve nothing.
 """
 
 from unittest.mock import MagicMock, patch
@@ -64,21 +71,28 @@ class HealthzTests(TestCase):
     # DEGRADED
     # =================================================================
 
-    def test_a_broken_cache_is_a_503_naming_redis(self):
+    def test_a_broken_cache_is_a_200_naming_redis(self):
+        """
+        REPORTED, NOT ACTED ON. The body says the cache is degraded so a human
+        or a dashboard can see it; the 200 is what stops Render killing a
+        container that is still serving every request it is given.
+        """
         broken = MagicMock()
         broken.set.side_effect = ConnectionError("redis is gone")
 
         with patch("core.views.health_views.cache", broken):
             res = self.client.get(HEALTH_URL)
 
-        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.status_code, 200)
         self.assertEqual(
-            res.json(), {"status": "degraded", "db": "ok", "redis": "error"}
+            res.json(), {"status": "degraded", "db": "ok", "redis": "degraded"}
         )
 
     def test_a_cache_that_loses_the_value_is_also_degraded(self):
         # The silent failure the round trip exists to catch: set() returns
-        # cleanly, the value never comes back. No exception is raised anywhere.
+        # cleanly, the value never comes back. No exception is raised anywhere,
+        # so the backend's breaker never opens and this is the ONLY thing that
+        # would notice.
         broken = MagicMock()
         broken.set.return_value = None
         broken.get.return_value = None
@@ -86,8 +100,8 @@ class HealthzTests(TestCase):
         with patch("core.views.health_views.cache", broken):
             res = self.client.get(HEALTH_URL)
 
-        self.assertEqual(res.status_code, 503)
-        self.assertEqual(res.json()["redis"], "error")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["redis"], "degraded")
 
     def test_a_broken_database_is_a_503_naming_db(self):
         broken = MagicMock()
@@ -118,10 +132,12 @@ class HealthzTests(TestCase):
                 patch("core.views.health_views.connection", broken_db):
             res = self.client.get(HEALTH_URL)
 
+        # The DATABASE is what makes this a 503; the cache rides along in the
+        # body so a reader is not left guessing about it.
         self.assertEqual(res.status_code, 503)
         self.assertEqual(
             res.json(),
-            {"status": "degraded", "db": "error", "redis": "error"},
+            {"status": "degraded", "db": "error", "redis": "degraded"},
         )
 
     def test_no_exception_detail_reaches_the_body(self):

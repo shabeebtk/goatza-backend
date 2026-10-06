@@ -14,15 +14,14 @@ thousands however many users there are (§1). Cost grows with recruitments, not
 with pageviews.
 """
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
 
 from django.core.cache import cache
-from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.recruitments.models import RecruitmentDiscoverImpression
 from apps.recruitments.selectors.player_context_selectors import (
     PlayerContextSelector,
 )
@@ -98,7 +97,7 @@ class RecruitmentDiscoverService:
     # ------------------------------------------------------------ #
 
     @classmethod
-    def discover(cls, actor, max_distance_km=None, now=None):
+    def discover(cls, actor, max_distance_km=None, now=None, context=None):
         """
         Build the four sections for ``actor``.
 
@@ -108,11 +107,16 @@ class RecruitmentDiscoverService:
         through to the non-personalized signals (freshness, deadline, distance).
         A valid payload plus ``is_personalized: false`` is a far better answer
         than a 400 the client would have to special-case.
+
+        ``context`` is accepted pre-resolved because the caller needs it to
+        build the cache key (see ``cache_key``). Passing it back in is what
+        keeps the cache-MISS path at exactly one resolve, as before.
         """
         now = now or timezone.now()
         max_distance_km = cls.normalize_max_distance(max_distance_km)
 
-        context = PlayerContextSelector.resolve(actor)
+        if context is None:
+            context = PlayerContextSelector.resolve(actor)
 
         # BLOCK EXCLUSION — a recruitment is owned by an org, so only the
         # org side applies. Before the candidate cap, so a blocked club cannot
@@ -251,11 +255,50 @@ class RecruitmentDiscoverService:
             }
 
     @staticmethod
-    def cache_key(actor, max_distance_km):
+    def profile_fingerprint(context):
         """
-        Per-actor, per-filter. Keyed on the ACTOR and not the user, because the
-        same person browsing as their club gets a different payload (different
-        location, different follow graph) and must not be served the player one.
+        A short stable digest of the four profile fields the payload is built
+        from — the same four ``PlayerContext.missing_fields`` names.
+
+        Location is folded in as a BOOLEAN, not as coordinates: it is what
+        decides whether "near you" can be answered at all and whether the
+        client is told to add a location. Keying on the coordinates themselves
+        would make the key change on every GPS jitter and shred the hit rate
+        for a ranking that tolerates being ten minutes old.
+
+        Sorted before hashing so set iteration order cannot produce two keys
+        for one profile, and ``str()``-ed so a UUID and its string form agree.
+        """
+        parts = (
+            ",".join(sorted(str(value) for value in context.sport_ids)),
+            ",".join(sorted(str(value) for value in context.position_ids)),
+            str(context.birth_year),
+            "1" if context.center else "0",
+        )
+        digest = hashlib.blake2b(
+            "|".join(parts).encode("utf-8"), digest_size=8
+        )
+        return digest.hexdigest()
+
+    @staticmethod
+    def cache_key(actor, context, max_distance_km):
+        """
+        Per-actor, per-profile, per-filter. Keyed on the ACTOR and not the user,
+        because the same person browsing as their club gets a different payload
+        (different location, different follow graph) and must not be served the
+        player one.
+
+        The PROFILE fingerprint is in the key because the payload is built from
+        the profile: sport alone is worth +40 of a ~100 point scale. Without it,
+        a player who has just added their primary sport would keep both the
+        "complete your profile" prompt naming that field AND the unranked
+        ordering behind it for up to ten minutes. Patching the prompt on a cache
+        hit — the way ``refresh_saved_state`` patches ``is_saved`` — would hide
+        the prompt and leave the ranking stale, which is worse: the symptom goes
+        and the wrong answer stays, with nothing left to explain it.
+
+        A profile edit simply lands on a new key. Old-format keys are never
+        read again and expire on their own TTL; there is no invalidation pass.
         """
         if actor is None:
             who = "anon"
@@ -263,7 +306,11 @@ class RecruitmentDiscoverService:
             who = f"u:{actor.user.id}"
         else:
             who = f"o:{actor.organization.id}"
-        return f"recruit:discover:{CACHE_VERSION}:{who}:d{max_distance_km}"
+        fingerprint = RecruitmentDiscoverService.profile_fingerprint(context)
+        return (
+            f"recruit:discover:{CACHE_VERSION}:{who}"
+            f":p{fingerprint}:d{max_distance_km}"
+        )
 
     @staticmethod
     def get_cached(key):
@@ -283,74 +330,6 @@ class RecruitmentDiscoverService:
         if parsed <= 0:
             return DEFAULT_MAX_DISTANCE_KM
         return min(parsed, MAX_DISTANCE_KM_CEILING)
-
-    # ------------------------------------------------------------ #
-    # METRICS (§8)
-    # ------------------------------------------------------------ #
-
-    @classmethod
-    def record_impressions(cls, actor, sections, now=None):
-        """
-        Log (player, recruitment, score, section) for a served page.
-
-        Written on cache MISS only. The cached payload is literally the same
-        page, so the 10-minute cache window doubles as the de-duplication
-        window for "this was served" — and paying 40 inserts on a response that
-        otherwise costs one Redis read would be the most expensive thing on the
-        endpoint.
-
-        Fire-and-forget: a metrics failure must never turn a working discover
-        page into a 500.
-        """
-        if actor is None or not actor.is_user:
-            # Org actors browse discovery; they do not generate player-outcome
-            # training data, and §8's metrics are all per-player.
-            return 0
-
-        now = now or timezone.now()
-
-        rows = [
-            (section, recruitment, match)
-            for section in SECTION_ORDER
-            for recruitment, match in sections.get(section, [])
-        ]
-        if not rows:
-            return 0
-
-        try:
-            # UPDATE-then-INSERT, the same shape as FeedImpressionService.record:
-            # ON CONFLICT DO UPDATE assigns the EXCLUDED value, so it would reset
-            # served_count to 1 instead of counting it.
-            seen_filter = Q()
-            for section, recruitment, _ in rows:
-                seen_filter |= Q(section=section, recruitment_id=recruitment.id)
-
-            RecruitmentDiscoverImpression.objects.filter(
-                seen_filter, user=actor.user
-            ).update(served_count=F("served_count") + 1, last_served_at=now)
-
-            RecruitmentDiscoverImpression.objects.bulk_create(
-                [
-                    RecruitmentDiscoverImpression(
-                        user=actor.user,
-                        recruitment=recruitment,
-                        section=section,
-                        match_score=match.score,
-                        is_eligible=match.is_eligible,
-                        first_served_at=now,
-                        last_served_at=now,
-                    )
-                    for section, recruitment, match in rows
-                ],
-                ignore_conflicts=True,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                f"RecruitmentDiscoverService | impression log failed | {exc}"
-            )
-            return 0
-
-        return len(rows)
 
     # ------------------------------------------------------------ #
     # "ALL" TAB (§4) — same scorer, flat list

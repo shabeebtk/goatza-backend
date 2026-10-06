@@ -31,6 +31,8 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
+
+from utils.cache import cache_is_degraded
 from django.utils import timezone
 
 from apps.places.services import google_places_client as google
@@ -217,15 +219,24 @@ def increment_usage(sku):
 
     Never raises. A cache blip must not fail a search that Google already
     answered.
+
+    RETURNS None WHEN THE COUNT IS UNKNOWN, never 0. With Redis degraded the
+    resilient backend answers False/None here rather than raising, and calling
+    that 0 would mean "nothing spent today" — which is how a budget guard
+    hands out an unmetered day. None says "I cannot tell you", and
+    ``check_budget`` refuses the next paid call on it.
     """
     key = usage_key(sku)
 
     try:
         cache.add(key, 0, USAGE_TTL_SECONDS)
+        # None when Redis is degraded; an int when it answered.
         return cache.incr(key)
     except Exception as e:
+        # A live Redis raises ValueError when the key vanished between the add
+        # and the incr (a TTL boundary race). Still unknown, not zero.
         logger.error(f"PlacesService | usage increment failed | sku={sku} | {e}")
-        return 0
+        return None
 
 
 def autocomplete_usage():
@@ -246,11 +257,28 @@ def details_usage():
 
 def check_budget(sku):
     """
-    Raise PlacesUnavailable if this SKU's daily cap is spent.
+    Raise PlacesUnavailable if this SKU's daily cap is spent, or if we cannot
+    tell whether it is.
 
     Called BEFORE the request goes out, which is the whole point: the cap only
     saves money if it stops the call, not if it hides the answer.
+
+    UNKNOWN USAGE IS TREATED AS SPENT. The counter lives in the cache, and a
+    degraded cache reads every key as absent — which is indistinguishable from
+    "nothing spent today" and would lift the cap entirely for as long as Redis
+    stayed down. This is the one guard here protecting real money against a
+    third party's paid API, so it fails CLOSED: while usage is unknown the
+    picker is unavailable, which is the same 503 a spent cap already returns
+    and a state the client already renders. Google's own console quota is the
+    outer backstop, not this.
     """
+    if cache_is_degraded():
+        logger.error(
+            f"PlacesService | usage unknown (cache degraded), refusing the "
+            f"paid call | sku={sku}"
+        )
+        raise PlacesUnavailable(SEARCH_UNAVAILABLE)
+
     if sku == SKU_AUTOCOMPLETE:
         used, cap = autocomplete_usage(), _daily_cap(SKU_AUTOCOMPLETE)
     else:

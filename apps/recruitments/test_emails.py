@@ -398,7 +398,9 @@ class StatusChangeEmailTests(RecruitmentEmailFixture):
 
     @patch("apps.recruitments.services.application_service.send_application_status_email")
     def test_each_notifying_status_sends_exactly_one_email(self, mock_send):
-        for to_status in ("shortlisted", "selected", "rejected"):
+        for to_status in (
+            "trial_confirmed", "not_shortlisted", "selected", "not_selected",
+        ):
             with self.subTest(to_status=to_status):
                 mock_send.reset_mock()
 
@@ -421,11 +423,11 @@ class StatusChangeEmailTests(RecruitmentEmailFixture):
     ):
         mock_send.side_effect = RuntimeError("template blew up")
 
-        result = self._change("shortlisted")
+        result = self._change("trial_confirmed")
 
         self.assertEqual(result["updated"], [str(self.application.id)])
         self.application.refresh_from_db()
-        self.assertEqual(self.application.status, "shortlisted")
+        self.assertEqual(self.application.status, "trial_confirmed")
 
 
 class RecruitmentEmailRenderingTests(RecruitmentEmailFixture):
@@ -458,7 +460,9 @@ class RecruitmentEmailRenderingTests(RecruitmentEmailFixture):
     def test_every_notifying_status_renders_its_own_badge_and_subject(self):
         expected = {
             "selected": ("Selected", "You're selected"),
-            "shortlisted": ("Shortlisted", "You've been shortlisted"),
+            "trial_confirmed": ("Confirmed", "You're confirmed for the trial"),
+            "not_shortlisted": ("Not shortlisted", "Update on your application"),
+            "not_selected": ("Not selected", "Update on your application"),
             "invited": ("Invited", "You're invited"),
             "rejected": ("Not selected", "Update on your application"),
         }
@@ -491,7 +495,7 @@ class RecruitmentEmailRenderingTests(RecruitmentEmailFixture):
         self.assertIn("View details", selected)
 
     def test_a_status_nobody_should_be_mailed_about_sends_nothing(self):
-        for to_status in ("reviewing", "withdrawn", "applied"):
+        for to_status in ("reviewing", "shortlisted", "withdrawn", "applied"):
             with self.subTest(to_status=to_status):
                 with patch(
                     "utils.transactional_emails.send_email_async"

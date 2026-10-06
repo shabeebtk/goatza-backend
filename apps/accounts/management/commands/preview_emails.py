@@ -39,7 +39,9 @@ from utils.transactional_emails import (
     PASSWORD_CHANGED_SUBJECT,
     PASSWORD_CHANGED_TEMPLATE,
     PASSWORD_RESET_OTP_COPY,
+    RECRUITMENT_ANNOUNCEMENT_TEMPLATE,
     SIGNUP_OTP_COPY,
+    TRIAL_REMINDER_TEMPLATE,
     STATUS_EMAIL_COPY,
     WELCOME_SUBJECT,
     WELCOME_TEMPLATE,
@@ -193,13 +195,67 @@ PREVIEWS = [
         },
     ),
     ("07a-status-selected.html", *_status_preview("selected")),
-    ("07b-status-shortlisted.html", *_status_preview("shortlisted")),
+    ("07b-status-trial-confirmed.html", *_status_preview("trial_confirmed")),
     ("07c-status-rejected.html", *_status_preview("rejected")),
     ("07d-status-invited.html", *_status_preview("invited")),
+    ("07e-status-not-shortlisted.html", *_status_preview("not_shortlisted")),
+    ("07f-status-not-selected.html", *_status_preview("not_selected")),
     ("08a-new-applicant.html", *_alert_preview(new_count=1, total_count=12)),
     (
         "08b-new-applicants-rollup.html",
         *_alert_preview(new_count=4, total_count=16),
+    ),
+    # Two entries: a whole-trial announcement and one narrowed to a single
+    # date, because the session line is the only thing that differs and it is
+    # exactly the part that would go unnoticed if it broke.
+    (
+        "10a-announcement.html",
+        RECRUITMENT_ANNOUNCEMENT_TEMPLATE,
+        {
+            **RECRUITMENT_CARD,
+            "subject": f"{ORG_NAME}: Venue has changed",
+            "player_name": NAME,
+            "announcement_title": "Venue has changed",
+            "announcement_body": (
+                "We've moved to Corporation Stadium, Gate 3.\n\n"
+                "Same date, same reporting time. Bring your own water."
+            ),
+            "session_line": "",
+        },
+    ),
+    (
+        "10b-announcement-one-date.html",
+        RECRUITMENT_ANNOUNCEMENT_TEMPLATE,
+        {
+            **RECRUITMENT_CARD,
+            "subject": f"{ORG_NAME}: Kochi round starts an hour later",
+            "player_name": NAME,
+            "announcement_title": "Kochi round starts an hour later",
+            "announcement_body": (
+                "Reporting time is now 10:00 AM. The other cities are "
+                "unchanged."
+            ),
+            "session_line": "Kochi round · 10 Oct 2026",
+        },
+    ),
+    (
+        "11-trial-reminder.html",
+        TRIAL_REMINDER_TEMPLATE,
+        {
+            **RECRUITMENT_CARD,
+            "subject": f"Tomorrow: {RECRUITMENT_TITLE}",
+            "player_name": NAME,
+            "application_id": "2c9a41",
+            "trial_date": "11 Oct 2026",
+            # The age group's time, not the session's - that is the whole
+            # point of the line.
+            "reporting_time": "8:00 am",
+            "venue_name": "Corporation Stadium",
+            "venue_link": "https://maps.google.com/?q=corporation+stadium",
+            "age_group": "U-17",
+            "bring_items": ["Aadhaar card", "Boots", "Water bottle"],
+            "fee_line": "Entry fee: INR 300 — payable at the venue.",
+        },
     ),
     (
         "09a-guardian-consent-request.html",

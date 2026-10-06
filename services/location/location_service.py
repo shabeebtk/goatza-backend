@@ -141,7 +141,7 @@ class LocationService:
         from apps.accounts.models import UserProfile
         from apps.organization.models import OrganizationLocation
         from apps.posts.models import Post
-        from apps.recruitments.models import Recruitment
+        from apps.recruitments.models import Recruitment, TrialSession
 
         coords = {
             "latitude": location.latitude,
@@ -156,6 +156,12 @@ class LocationService:
                 location_id=location.id
             ).update(**coords),
             "recruitments": Recruitment.objects.filter(
+                location_id=location.id
+            ).update(**coords),
+            # A per-date venue keeps its own copy, and that copy is what a
+            # nearest-centre distance reads — skip it and every trial centre
+            # goes stale on a refresh.
+            "trial_sessions": TrialSession.objects.filter(
                 location_id=location.id
             ).update(**coords),
             "organization_locations": OrganizationLocation.objects.filter(

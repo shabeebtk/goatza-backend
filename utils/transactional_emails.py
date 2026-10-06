@@ -30,7 +30,7 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
-from utils.emails import send_email_async
+from utils.emails import send_email, send_email_async
 
 logger = logging.getLogger(__name__)
 
@@ -190,12 +190,20 @@ def shared_email_context():
     }
 
 
-def _send(subject, text_body, html_template, context, to_email):
-    """Render `html_template` and hand the mail to the background sender.
+def _send(subject, text_body, html_template, context, to_email, blocking=False):
+    """Render `html_template` and hand the mail to the sender.
 
     The whole body is guarded, not just the send: rendering is the part that
     can actually fail (bad template name, missing setting), and a caller in the
     middle of a signup has no useful way to react to a failed email.
+
+    ``blocking=True`` sends on THIS thread and returns whether it worked.
+    It exists for the announcement outbox drain and for nothing else: that
+    is a management command draining hundreds of rows, where the default
+    thread-per-email would be hundreds of OS threads, and where the caller
+    genuinely can react — it records the outcome on the delivery row and
+    retries the failures on the next run. Every request-path caller leaves
+    it False and keeps the fire-and-forget behaviour.
     """
     try:
         html = render_to_string(
@@ -207,7 +215,8 @@ def _send(subject, text_body, html_template, context, to_email):
         # them on every failed attempt and on permanent loss. is_otp is what
         # makes a lost signup code findable in Sentry as the thing it actually
         # is: a person who can never finish creating an account.
-        send_email_async(
+        sender = send_email if blocking else send_email_async
+        result = sender(
             subject=subject,
             message=text_body,
             to_email=to_email,
@@ -215,12 +224,15 @@ def _send(subject, text_body, html_template, context, to_email):
             template=html_template,
             is_otp=html_template == OTP_TEMPLATE,
         )
+        # send_email returns True/False; send_email_async returns None and
+        # nothing can know the outcome, which is the point of it.
+        return True if not blocking else bool(result)
     except Exception as exc:
         logger.warning(
             f"transactional_emails | send failed | template={html_template} | "
             f"subject={subject!r} | {exc}"
         )
-        return
+        return False
 
 
 # ---------------------------------------------------------------------
@@ -409,23 +421,36 @@ def send_email_changed_notice(
 APPLICATION_RECEIVED_TEMPLATE = "emails/application_received.html"
 APPLICATION_STATUS_TEMPLATE = "emails/application_status.html"
 NEW_APPLICANT_ALERT_TEMPLATE = "emails/new_applicant_alert.html"
+RECRUITMENT_ANNOUNCEMENT_TEMPLATE = "emails/recruitment_announcement.html"
+TRIAL_REMINDER_TEMPLATE = "emails/trial_reminder.html"
 
-# Only these four statuses are worth an email. `reviewing` is internal pipeline
-# bookkeeping the player never asked about, `withdrawn` is their own action, and
-# a move back to `applied` is a correction — mailing any of those trains people
-# to ignore the ones that matter.
+# Only these statuses are worth an email. `reviewing` and `shortlisted` are the
+# org's private working states, `withdrawn` is the player's own action, and a
+# move back to `applied` is a correction — mailing any of those trains people
+# to ignore the ones that matter. `invited` and `rejected` are no longer
+# settable but keep their copy for rows that already carry them.
 STATUS_EMAIL_COPY = {
     "selected": {
         "badge_label": "Selected",
         "badge_style": "background-color:#00B562;color:#ffffff;",
         "subject": "You're selected — {title} \U0001f389",
     },
-    "shortlisted": {
-        "badge_label": "Shortlisted",
+    "trial_confirmed": {
+        "badge_label": "Confirmed",
         "badge_style": (
             "background-color:#F2FBF6;color:#007a3d;border:1.5px solid #00B562;"
         ),
-        "subject": "You've been shortlisted — {title}",
+        "subject": "You're confirmed for the trial — {title}",
+    },
+    "not_shortlisted": {
+        "badge_label": "Not shortlisted",
+        "badge_style": "background-color:#eef2ee;color:#556655;",
+        "subject": "Update on your application — {title}",
+    },
+    "not_selected": {
+        "badge_label": "Not selected",
+        "badge_style": "background-color:#eef2ee;color:#556655;",
+        "subject": "Update on your application — {title}",
     },
     "invited": {
         "badge_label": "Invited",
@@ -448,9 +473,18 @@ _STATUS_TEXT = {
         "The club may reach out with next steps - keep an eye on your Goatza "
         "messages.",
     ),
-    "shortlisted": (
-        "{org} shortlisted your application for: {title}",
-        "Final decisions are coming - stay ready.",
+    "trial_confirmed": (
+        "{org} confirmed you for: {title}",
+        "Check the date, reporting time and venue on your application.",
+    ),
+    "not_shortlisted": (
+        "{org} reviewed your application for: {title}",
+        "You haven't been called for this trial. Keep an eye out for other "
+        "opportunities.",
+    ),
+    "not_selected": (
+        "{org} reviewed your application for: {title}",
+        "Thanks for coming to the trial. You haven't been selected this time.",
     ),
     "invited": (
         "{org} invited you for: {title}",
@@ -461,6 +495,11 @@ _STATUS_TEXT = {
         "New recruitments open every week - your next trial is out there.",
     ),
 }
+
+# The "not this time" statuses. Their button points at the recruitment list
+# rather than a recruitment that has nothing left to offer the player — the
+# template branches on the same three.
+_STATUS_EXPLORE_MORE = {"rejected", "not_shortlisted", "not_selected"}
 
 _HTML_SEPARATOR = " &middot; "
 _TEXT_SEPARATOR = " - "
@@ -616,7 +655,7 @@ def send_application_received_email(*, application) -> None:
 
 
 def send_application_status_email(*, application, to_status) -> None:
-    """Tell the player their application moved — for the four states worth it.
+    """Tell the player their application moved — for the states worth it.
 
     Any other status returns without sending, which is what makes this safe to
     call unconditionally from the status-change loop.
@@ -637,7 +676,7 @@ def send_application_status_email(*, application, to_status) -> None:
     headline, closing = _STATUS_TEXT[to_status]
     button_url = (
         f"{base_url}/recruitments"
-        if to_status == "rejected"
+        if to_status in _STATUS_EXPLORE_MORE
         else f"{base_url}/recruitments/{recruitment.id}"
     )
 
@@ -660,6 +699,162 @@ def send_application_status_email(*, application, to_status) -> None:
             "badge_style": mark_safe(copy["badge_style"]),
         },
         to_email=recipient,
+    )
+
+
+def announcement_session_line(session):
+    """"Kochi round · Sat 10 Oct" — which DATE an announcement is about.
+
+    Empty when the announcement was not narrowed to one, which is the common
+    case. Imported by nothing else; the drain passes the announcement's own
+    session straight through.
+    """
+    if session is None:
+        return ""
+
+    day = format_date(session.starts_at)
+    title = (session.title or "").strip()
+    return f"{title} · {day}" if title else day
+
+
+def send_announcement_email(*, announcement, application, blocking=True) -> bool:
+    """One announcement, to one applicant. Returns whether it was sent.
+
+    BLOCKING BY DEFAULT, unlike every other sender in this module. Its only
+    caller is ``manage.py dispatch_announcements``, which drains an outbox of
+    hundreds of rows in a command: the usual ``send_email_async`` would be one
+    daemon OS thread per recipient, which is the exact thing the outbox exists
+    to avoid. The return value is what the drain writes onto the delivery row,
+    so a failure is retried on the next pass instead of being lost in a thread
+    nobody is waiting on.
+
+    A recipient with no address returns False without sending. The outbox
+    already writes those as SKIPPED at create time; this is the backstop for
+    an address removed between the write and the drain.
+    """
+    recipient = application.applicant.email
+    if not recipient:
+        return False
+
+    recruitment = announcement.recruitment
+    context = _recruitment_card_context(application)
+    player_name = _player_name(application)
+    base_url = shared_email_context()["frontend_base_url"]
+    session_line = announcement_session_line(announcement.session)
+
+    return _send(
+        subject=f"{context['org_name']}: {announcement.title}",
+        text_body=(
+            f"Hi {player_name},\n\n"
+            f"{context['org_name']} posted an update about "
+            f"{recruitment.title}"
+            f"{f' ({session_line})' if session_line else ''}.\n\n"
+            f"{announcement.title}\n\n"
+            f"{announcement.body}\n\n"
+            f"{base_url}/recruitments/{recruitment.id}"
+        ),
+        html_template=RECRUITMENT_ANNOUNCEMENT_TEMPLATE,
+        context={
+            **context,
+            "player_name": player_name,
+            "announcement_title": announcement.title,
+            # Plain text. The template renders it with |linebreaks, so it is
+            # escaped there — this is the one email body a user wrote.
+            "announcement_body": announcement.body,
+            "session_line": session_line,
+        },
+        to_email=recipient,
+        blocking=blocking,
+    )
+
+
+def format_clock(value):
+    """"9:00 am" from a ``time``. Empty for None."""
+    if value is None:
+        return ""
+    hour = value.hour
+    suffix = "am" if hour < 12 else "pm"
+    display = 12 if hour % 12 == 0 else hour % 12
+    return f"{display}:{value.minute:02d} {suffix}"
+
+
+def send_trial_reminder_email(*, application, session, blocking=True) -> bool:
+    """The evening-before reminder. Returns whether it was sent.
+
+    BLOCKING by default, like the announcement sender and for the same reason:
+    its only caller is ``manage.py send_trial_reminders``, a command draining
+    a batch, where the usual thread-per-email would be one daemon OS thread
+    per confirmed player.
+
+    REPORTING TIME prefers the applicant's age group over the session's start.
+    A U15 group told to report at 8:00 for a 9:00 trial needs the 8:00, and
+    that is the number this email exists to put in front of them.
+    """
+    recipient = application.applicant.email
+    if not recipient:
+        return False
+
+    recruitment = application.recruitment
+    context = _recruitment_card_context(application)
+    player_name = _player_name(application)
+    group = application.age_category
+
+    trial_date = format_date(session.starts_at)
+    reporting_time = format_clock(
+        getattr(group, "reporting_time", None) or session.start_time
+    )
+
+    # The session's own venue when it set one, else the recruitment's — the
+    # same resolution the API does, so the email and the pass agree.
+    venue_name = (
+        (session.venue_name or "").strip()
+        or (recruitment.venue_name or "").strip()
+        or (session.city or "").strip()
+        or (recruitment.city or "").strip()
+    )
+    venue_link = (
+        (session.venue_link or "").strip()
+        or (recruitment.venue_link or "").strip()
+    )
+
+    bring_items = [
+        requirement.title
+        for requirement in recruitment.requirements.all()
+    ]
+
+    fee_line = ""
+    if recruitment.is_paid and not application.fee_paid:
+        fee_line = (
+            f"Entry fee: {recruitment.fee_currency} {recruitment.fee_amount}"
+            f" \u2014 {recruitment.payment_note or 'payable at the venue'}."
+        )
+
+    return _send(
+        subject=f"Tomorrow: {recruitment.title}",
+        text_body=(
+            f"Hi {player_name},\n\n"
+            f"Your trial is tomorrow.\n\n"
+            f"{trial_date}\n"
+            f"{f'Report by {reporting_time}' if reporting_time else ''}\n"
+            f"{venue_name}\n\n"
+            f"{shared_email_context()['frontend_base_url']}"
+            f"/applications/{application.id}/pass"
+        ),
+        html_template=TRIAL_REMINDER_TEMPLATE,
+        context={
+            **context,
+            "player_name": player_name,
+            "application_id": application.id,
+            "trial_date": trial_date,
+            "reporting_time": reporting_time,
+            "venue_name": venue_name,
+            "venue_link": venue_link,
+            "age_group": getattr(group, "title", "") or "",
+            "bring_items": bring_items,
+            "fee_line": fee_line,
+        },
+        to_email=recipient,
+        blocking=blocking,
     )
 
 

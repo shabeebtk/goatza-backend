@@ -15,10 +15,13 @@ from core.decorators.actor_required import org_required
 from apps.recruitments.selectors.recruitment_selectors import RecruitmentSelector
 from apps.recruitments.serializers.recruitment_list_serializers import (
     RecruitmentListSerializer, RecruitmentOwnerDetailSerializer,
-    RecruitmentDetailSerializer, RecruitmentDiscoverItemSerializer
+    RecruitmentViewerDetailSerializer, RecruitmentDiscoverItemSerializer
 )
 from apps.recruitments.services.discover_service import (
     RecruitmentDiscoverService, SECTION_ORDER
+)
+from apps.recruitments.selectors.player_context_selectors import (
+    PlayerContextSelector
 )
 from apps.recruitments.services.recruitment_view_service import (
     RecruitmentViewService
@@ -148,7 +151,16 @@ class UpdateRecruitmentAPIView(BaseAPIView):
                 success=True,
                 message="Recruitment updated successfully",
                 data={
-                    "recruitment_id": str(recruitment.id)
+                    "recruitment_id": str(recruitment.id),
+                    # What changed that applicants would want to hear about.
+                    # The client uses it to offer a pre-filled announcement —
+                    # editing a recruitment notifies nobody by itself, and
+                    # this is the nudge that stops a moved date going untold.
+                    # Empty when nothing schedule-related moved, and empty
+                    # when there is nobody to tell.
+                    "schedule_changed_fields": getattr(
+                        recruitment, "schedule_changed_fields", []
+                    ),
                 }
             )
 
@@ -451,8 +463,15 @@ class DiscoverRecruitmentsAPIView(BaseAPIView):
                 request.query_params.get("max_distance_km")
             )
 
+            # Resolved BEFORE the cache is read, because the profile it
+            # describes is part of the key — an edited profile has to miss.
+            # It costs a cache hit the viewer resolve it used to skip, and
+            # saves the miss path nothing: `discover` takes it back rather
+            # than resolving a second time.
+            context = PlayerContextSelector.resolve(actor)
+
             cache_key = RecruitmentDiscoverService.cache_key(
-                actor, max_distance_km
+                actor, context, max_distance_km
             )
             cached = RecruitmentDiscoverService.get_cached(cache_key)
             if cached is not None:
@@ -465,6 +484,7 @@ class DiscoverRecruitmentsAPIView(BaseAPIView):
             payload = RecruitmentDiscoverService.discover(
                 actor=actor,
                 max_distance_km=max_distance_km,
+                context=context,
             )
 
             data = {"max_distance_km": payload.max_distance_km}
@@ -483,12 +503,6 @@ class DiscoverRecruitmentsAPIView(BaseAPIView):
             data["missing_profile_fields"] = payload.missing_fields
 
             RecruitmentDiscoverService.set_cached(cache_key, data)
-
-            # §8 — logged on cache MISS only; the cache window is the serve
-            # window. See record_impressions.
-            RecruitmentDiscoverService.record_impressions(
-                actor, payload.sections
-            )
 
             logger.info(
                 f"{TAG} | Success | "
@@ -554,11 +568,13 @@ class RecruitmentDetailAPIView(BaseAPIView):
             # below succeeds whatever the cache or the database is doing.
             RecruitmentViewService.record_view(recruitment, actor, request)
 
-            # SERIALIZER
+            # SERIALIZER — the owner gets its numbers; everyone else gets the
+            # public fields plus their own birth year (viewer_birth_year),
+            # which the anonymous /public twin never carries.
             serializer_class = (
                 RecruitmentOwnerDetailSerializer
                 if is_owner
-                else RecruitmentDetailSerializer
+                else RecruitmentViewerDetailSerializer
             )
 
             serializer = serializer_class(

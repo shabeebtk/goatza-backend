@@ -1,4 +1,6 @@
 import re
+from datetime import datetime, time
+
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
@@ -10,6 +12,12 @@ from apps.recruitments.models import (
 )
 from apps.sports.models import SportPosition, Sport
 from shared.models import Location
+from utils.timezones import (
+    TIMEZONE_MAX_LENGTH,
+    default_timezone,
+    validate_timezone,
+    zone,
+)
 
 # E.164-ish phone: optional leading +, then 7–15 digits (separators stripped).
 PHONE_RE = re.compile(r"^\+?\d{7,15}$")
@@ -239,6 +247,117 @@ class RecruitmentLocationInputSerializer(serializers.Serializer):
     longitude = serializers.FloatField(required=False, allow_null=True)
 
 
+# TRIAL SESSION INPUT
+# One date an open trial runs on. `id` is optional and only meaningful on
+# update — the service diff-syncs on it so an edit moves a date in place
+# instead of recreating it (which would drop the date every applicant picked).
+# The venue block is the same place payload the recruitment itself takes;
+# leaving it out means "inherit the recruitment's venue".
+class TrialSessionInputSerializer(serializers.Serializer):
+
+    id = serializers.UUIDField(required=False)
+    title = serializers.CharField(
+        max_length=120, required=False, allow_blank=True
+    )
+    date = serializers.DateField()
+    start_time = serializers.TimeField(required=False, allow_null=True)
+    end_time = serializers.TimeField(required=False, allow_null=True)
+    venue_name = serializers.CharField(
+        max_length=255, required=False, allow_blank=True
+    )
+    venue_link = serializers.URLField(
+        max_length=500, required=False, allow_blank=True
+    )
+    location = RecruitmentLocationInputSerializer(required=False)
+    is_cancelled = serializers.BooleanField(default=False)
+    display_order = serializers.IntegerField(default=0)
+
+    def validate(self, attrs):
+        start_time = attrs.get("start_time")
+        end_time = attrs.get("end_time")
+
+        if start_time and end_time and end_time <= start_time:
+            raise serializers.ValidationError(
+                "The end time must be after the start time."
+            )
+
+        return attrs
+
+
+def session_starts_at(session, tzinfo):
+    """
+    A validated session payload row as an aware datetime, the same way
+    ``TrialSession.starts_at`` reads a stored one: its start time, or 23:59
+    when it carries none. Used here to check the deadline against the first
+    date BEFORE the row exists.
+
+    ``tzinfo`` is the RECRUITMENT'S zone — the same one ``_sync_trial_window``
+    will build ``event_date`` in once the rows are written, so the deadline is
+    checked against the instant that is actually about to be stored. Passed in
+    rather than looked up because on a create the recruitment does not exist
+    yet; ``RecruitmentCreateSerializer._resolve_timezone`` decides it.
+    """
+    return datetime.combine(
+        session["date"],
+        session.get("start_time") or time(23, 59),
+        tzinfo=tzinfo,
+    )
+
+
+def first_session(sessions):
+    """The non-cancelled session a trial starts on, or None."""
+    live = [s for s in sessions if not s.get("is_cancelled")]
+    if not live:
+        return None
+    return min(
+        live,
+        key=lambda s: (
+            s["date"],
+            s.get("start_time") or time(23, 59),
+            s.get("display_order", 0),
+        ),
+    )
+
+
+# Stands for "this session has no venue of its own". Every inheriting row
+# shares it, which is what keeps two of them on one date and time a duplicate.
+INHERITS_RECRUITMENT_VENUE = object()
+
+
+def _session_venue_key(session):
+    """
+    Where a session payload row is held, as a comparable key.
+
+    THE VENUE IS PART OF A TRIAL DATE'S IDENTITY: two centres running the
+    same Saturday morning at different grounds (a North zone and a South
+    zone) are a real format, so date + time alone cannot say what a
+    duplicate is — only date + time + venue can.
+
+    Identity is the session's OWN venue, strongest first: its place block,
+    then the ``venue_name`` typed by hand, then — for a row carrying
+    neither — the sentinel every inheriting row shares. The Location row
+    does not exist yet at validation time, so the nested block stands in
+    for it by ``external_id`` (its provider identity) or, lacking one, by
+    its name. Normalized the same way at both tiers, so a block naming the
+    ground and a ``venue_name`` typing it are the one place, not two.
+    """
+    location = session.get("location") or {}
+
+    external_id = (location.get("external_id") or "").strip()
+    if external_id:
+        return external_id
+
+    location_name = (location.get("name") or "").strip().lower()
+    if location_name:
+        return location_name
+
+    venue_name = (session.get("venue_name") or "").strip().lower()
+    if venue_name:
+        return venue_name
+
+    return INHERITS_RECRUITMENT_VENUE
+
+
 # CREATE RECRUITMENT SERIALIZER
 class RecruitmentCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
@@ -254,6 +373,17 @@ class RecruitmentCreateSerializer(serializers.Serializer):
     recruitment_type = serializers.ChoiceField(
         choices=Recruitment.Type.choices
     )
+    # Only means anything with 2+ dates; validate() forces it back to
+    # `all` below when there are fewer, rather than erroring.
+    session_mode = serializers.ChoiceField(
+        choices=Recruitment.SessionMode.choices,
+        default=Recruitment.SessionMode.ALL
+    )
+    # An open-trial setting. validate() forces it off on every other type
+    # rather than erroring: it is a checkbox the wizard hides, so a stray
+    # true is a stale draft, not something the org asked for and should be
+    # argued with.
+    auto_confirm = serializers.BooleanField(default=False)
     # Draft vs publish on create only. Other transitions (close/cancel/reopen)
     # go through the /status endpoint state machine, so update ignores this.
     status = serializers.ChoiceField(
@@ -272,6 +402,14 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         required=False
     )
     sport_id = serializers.UUIDField()
+    # THE TRIAL'S CALENDAR. Optional on the wire: omitted, it is inherited
+    # from the recruitment being edited, else from the posting org. The
+    # wizard shows it pre-filled and quiet — most orgs never think about it,
+    # and the one posting abroad has to be able to change it.
+    timezone = serializers.CharField(
+        required=False,
+        max_length=TIMEZONE_MAX_LENGTH,
+    )
     experience_level = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -348,6 +486,10 @@ class RecruitmentCreateSerializer(serializers.Serializer):
             required=False
         )
     )
+    sessions = TrialSessionInputSerializer(
+        many=True,
+        required=False
+    )
     contacts = (
         RecruitmentContactInputSerializer(
             many=True,
@@ -389,6 +531,42 @@ class RecruitmentCreateSerializer(serializers.Serializer):
             )
         return value
 
+    def validate_timezone(self, value):
+        """An IANA name this machine knows, or a 400 naming the problem."""
+        try:
+            return validate_timezone(value.strip())
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages[0])
+
+    def _resolve_timezone(self, attrs):
+        """
+        The zone this recruitment will be stored with.
+
+        The payload wins; then the recruitment being edited (an edit that
+        says nothing about the timezone must not move the trial); then the
+        posting organization, which is where a new recruitment inherits from;
+        then the settings default, which is only reachable for an actor-less
+        call such as a test building the serializer directly.
+
+        Resolved ONCE, here, and written into ``attrs`` — so the deadline
+        check below, the stored column and ``_sync_trial_window`` all read
+        the same answer. Nothing downstream re-derives it.
+        """
+        if attrs.get("timezone"):
+            return attrs["timezone"]
+
+        instance = self.context.get("recruitment")
+        if instance is not None and instance.timezone:
+            return instance.timezone
+
+        request = self.context.get("request")
+        actor = getattr(request, "actor", None)
+        organization = getattr(actor, "organization", None)
+        if organization is not None and organization.timezone:
+            return organization.timezone
+
+        return default_timezone()
+
     def validate(self, attrs):
         sport_id = attrs.get("sport_id")
         is_paid = attrs.get("is_paid")
@@ -396,6 +574,68 @@ class RecruitmentCreateSerializer(serializers.Serializer):
         event_date = attrs.get("event_date")
         application_deadline = attrs.get("application_deadline")
         positions = attrs.get("positions", [])
+        recruitment_type = attrs.get("recruitment_type")
+
+        # THE TRIAL'S CALENDAR, resolved before anything reads a date.
+        # Written back into attrs so the column is always explicitly set —
+        # create_recruitment passes **validated_data straight through and
+        # update_recruitment setattrs it, so an inherited zone is stored
+        # just like one the org picked.
+        attrs["timezone"] = self._resolve_timezone(attrs)
+        trial_zone = zone(attrs["timezone"])
+
+        # TRIAL DATES
+        sessions = attrs.get("sessions", [])
+        live_sessions = [
+            session for session in sessions
+            if not session.get("is_cancelled")
+        ]
+
+        if recruitment_type == Recruitment.Type.OPEN_TRIAL:
+            if not sessions:
+                raise serializers.ValidationError(
+                    "Add at least one trial date."
+                )
+            if not live_sessions:
+                raise serializers.ValidationError(
+                    "Every trial date is cancelled. Add a date, or "
+                    "close the trial instead."
+                )
+        elif sessions:
+            # player_looking (and the retired legacy types) have no trial
+            # day at all, so a date sent for one is a client bug, not
+            # something to silently drop.
+            raise serializers.ValidationError(
+                "Only an open trial can have trial dates."
+            )
+
+        # No two live dates may sit at the same date, time AND venue — that
+        # is a duplicated row, not a second round. Two grounds sharing one
+        # Saturday morning are two centres, which is allowed.
+        slots = [
+            (
+                session["date"],
+                session.get("start_time"),
+                _session_venue_key(session),
+            )
+            for session in live_sessions
+        ]
+        if len(slots) != len(set(slots)):
+            raise serializers.ValidationError(
+                "Two trial dates are the same date, time and venue. "
+                "Remove the duplicate."
+            )
+
+        # session_mode is a question only a multi-date trial can answer.
+        # With one date there is nothing to choose between, so force `all`
+        # rather than reject a stale value the wizard left behind.
+        if len(live_sessions) < 2:
+            attrs["session_mode"] = Recruitment.SessionMode.ALL
+
+        # AN OPEN-TRIAL-ONLY SETTING. Silently forced off elsewhere — see
+        # the field declaration.
+        if recruitment_type != Recruitment.Type.OPEN_TRIAL:
+            attrs["auto_confirm"] = False
 
         # AGE CATEGORY VALIDATION
         age_categories = attrs.get("age_categories", [])
@@ -436,6 +676,13 @@ class RecruitmentCreateSerializer(serializers.Serializer):
             # non-external methods must not carry a stray apply URL
             attrs["external_apply_url"] = ""
 
+        if apply_method != Recruitment.ApplyMethod.GOATZA:
+            # Only the in-app apply form ever ASKS custom questions, so a
+            # posting that sends players elsewhere cannot collect answers to
+            # them; dropped rather than rejected, because a stale client is one
+            # that has not caught up and a 400 would block a valid edit.
+            attrs.pop("questions", None)
+
         # DATE VALIDATION
         now = timezone.now()
 
@@ -456,8 +703,26 @@ class RecruitmentCreateSerializer(serializers.Serializer):
                 "Application deadline cannot be in the past"
             )
 
-        # deadline <= event_date always (also a DB CheckConstraint)
-        if (
+        # deadline <= event_date always (also the valid_application_deadline
+        # DB CheckConstraint). event_date is DERIVED from the first
+        # non-cancelled session, so when dates are sent it is that session
+        # the deadline is measured against — an edit that moves day one
+        # earlier can otherwise put an already-stored deadline in breach
+        # and blow up on the constraint with nothing readable to show.
+        # The deadline is never silently clamped: the org set it on purpose.
+        opening_session = first_session(sessions)
+        if application_deadline and opening_session:
+            starts_at = session_starts_at(opening_session, trial_zone)
+            if application_deadline > starts_at:
+                # The date as the ORG reads it — at its own venue, not on
+                # the server's clock.
+                local = starts_at.astimezone(trial_zone)
+                raise serializers.ValidationError(
+                    "The application deadline is after the first trial "
+                    "date. Move the deadline to on or before "
+                    f"{local.strftime('%d %b %Y')}."
+                )
+        elif (
             application_deadline
             and event_date
             and application_deadline > event_date

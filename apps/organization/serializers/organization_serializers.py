@@ -183,6 +183,11 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
             "type",
             "is_verified",
 
+            # The org's calendar. The settings screen renders the picker from
+            # it and the recruitment wizard pre-fills a new posting with it —
+            # a plain column on the row already fetched, so no extra query.
+            "timezone",
+
             "logo",
             "cover_image",
             "headline",

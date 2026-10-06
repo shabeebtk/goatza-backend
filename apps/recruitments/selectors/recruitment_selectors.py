@@ -1,4 +1,5 @@
-from django.db.models import Q
+from django.db.models import Case, DateTimeField, F, IntegerField, Q, Value, When
+from django.db.models.functions import Coalesce
 from datetime import timedelta
 from django.utils import timezone
 from apps.recruitments.models import Recruitment
@@ -22,6 +23,10 @@ LIST_PREFETCH_RELATED = (
     "media",
     "age_categories",
     "benefits",
+    # The location comes along with the dates: trial_session_payload reads
+    # it for the editor's own_location key, so without it that key costs a
+    # query per date on every card.
+    "sessions__location",
 )
 
 
@@ -49,7 +54,9 @@ class RecruitmentSelector:
         now=None,
     ):
         """
-        The "All" tab and every org-scoped listing, ordered newest-first.
+        The "All" tab and every org-scoped listing, in TRIAL order — see
+        ``order_for_list``. Not "newest posted": that read as unordered, because
+        when a trial was typed up says nothing about when it happens.
 
         ``center``/``max_distance_km`` and ``position_id`` are the §4 discovery
         filters; they are plain queryset filters, so the org-admin and
@@ -86,12 +93,117 @@ class RecruitmentSelector:
             *LIST_PREFETCH_RELATED
         )
 
-        queryset = queryset.order_by(
-            "-published_at",
-            "-created_at"
+        queryset = RecruitmentSelector.order_for_list(
+            queryset, now=now
         )[offset: offset + limit]
 
         return queryset, total_count
+
+    # ------------------------------------------------------------ #
+    # ORDERING — the plain list only
+    # ------------------------------------------------------------ #
+
+    # Buckets, in the order a reader wants them. Named so the ordering can be
+    # asserted and explained without decoding integers.
+    BUCKET_DRAFT = 0
+    BUCKET_ACCEPTING = 1
+    BUCKET_UPCOMING_CLOSED = 2
+    BUCKET_FINISHED = 3
+
+    @staticmethod
+    def order_for_list(queryset, now=None):
+        """
+        Order a listing by WHAT IT IS and WHEN IT HAPPENS, not by when it was
+        posted.
+
+        ``-published_at`` ranked a June posting for October above last week's
+        posting for this Saturday, and let a finished trial sit above a live
+        one. For the reader that is not an order at all.
+
+        Four buckets, then a date inside each:
+
+          0  drafts (only the owner is ever shown one)
+          1  accepting  — active, trial window open, deadline not passed
+          2  upcoming   — active, trial still ahead, no longer accepting
+          3  finished   — trial over, closed, or cancelled
+
+        Buckets 1 and 2 read SOONEST first: the next trial to happen belongs at
+        the top, and a "Looking for players" posting with only a deadline falls
+        in by that deadline. Buckets 0 and 3 read MOST RECENT first — a draft by
+        when it was last touched, a finished trial by when it finished.
+
+        THE TRAP, and the reason for two sort columns: two buckets sort ASC and
+        two DESC, so one key cannot serve both. Each column is NULL outside the
+        buckets it serves and both carry ``nulls_last``, so a row is only ever
+        positioned by its own bucket's key and the other column is a constant
+        tie it never reaches. Collapsing these into one would hand the finished
+        trials back oldest-first — this bug, inverted.
+
+        Done in SQL, never in Python: the list is offset-paginated, and a Python
+        sort would only ever reorder the page it was handed.
+        """
+        active_q = Q(status=Recruitment.Status.ACTIVE)
+        # Reused, not restated — the ONE definition of "the trial window has
+        # not closed" (trial_window.py), the same one the non-owner branch
+        # filters on above.
+        upcoming_q = active_q & trial_not_over_q(now)
+        deadline_open_q = (
+            Q(application_deadline__isnull=True)
+            | Q(application_deadline__gte=(now or timezone.now()))
+        )
+
+        bucket = Case(
+            When(
+                status=Recruitment.Status.DRAFT,
+                then=Value(RecruitmentSelector.BUCKET_DRAFT),
+            ),
+            When(
+                upcoming_q & deadline_open_q,
+                then=Value(RecruitmentSelector.BUCKET_ACCEPTING),
+            ),
+            When(
+                upcoming_q,
+                then=Value(RecruitmentSelector.BUCKET_UPCOMING_CLOSED),
+            ),
+            # Everything left: closed, cancelled, or an active row whose trial
+            # day has passed.
+            default=Value(RecruitmentSelector.BUCKET_FINISHED),
+            output_field=IntegerField(),
+        )
+
+        # Buckets 1 + 2 only. `event_date` is the first session; a posting with
+        # no trial day at all falls in by its deadline instead.
+        sort_upcoming = Case(
+            When(
+                upcoming_q,
+                then=Coalesce("event_date", "application_deadline"),
+            ),
+            default=Value(None, output_field=DateTimeField()),
+            output_field=DateTimeField(),
+        )
+
+        # Buckets 0 + 3 only. A draft has no meaningful date of its own, so it
+        # sorts by the edit that left it in this state.
+        sort_recent = Case(
+            When(status=Recruitment.Status.DRAFT, then=F("updated_at")),
+            When(upcoming_q, then=Value(None, output_field=DateTimeField())),
+            default=Coalesce(
+                "trial_end_date", "event_date", "published_at"
+            ),
+            output_field=DateTimeField(),
+        )
+
+        return queryset.annotate(
+            list_bucket=bucket,
+            sort_upcoming=sort_upcoming,
+            sort_recent=sort_recent,
+        ).order_by(
+            "list_bucket",
+            F("sort_upcoming").asc(nulls_last=True),
+            F("sort_recent").desc(nulls_last=True),
+            "-published_at",
+            "-created_at",
+        )
 
     @staticmethod
     def build_list_queryset(
@@ -207,8 +319,8 @@ class RecruitmentSelector:
                 visibility_filter
             )
 
-            # TRIAL OVER — a trial whose day has ended (in
-            # RECRUITMENT_TIMEZONE) is gone from every player-facing list:
+            # TRIAL OVER — a trial whose last day has ended AT ITS OWN
+            # VENUE is gone from every player-facing list:
             # the All tab, the ranked list, search, and another org's profile
             # tab. Sits inside the non-owner branch on purpose: the owning
             # org's own list keeps ended trials, the same way it keeps drafts
@@ -388,8 +500,8 @@ class RecruitmentSelector:
 
         The payload this feeds is cached per actor for CACHE_TTL_SECONDS (ten
         minutes), so a trial can linger in a cached page for up to that long
-        after midnight in RECRUITMENT_TIMEZONE. Accepted: it is the same
-        tolerance the cache already grants a deadline that passes mid-window.
+        after midnight at its venue. Accepted: it is the same tolerance the
+        cache already grants a deadline that passes mid-window.
         """
         now = now or timezone.now()
 
@@ -441,7 +553,9 @@ class RecruitmentSelector:
             Recruitment.objects
             .filter(id=recruitment_id, is_deleted=False)
             .select_related("organization")
-            .prefetch_related("questions__options", "age_categories")
+            .prefetch_related(
+                "questions__options", "age_categories", "sessions__location"
+            )
             .first()
         )
 
@@ -468,6 +582,7 @@ class RecruitmentSelector:
             "questions__options",
             "applications",
             "age_categories",
+            "sessions__location",
             "contacts",
             "benefits",
             "requirements",

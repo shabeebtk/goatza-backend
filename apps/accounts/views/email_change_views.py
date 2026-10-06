@@ -14,6 +14,8 @@ header to resolve and no ``request.actor`` to want.
 import logging
 
 from rest_framework.exceptions import ValidationError
+
+from utils.otp_validation import OTP_UNAVAILABLE_MESSAGE, OTPStorageError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
@@ -87,6 +89,15 @@ class EmailChangeInitiateAPIView(APIView):
             )
         except ValidationError as e:
             return _validation_response(TAG, e)
+        except OTPStorageError:
+            # The code never landed, so no mail went out and no pending binding
+            # is worth anything. 503 and try again — already logged at ERROR
+            # by generate_otp.
+            return response_data(
+                success=False,
+                message=OTP_UNAVAILABLE_MESSAGE,
+                status_code=503,
+            )
 
         return response_data(success=True, data=data)
 

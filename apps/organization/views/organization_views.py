@@ -439,6 +439,14 @@ class UpdateOrganizationAPIView(BaseAPIView):
                 org.type = data["type"]
                 org_fields.append("type")
 
+            # The org's calendar. A plain column write — it is the SEED for
+            # new recruitments, so changing it deliberately does not touch
+            # the postings already out there (each carries its own copy, and
+            # moving one silently would move its applicants' trial day).
+            if "timezone" in data:
+                org.timezone = data["timezone"]
+                org_fields.append("timezone")
+
             # PROFILE FIELDS
             profile_mapping = ["headline", "description", "website", "level"]
 
