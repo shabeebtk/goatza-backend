@@ -897,11 +897,11 @@ class TrialPassAPIView(BaseAPIView):
                 .select_related(
                     "applicant__profile",
                     "age_category",
-                    "session",
+                    "session__location",
                     "recruitment__organization__profile",
                 )
                 .prefetch_related(
-                    "recruitment__sessions",
+                    "recruitment__sessions__location",
                     "recruitment__requirements",
                 )
                 .filter(id=application_id, applicant=actor.user)

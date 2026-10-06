@@ -184,7 +184,8 @@ class ApplicationSelector:
             "age_category",
             # The chosen date + its parent: a session inherits the
             # recruitment's venue when it sets none, so the payload needs both.
-            "session",
+            # Its own Location rides along — the payload reads it per row.
+            "session__location",
             "recruitment",
             "fee_marked_by__user__profile",
         ).order_by(
@@ -243,7 +244,7 @@ class ApplicationSelector:
             "recruitment__organization__profile",
             "recruitment__sport",
             "age_category",
-            "session",
+            "session__location",
         ).order_by("-applied_at")[offset: offset + limit]
 
         return page, total_count
@@ -301,7 +302,7 @@ class ApplicationSelector:
                 "recruitment",
                 "recruitment__organization",
                 "age_category",
-                "session",
+                "session__location",
                 "fee_marked_by__user__profile",
                 )
             .prefetch_related(

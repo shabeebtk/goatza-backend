@@ -68,7 +68,7 @@ class AnnouncementSelector:
         total_count = queryset.count()
 
         page = queryset.select_related(
-            "session",
+            "session__location",
             "created_by_member__user__profile",
         ).order_by("-created_at")[offset: offset + limit]
 

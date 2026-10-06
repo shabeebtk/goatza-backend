@@ -23,7 +23,10 @@ LIST_PREFETCH_RELATED = (
     "media",
     "age_categories",
     "benefits",
-    "sessions",
+    # The location comes along with the dates: trial_session_payload reads
+    # it for the editor's own_location key, so without it that key costs a
+    # query per date on every card.
+    "sessions__location",
 )
 
 
@@ -551,7 +554,7 @@ class RecruitmentSelector:
             .filter(id=recruitment_id, is_deleted=False)
             .select_related("organization")
             .prefetch_related(
-                "questions__options", "age_categories", "sessions"
+                "questions__options", "age_categories", "sessions__location"
             )
             .first()
         )
@@ -579,7 +582,7 @@ class RecruitmentSelector:
             "questions__options",
             "applications",
             "age_categories",
-            "sessions",
+            "sessions__location",
             "contacts",
             "benefits",
             "requirements",

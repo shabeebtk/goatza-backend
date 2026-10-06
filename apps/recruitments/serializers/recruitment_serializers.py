@@ -319,6 +319,45 @@ def first_session(sessions):
     )
 
 
+# Stands for "this session has no venue of its own". Every inheriting row
+# shares it, which is what keeps two of them on one date and time a duplicate.
+INHERITS_RECRUITMENT_VENUE = object()
+
+
+def _session_venue_key(session):
+    """
+    Where a session payload row is held, as a comparable key.
+
+    THE VENUE IS PART OF A TRIAL DATE'S IDENTITY: two centres running the
+    same Saturday morning at different grounds (a North zone and a South
+    zone) are a real format, so date + time alone cannot say what a
+    duplicate is — only date + time + venue can.
+
+    Identity is the session's OWN venue, strongest first: its place block,
+    then the ``venue_name`` typed by hand, then — for a row carrying
+    neither — the sentinel every inheriting row shares. The Location row
+    does not exist yet at validation time, so the nested block stands in
+    for it by ``external_id`` (its provider identity) or, lacking one, by
+    its name. Normalized the same way at both tiers, so a block naming the
+    ground and a ``venue_name`` typing it are the one place, not two.
+    """
+    location = session.get("location") or {}
+
+    external_id = (location.get("external_id") or "").strip()
+    if external_id:
+        return external_id
+
+    location_name = (location.get("name") or "").strip().lower()
+    if location_name:
+        return location_name
+
+    venue_name = (session.get("venue_name") or "").strip().lower()
+    if venue_name:
+        return venue_name
+
+    return INHERITS_RECRUITMENT_VENUE
+
+
 # CREATE RECRUITMENT SERIALIZER
 class RecruitmentCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
@@ -570,15 +609,21 @@ class RecruitmentCreateSerializer(serializers.Serializer):
                 "Only an open trial can have trial dates."
             )
 
-        # No two live dates may sit at the same date AND time — that is a
-        # duplicated row, not a second round.
+        # No two live dates may sit at the same date, time AND venue — that
+        # is a duplicated row, not a second round. Two grounds sharing one
+        # Saturday morning are two centres, which is allowed.
         slots = [
-            (session["date"], session.get("start_time"))
+            (
+                session["date"],
+                session.get("start_time"),
+                _session_venue_key(session),
+            )
             for session in live_sessions
         ]
         if len(slots) != len(set(slots)):
             raise serializers.ValidationError(
-                "Two trial dates are the same. Remove the duplicate."
+                "Two trial dates are the same date, time and venue. "
+                "Remove the duplicate."
             )
 
         # session_mode is a question only a multi-date trial can answer.

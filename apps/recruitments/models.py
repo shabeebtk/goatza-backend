@@ -489,6 +489,8 @@ class TrialSession(BaseUUIDModel):
         ordering = ["date", "start_time", "display_order"]
         indexes = [
             models.Index(fields=["recruitment"]),
+            # What a nearest-centre distance scan reads.
+            models.Index(fields=["latitude", "longitude"]),
         ]
 
     def _local(self, at):

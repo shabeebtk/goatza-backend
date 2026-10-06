@@ -130,6 +130,31 @@ def trial_session_payload(session, recruitment):
             if session.longitude is not None
             else recruitment.longitude
         ),
+        # THE UNRESOLVED TRUTH, for the editor to round-trip. The resolved
+        # keys above cannot tell "this centre has a venue of its own" from
+        # "it inherited the trial's", so a wizard reading them back would
+        # save the inherited value onto the row as an override. These say
+        # what the row itself stores — blank, or null, where it stores
+        # nothing. Display reads the resolved keys; only the editor reads
+        # these.
+        "own_venue_name": session.venue_name,
+        "own_venue_link": session.venue_link,
+        "own_location": (
+            {
+                "id": str(session.location_id),
+                "name": session.location.name,
+                "city": session.location.city,
+                "state": session.location.state,
+                "country": session.location.country,
+                "country_code": session.location.country_code,
+                "latitude": session.location.latitude,
+                "longitude": session.location.longitude,
+                "external_id": session.location.external_id,
+                "provider": session.location.provider,
+                "place_type": session.location.type,
+            }
+            if session.location_id else None
+        ),
     }
 
 
