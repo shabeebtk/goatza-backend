@@ -64,7 +64,12 @@ MAX_DISTANCE_KM_CEILING = 500
 # freshness signals tolerate it". django.core.cache is Redis in production and
 # LocMem in dev, so nothing here imports redis.
 CACHE_TTL_SECONDS = 600
-CACHE_VERSION = "v1"
+# Rides in the cache key, so bumping it retires every stored payload at once
+# rather than waiting out the TTL. v2: `distance_km` became the nearest live
+# TRIAL CENTRE rather than the recruitment's single pin, so a v1 entry would
+# keep serving the old number — and the old "Near you" membership — for up to
+# ten minutes after deploy.
+CACHE_VERSION = "v2"
 
 # The corpus is supposed to stay in the low thousands (§1). If it ever doesn't,
 # scoring everything per request stops being free — so bound the work and SAY
@@ -376,9 +381,11 @@ class RecruitmentDiscoverService:
 
         if context.center and not filters.get("max_distance_km"):
             # build_list_queryset only annotates distance when it is also
-            # filtering by it; the score wants it either way.
+            # filtering by it; the score wants it either way. ``now`` decides
+            # which centres still count, so it is the request's clock here
+            # too rather than a second reading taken inside the selector.
             queryset = RecruitmentSelector.annotate_distance(
-                queryset, context.center
+                queryset, context.center, now=now
             )
 
         candidates = list(

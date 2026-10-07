@@ -399,9 +399,19 @@ class ListRecruitmentsAPIView(BaseAPIView):
                     many=True
                 )
             else:
+                # WHERE THE VIEWER IS, so the card can say how far away the
+                # nearest centre is. One rule, one helper — the same one
+                # PlayerContextSelector.resolve and the detail endpoint read.
+                #
+                # NOT in `filters`: the ranked branch above passes that dict
+                # to ranked_list, which resolves its own context and supplies
+                # `center` itself. A `center` key in there would arrive twice.
+                center = PlayerContextSelector.viewer_center(actor)
+
                 queryset, total_count = (
                     RecruitmentSelector.list_recruitments(
                         actor=actor,
+                        center=center,
                         limit=limit,
                         offset=offset,
                         **filters
@@ -577,10 +587,18 @@ class RecruitmentDetailAPIView(BaseAPIView):
                 else RecruitmentViewerDetailSerializer
             )
 
+            # WHERE THE VIEWER IS, so every trial centre in this payload
+            # carries its distance and the apply picker can put the one they
+            # can reach first. The SAME helper the list endpoint uses — see
+            # PlayerContextSelector.viewer_center — never a second rule.
+            #
+            # None for an anonymous reader, and then no centre carries a
+            # distance at all and the picker falls back to date order.
             serializer = serializer_class(
                 recruitment,
                 context={
-                    "request": request
+                    "request": request,
+                    "center": PlayerContextSelector.viewer_center(actor),
                 }
             )
 

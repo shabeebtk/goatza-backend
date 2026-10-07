@@ -5033,6 +5033,727 @@ class TrialSessionWindowTests(APITestCase):
 
 
 # =====================================================================
+# MULTI-CENTRE TRIALS - nearest centre wins
+# =====================================================================
+#
+# A trial can run in four cities and is geocoded in ONE of them. Everything
+# below is about the gap that leaves: distance, the "within N km" filter, the
+# city filter and the payloads all used to answer for the org's single pin,
+# so a player 4 km from the ground the trial actually visits was told it was
+# 237 km away and never saw it.
+
+from shared.models import Location
+from services.location.location_service import LocationService
+
+# Two real Kerala cities, ~237 km apart on a great circle (the ~280 km
+# everyone quotes is the road). Far enough apart that a 50 km radius around
+# one excludes the other outright, so nothing here sits near a boundary.
+KOCHI = (9.9312, 76.2673)
+KANNUR = (11.8745, 75.3704)
+KOCHI_KANNUR_KM = 237.2
+
+
+class NearestCentreDistanceTests(APITestCase):
+    """
+    ``distance_km`` is the distance to the NEAREST LIVE CENTRE, and
+    ``nearest_session_id`` says which one that was.
+
+    Both come off ``RecruitmentSelector.annotate_distance`` and both are
+    derived from one subquery, so they can never name different rows. The
+    pair is what lets a card say "Kannur · 6 km" instead of "Kochi · 6 km" —
+    the right number against the wrong place.
+    """
+
+    LIST_URL = "/recruitments/list"
+
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            email="centre_owner@example.com", password="pass1234",
+            username="centre_owner",
+        )
+        accept_current_terms(self.owner)
+        self.org = Organization.objects.create(
+            name="Tour FC", username="tourfc", type=Organization.Type.CLUB,
+        )
+        UsernameService.claim(self.org.username, organization=self.org)
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+
+        self.player = User.objects.create_user(
+            email="centre_player@example.com", password="pass1234",
+            username="centre_player",
+        )
+        accept_current_terms(self.player)
+        self.profile = UserProfile.objects.create(
+            user=self.player, name="Player",
+        )
+
+    # -- factories ------------------------------------------------
+
+    def _trial(self, point=KOCHI, **overrides):
+        lat, lng = point if point else (None, None)
+        data = dict(
+            organization=self.org, sport=self.sport,
+            title="City tour trials", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            city="Kochi",
+            latitude=lat, longitude=lng,
+            published_at=timezone.now(),
+        )
+        data.update(overrides)
+        return Recruitment.objects.create(**data)
+
+    def _centre(self, trial, point, day_offset=30, **overrides):
+        """One live centre, its date far enough out to stay live."""
+        lat, lng = point if point else (None, None)
+        data = dict(
+            recruitment=trial,
+            date=timezone.now().date() + timedelta(days=day_offset),
+            latitude=lat, longitude=lng,
+        )
+        data.update(overrides)
+        return TrialSession.objects.create(**data)
+
+    def _annotated(self, center, trial):
+        """One row, with the distance annotations the card reads."""
+        return (
+            RecruitmentSelector.annotate_distance(
+                Recruitment.objects.filter(pk=trial.pk), center
+            )
+            .first()
+        )
+
+    def _list(self, **params):
+        self.client.force_authenticate(user=self.player)
+        return self.client.get(self.LIST_URL, params)
+
+    def _ids(self, resp):
+        return [str(r["id"]) for r in resp.data["data"]["results"]]
+
+    def _locate_player(self, point):
+        self.profile.latitude, self.profile.longitude = point
+        self.profile.save(update_fields=["latitude", "longitude"])
+
+    # -- 1. the nearest centre wins -------------------------------
+
+    def test_kannur_viewer_measures_the_kannur_centre(self):
+        """
+        The trial's own pin is Kochi; one of its centres is in Kannur. A
+        Kannur viewer is standing next to that centre, so the distance is
+        metres and not the 237 km to the pin.
+        """
+        trial = self._trial(point=KOCHI)
+        kochi = self._centre(trial, KOCHI, day_offset=30)
+        kannur = self._centre(trial, KANNUR, day_offset=40)
+
+        row = self._annotated(KANNUR, trial)
+
+        self.assertAlmostEqual(row.distance_km, 0.0, delta=1.0)
+        self.assertEqual(str(row.nearest_session_id), str(kannur.id))
+        # ...and emphatically NOT the pin, which is what it used to read.
+        self.assertNotAlmostEqual(
+            row.distance_km, KOCHI_KANNUR_KM, delta=10.0
+        )
+        self.assertNotEqual(str(row.nearest_session_id), str(kochi.id))
+
+    def test_the_same_trial_answers_a_kochi_viewer_with_the_kochi_centre(self):
+        """One posting, two readers, two different nearest centres."""
+        trial = self._trial(point=KOCHI)
+        kochi = self._centre(trial, KOCHI, day_offset=30)
+        self._centre(trial, KANNUR, day_offset=40)
+
+        row = self._annotated(KOCHI, trial)
+
+        self.assertAlmostEqual(row.distance_km, 0.0, delta=1.0)
+        self.assertEqual(str(row.nearest_session_id), str(kochi.id))
+
+    def test_the_nearest_centre_wins_whatever_order_the_rows_are_in(self):
+        """
+        The subquery orders by distance, not by date or insertion order, so
+        the Kannur centre wins for a Kannur viewer even though it is the
+        FIRST date here rather than the last.
+        """
+        trial = self._trial(point=KOCHI)
+        kannur = self._centre(trial, KANNUR, day_offset=20)
+        self._centre(trial, KOCHI, day_offset=50)
+
+        row = self._annotated(KANNUR, trial)
+
+        self.assertEqual(str(row.nearest_session_id), str(kannur.id))
+
+    # -- 2. a passed centre stops counting ------------------------
+
+    def test_a_passed_centre_stops_making_the_trial_near_its_city(self):
+        """
+        The Kannur date has been and gone. Its coordinates stay on the row —
+        the applicants who picked it still need them — but it stops being a
+        reason to surface the posting, so a Kannur viewer now measures the
+        live Kochi centre instead.
+        """
+        trial = self._trial(point=KOCHI)
+        kochi = self._centre(trial, KOCHI, day_offset=30)
+        passed = self._centre(trial, KANNUR, day_offset=-30)
+
+        row = self._annotated(KANNUR, trial)
+
+        self.assertAlmostEqual(row.distance_km, KOCHI_KANNUR_KM, delta=2.0)
+        self.assertEqual(str(row.nearest_session_id), str(kochi.id))
+        self.assertNotEqual(str(row.nearest_session_id), str(passed.id))
+
+    def test_a_cancelled_centre_stops_counting_too(self):
+        trial = self._trial(point=KOCHI)
+        kochi = self._centre(trial, KOCHI, day_offset=30)
+        cancelled = self._centre(
+            trial, KANNUR, day_offset=40, is_cancelled=True
+        )
+
+        row = self._annotated(KANNUR, trial)
+
+        self.assertAlmostEqual(row.distance_km, KOCHI_KANNUR_KM, delta=2.0)
+        self.assertNotEqual(str(row.nearest_session_id), str(cancelled.id))
+
+    # -- 3. an unknown distance stays NULL ------------------------
+
+    def test_no_coordinates_anywhere_annotates_null_not_zero(self):
+        """
+        The trap this guards: a Coalesce with a 0 third arm would read as
+        "right here" and sort every unlocatable trial to the top of a
+        nearest-first list. Scoring wants None so it can award its neutral.
+        """
+        trial = self._trial(point=None)
+        self._centre(trial, None, day_offset=30)
+
+        row = self._annotated(KANNUR, trial)
+
+        self.assertIsNone(row.distance_km)
+        self.assertNotEqual(row.distance_km, 0)
+        self.assertIsNone(row.nearest_session_id)
+
+    def test_no_live_centre_with_coordinates_falls_through_to_the_pin(self):
+        """
+        "A distance but no centre" is a real state and it means the number is
+        measured to the trial's OWN venue — which is what the card then has
+        to name.
+        """
+        trial = self._trial(point=KOCHI)
+        self._centre(trial, None, day_offset=30)
+
+        row = self._annotated(KANNUR, trial)
+
+        self.assertAlmostEqual(row.distance_km, KOCHI_KANNUR_KM, delta=2.0)
+        self.assertIsNone(row.nearest_session_id)
+
+    # -- 4. within N km finds a far-pinned trial ------------------
+
+    def test_within_50_km_finds_a_trial_pinned_237_km_away(self):
+        """
+        The whole point of the stage. The posting's own point is in Kochi, so
+        the old bounding box threw it away before the circle ever saw it; one
+        of its centres is next door to the viewer.
+        """
+        trial = self._trial(point=KOCHI)
+        self._centre(trial, KANNUR, day_offset=30)
+        self._locate_player(KANNUR)
+
+        ids = self._ids(self._list(max_distance_km=50))
+
+        self.assertIn(str(trial.id), ids)
+
+    def test_a_trial_with_two_in_range_centres_is_returned_once(self):
+        """
+        The OR'd box is a join, so two matching centres match it twice. Only
+        ``.distinct()`` keeps the card off the page twice.
+        """
+        trial = self._trial(point=KOCHI)
+        # Two centres, both within a few km of the viewer.
+        self._centre(trial, KANNUR, day_offset=30)
+        self._centre(
+            trial, (KANNUR[0] + 0.02, KANNUR[1] + 0.02), day_offset=40,
+        )
+        self._locate_player(KANNUR)
+
+        resp = self._list(max_distance_km=50)
+        ids = self._ids(resp)
+
+        self.assertEqual(ids.count(str(trial.id)), 1)
+        self.assertEqual(resp.data["data"]["count"], 1)
+
+    def test_within_50_km_still_excludes_a_trial_with_no_centre_nearby(self):
+        trial = self._trial(point=KOCHI)
+        self._centre(trial, KOCHI, day_offset=30)
+        self._locate_player(KANNUR)
+
+        self.assertNotIn(str(trial.id), self._ids(self._list(max_distance_km=50)))
+
+    # -- 5. the city filter matches any centre --------------------
+
+    def test_city_matches_a_centre_not_only_the_pin(self):
+        """``?city=Kannur`` on a trial whose own city is Kochi."""
+        trial = self._trial(point=KOCHI, city="Kochi")
+        self._centre(trial, KANNUR, day_offset=30, city="Kannur")
+
+        self.assertIn(str(trial.id), self._ids(self._list(city="Kannur")))
+
+    def test_city_does_not_match_a_passed_centre(self):
+        """Same live-centre rule as the distance annotation."""
+        trial = self._trial(point=KOCHI, city="Kochi")
+        self._centre(trial, KANNUR, day_offset=-30, city="Kannur")
+
+        self.assertNotIn(str(trial.id), self._ids(self._list(city="Kannur")))
+
+    def test_city_still_matches_the_recruitments_own_city(self):
+        trial = self._trial(point=KOCHI, city="Kochi")
+        self._centre(trial, KOCHI, day_offset=30, city="Kochi")
+
+        self.assertIn(str(trial.id), self._ids(self._list(city="Kochi")))
+
+    def test_two_matching_centres_do_not_duplicate_a_city_hit(self):
+        trial = self._trial(point=KOCHI, city="Kochi")
+        self._centre(trial, KANNUR, day_offset=30, city="Kannur")
+        self._centre(trial, KANNUR, day_offset=40, city="Kannur")
+
+        ids = self._ids(self._list(city="Kannur"))
+
+        self.assertEqual(ids.count(str(trial.id)), 1)
+
+
+class TwoVenuesOneSlotTests(APITestCase):
+    """
+    TWO CENTRES MAY SHARE A DATE AND A TIME. A North zone and a South zone
+    on the same Saturday morning are two centres, not a duplicated row, and
+    the old rule — keyed on date + time alone — refused to publish them.
+
+    What is still a duplicate: two rows at the same date and time that both
+    INHERIT the trial's venue. There is one place and one slot, so one of
+    them is a mistake.
+
+    A GAP WORTH KNOWING, pinned by
+    ``test_the_mode_sent_is_the_mode_stored_above_two_dates`` below: nothing
+    server-side requires ``choose_one`` for two centres at the SAME instant,
+    and ``session_mode`` defaults to ``all``. So a direct API caller can
+    store a trial that says "attend every date" for two grounds a player
+    cannot both be at. The wizard cannot produce one — the multi_place shape
+    forces choose_one — so this is an API-only hole, not a UI bug.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            email="slot_owner@example.com", password="pass1234",
+            username="slot_owner",
+        )
+        accept_current_terms(self.owner)
+        self.org = Organization.objects.create(
+            name="Zone FC", username="zonefc", type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.position = SportPosition.objects.create(
+            sport=self.sport, name="Striker"
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def _create(self, sessions):
+        return self.client.post(
+            CREATE_URL,
+            {
+                "title": "Zone trials",
+                "short_description": "Two zones, one morning",
+                "recruitment_type": "open_trial",
+                "sport_id": str(self.sport.id),
+                # Required by the create serializer; "any position" is [].
+                "positions": [
+                    {"position_id": str(self.position.id), "is_primary": True}
+                ],
+                "is_paid": False,
+                "sessions": sessions,
+                "status": "active",
+            },
+            format="json",
+            HTTP_X_ACTOR_TYPE="organization",
+            HTTP_X_ACTOR_ID=str(self.org.id),
+        )
+
+    def _place(self, name, external_id, point):
+        """A session's nested venue block, as the wizard sends it."""
+        return {
+            "provider": "google",
+            "external_id": external_id,
+            "name": name,
+            "type": "place",
+            "city": name,
+            "latitude": point[0],
+            "longitude": point[1],
+        }
+
+    # -- the format that used to be refused -----------------------
+
+    def test_two_different_venues_at_the_same_date_and_time_publish(self):
+        resp = self._create([
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "location": self._place("North Ground", "ChIJnorth", KANNUR),
+            },
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "location": self._place("South Ground", "ChIJsouth", KOCHI),
+            },
+        ])
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        recruitment = Recruitment.objects.get(title="Zone trials")
+        self.assertEqual(recruitment.sessions.count(), 2)
+
+        # Both centres kept their own place, which is what makes them two
+        # centres rather than one row typed twice.
+        places = {
+            session.location.external_id
+            for session in recruitment.sessions.all()
+        }
+        self.assertEqual(places, {"ChIJnorth", "ChIJsouth"})
+
+    def test_the_mode_sent_is_the_mode_stored_above_two_dates(self):
+        """
+        The server honours what the client decided. Two centres means a
+        player attends ONE of them, and the WIZARD is what sends that —
+        `sessionModeForShape` forces choose_one for the multi_place shape.
+        The serializer only overrides the value BELOW two live dates.
+
+        See the note in this class's docstring: nothing server-side requires
+        choose_one for two centres at one instant.
+        """
+        resp = self.client.post(
+            CREATE_URL,
+            {
+                "title": "Zone trials",
+                "short_description": "Two zones, one morning",
+                "recruitment_type": "open_trial",
+                "sport_id": str(self.sport.id),
+                "positions": [
+                    {"position_id": str(self.position.id), "is_primary": True}
+                ],
+                "is_paid": False,
+                "session_mode": "choose_one",
+                "sessions": [
+                    {
+                        "date": "2030-06-15", "start_time": "09:00",
+                        "location": self._place(
+                            "North Ground", "ChIJnorth", KANNUR
+                        ),
+                    },
+                    {
+                        "date": "2030-06-15", "start_time": "09:00",
+                        "location": self._place(
+                            "South Ground", "ChIJsouth", KOCHI
+                        ),
+                    },
+                ],
+                "status": "active",
+            },
+            format="json",
+            HTTP_X_ACTOR_TYPE="organization",
+            HTTP_X_ACTOR_ID=str(self.org.id),
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            Recruitment.objects.get(title="Zone trials").session_mode,
+            Recruitment.SessionMode.CHOOSE_ONE,
+        )
+
+    def test_one_live_date_still_forces_all(self):
+        """The one override the serializer does make, unchanged by stage 1."""
+        resp = self._create([
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "session_mode": "choose_one",
+            },
+        ])
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            Recruitment.objects.get(title="Zone trials").session_mode,
+            Recruitment.SessionMode.ALL,
+        )
+
+    def test_two_venue_names_at_the_same_slot_publish(self):
+        """Venue identity does not require a geocoded place."""
+        resp = self._create([
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "venue_name": "North Ground",
+            },
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "venue_name": "South Ground",
+            },
+        ])
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+    # -- what is still a duplicate --------------------------------
+
+    def test_two_inheriting_rows_at_the_same_slot_are_refused(self):
+        resp = self._create([
+            {"date": "2030-06-15", "start_time": "09:00"},
+            {"date": "2030-06-15", "start_time": "09:00"},
+        ])
+
+        self.assertEqual(
+            resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data
+        )
+        self.assertFalse(
+            Recruitment.objects.filter(title="Zone trials").exists()
+        )
+
+    def test_the_same_venue_name_twice_at_one_slot_is_refused(self):
+        """Normalized, so case and padding do not make a second centre."""
+        resp = self._create([
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "venue_name": "North Ground",
+            },
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "venue_name": "  north ground ",
+            },
+        ])
+
+        self.assertEqual(
+            resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data
+        )
+
+    def test_the_same_place_twice_at_one_slot_is_refused(self):
+        resp = self._create([
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "location": self._place("North Ground", "ChIJnorth", KANNUR),
+            },
+            {
+                "date": "2030-06-15", "start_time": "09:00",
+                "location": self._place("North Ground", "ChIJnorth", KANNUR),
+            },
+        ])
+
+        self.assertEqual(
+            resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data
+        )
+
+    def test_one_venue_at_two_times_on_a_day_still_publishes(self):
+        """A morning and an afternoon round were always allowed."""
+        resp = self._create([
+            {"date": "2030-06-15", "start_time": "09:00"},
+            {"date": "2030-06-15", "start_time": "14:00"},
+        ])
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+
+class SessionCoordinatePropagationTests(APITestCase):
+    """
+    A Location's coordinates are a CACHE that expires, and every model that
+    copied them has to be refreshed when they change. ``TrialSession`` carries
+    its own copy and that copy is what nearest-centre distance reads, so a
+    refresh that skipped it left every trial centre stale.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.org = Organization.objects.create(
+            name="Refresh FC", username="refreshfc",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.location = Location.objects.create(
+            name="North Ground", type=Location.Type.PLACE,
+            provider=Location.Provider.GOOGLE, external_id="ChIJnorth",
+            city="Kannur", latitude=KANNUR[0], longitude=KANNUR[1],
+            coords_fetched_at=timezone.now(),
+        )
+        self.trial = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            title="Refresh trials", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        self.session = TrialSession.objects.create(
+            recruitment=self.trial,
+            date=timezone.now().date() + timedelta(days=30),
+            location=self.location,
+            latitude=KANNUR[0], longitude=KANNUR[1],
+        )
+
+    def test_new_coordinates_reach_the_session_copy(self):
+        self.location.latitude, self.location.longitude = KOCHI
+        self.location.save(update_fields=["latitude", "longitude"])
+
+        counts = LocationService.propagate_coords(self.location)
+
+        self.session.refresh_from_db()
+        self.assertAlmostEqual(self.session.latitude, KOCHI[0], places=4)
+        self.assertAlmostEqual(self.session.longitude, KOCHI[1], places=4)
+        # The refresh job reads these counts for its summary.
+        self.assertIn("trial_sessions", counts)
+        self.assertEqual(counts["trial_sessions"], 1)
+
+    def test_expired_coordinates_null_the_session_copy(self):
+        """
+        NULLs propagate exactly like values do — that is how an expired place
+        leaves nearby results instead of lingering at its last known point.
+        """
+        self.location.latitude = None
+        self.location.longitude = None
+        self.location.save(update_fields=["latitude", "longitude"])
+
+        LocationService.propagate_coords(self.location)
+
+        self.session.refresh_from_db()
+        self.assertIsNone(self.session.latitude)
+        self.assertIsNone(self.session.longitude)
+
+    def test_a_session_pointing_elsewhere_is_left_alone(self):
+        other = Location.objects.create(
+            name="South Ground", type=Location.Type.PLACE,
+            provider=Location.Provider.GOOGLE, external_id="ChIJsouth",
+            city="Kochi", latitude=KOCHI[0], longitude=KOCHI[1],
+            coords_fetched_at=timezone.now(),
+        )
+        elsewhere = TrialSession.objects.create(
+            recruitment=self.trial,
+            date=timezone.now().date() + timedelta(days=40),
+            location=other, latitude=KOCHI[0], longitude=KOCHI[1],
+        )
+
+        self.location.latitude, self.location.longitude = (0.0, 0.0)
+        self.location.save(update_fields=["latitude", "longitude"])
+        counts = LocationService.propagate_coords(self.location)
+
+        elsewhere.refresh_from_db()
+        self.assertAlmostEqual(elsewhere.latitude, KOCHI[0], places=4)
+        self.assertEqual(counts["trial_sessions"], 1)
+
+    def test_the_other_models_are_still_counted(self):
+        """The dict's existing keys are what the summary already reads."""
+        counts = LocationService.propagate_coords(self.location)
+
+        for key in (
+            "user_profiles", "posts", "recruitments",
+            "organization_locations", "trial_sessions",
+        ):
+            self.assertIn(key, counts)
+
+
+class PerCentreDistancePayloadTests(APITestCase):
+    """
+    Every centre on the DETAIL payload carries the viewer's distance to it,
+    so the apply picker can offer the one they can reach first. Anonymous
+    readers get no distances at all and the picker falls back to date order.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.org = Organization.objects.create(
+            name="Picker FC", username="pickerfc",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        self.trial = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            title="Picker trials", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            session_mode=Recruitment.SessionMode.CHOOSE_ONE,
+            city="Kochi", latitude=KOCHI[0], longitude=KOCHI[1],
+            published_at=timezone.now(),
+        )
+        for offset, point in ((30, KOCHI), (40, KANNUR)):
+            TrialSession.objects.create(
+                recruitment=self.trial,
+                date=timezone.now().date() + timedelta(days=offset),
+                latitude=point[0], longitude=point[1],
+            )
+
+        self.player = User.objects.create_user(
+            email="picker@example.com", password="pass1234",
+            username="picker_player",
+        )
+        accept_current_terms(self.player)
+        self.profile = UserProfile.objects.create(
+            user=self.player, name="Player",
+            latitude=KANNUR[0], longitude=KANNUR[1],
+        )
+
+    def _detail(self, user):
+        """The authenticated detail endpoint — the one the apply modal reads."""
+        self.client.force_authenticate(user=user)
+        return self.client.get(f"/recruitments/{self.trial.id}/details")
+
+    def _public_detail(self):
+        """
+        The shareable link. There is no viewer to locate, so this is where
+        "anonymous gets no distance" is actually observable — the
+        authenticated twin answers 401 to a stranger.
+        """
+        self.client.force_authenticate(user=None)
+        return self.client.get(f"/public/recruitments/{self.trial.id}")
+
+    def test_a_located_viewer_gets_a_distance_on_every_centre(self):
+        resp = self._detail(self.player)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        sessions = resp.data["data"]["sessions"]
+        self.assertEqual(len(sessions), 2)
+        for session in sessions:
+            self.assertIn("distance_km", session)
+            self.assertIsNotNone(session["distance_km"])
+
+        # And each number is to ITS OWN centre, not to the trial's pin: the
+        # Kannur viewer is next to one and 237 km from the other.
+        by_distance = sorted(s["distance_km"] for s in sessions)
+        self.assertAlmostEqual(by_distance[0], 0.0, delta=1.0)
+        self.assertAlmostEqual(by_distance[1], KOCHI_KANNUR_KM, delta=2.0)
+
+    def test_an_anonymous_viewer_gets_no_distance_at_all(self):
+        """
+        The key is ABSENT rather than null, so the public payload is
+        byte-for-byte the one every client already handled — and the picker
+        falls back to date order on its own.
+        """
+        resp = self._public_detail()
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        sessions = resp.data["data"]["sessions"]
+        self.assertEqual(len(sessions), 2)
+        for session in sessions:
+            self.assertNotIn("distance_km", session)
+
+    def test_a_located_viewer_with_no_coordinates_gets_none(self):
+        self.profile.latitude = None
+        self.profile.longitude = None
+        self.profile.save(update_fields=["latitude", "longitude"])
+
+        resp = self._detail(self.player)
+
+        for session in resp.data["data"]["sessions"]:
+            self.assertNotIn("distance_km", session)
+
+    def test_the_detail_order_is_still_by_date(self):
+        """Ordering the picker is the client's job; the payload is calendar."""
+        resp = self._detail(self.player)
+
+        dates = [s["date"] for s in resp.data["data"]["sessions"]]
+        self.assertEqual(dates, sorted(dates))
+
+
+# =====================================================================
 # TRIAL SESSIONS - the payload shape every client reads
 # =====================================================================
 

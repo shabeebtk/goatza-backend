@@ -80,6 +80,27 @@ class PlayerContext:
 class PlayerContextSelector:
 
     @staticmethod
+    def viewer_center(actor):
+        """
+        (lat, lng) FOR THIS VIEWER, or None — the one answer to "where is
+        whoever is reading this".
+
+        THE ONE RULE, in one place. Profile lat/lng for a user, primary
+        OrganizationLocation for an org, None for anonymous; it is
+        ``ExploreService.resolve_location`` with the None-actor case folded
+        in, because every caller has to handle an anonymous reader and none
+        of them should have to remember to.
+
+        Its readers: ``resolve`` below, the recruitment list endpoint and the
+        recruitment detail endpoint. A second spelling of this rule anywhere
+        would be a viewer who is near a trial on one screen and not on the
+        next.
+        """
+        if actor is None:
+            return None
+        return ExploreService.resolve_location(actor)
+
+    @staticmethod
     def resolve(actor):
         """
         Four queries for a player (sports, positions, and the two follow reads
@@ -92,9 +113,11 @@ class PlayerContextSelector:
         if actor is None:
             return PlayerContext()
 
-        # Reused verbatim: the same "profile lat/lng for a user, primary
-        # OrganizationLocation for an org" rule Explore already resolves.
-        location = ExploreService.resolve_location(actor)
+        # Reused verbatim, through the one helper above — the same "profile
+        # lat/lng for a user, primary OrganizationLocation for an org" rule
+        # Explore already resolves, and the same one both recruitment
+        # endpoints read.
+        location = PlayerContextSelector.viewer_center(actor)
         latitude, longitude = location if location else (None, None)
 
         followed_org_ids = frozenset(
