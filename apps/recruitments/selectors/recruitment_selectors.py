@@ -1,8 +1,11 @@
-from django.db.models import Case, DateTimeField, F, IntegerField, Q, Value, When
+from django.db.models import (
+    Case, DateTimeField, F, FloatField, IntegerField, OuterRef, Q, Subquery,
+    UUIDField, Value, When,
+)
 from django.db.models.functions import Coalesce
 from datetime import timedelta
 from django.utils import timezone
-from apps.recruitments.models import Recruitment
+from apps.recruitments.models import Recruitment, TrialSession
 from apps.organization.services.user_organization_services import (
     UserOrganizationService
 )
@@ -12,7 +15,7 @@ from apps.connections.models import Follow
 from apps.recruitments.selectors.saved_recruitment_selectors import (
     SavedRecruitmentSelector
 )
-from apps.recruitments.trial_window import trial_not_over_q
+from apps.recruitments.trial_window import live_session_q, trial_not_over_q
 from services.geo import haversine
 
 # Relations every recruitment card needs. Named once so the "All" tab and the
@@ -346,10 +349,19 @@ class RecruitmentSelector:
                 status=status
             )
 
+        # CITY — the trial's own city, or any live centre's. A city tour is
+        # geocoded at one stop, so ?city=Kannur used to miss a trial that
+        # visits Kannur next Saturday. Same live-centre rule as the distance
+        # annotation (live_session_q), so a centre that has already run does
+        # not keep its city matching.
         if city:
             queryset = queryset.filter(
-                city__iexact=city
-            )
+                Q(city__iexact=city)
+                | (
+                    live_session_q(now, prefix="sessions__")
+                    & Q(sessions__city__iexact=city)
+                )
+            ).distinct()
 
         # SEARCH — case-insensitive across title, short_description and the
         # organization name (OR'd). Junk is harmless — a no-match just narrows.
@@ -422,16 +434,31 @@ class RecruitmentSelector:
                 )
             )
 
-        # DISTANCE — bounding box first (it uses the existing
-        # (latitude, longitude) index), then the exact haversine. Same two-step
-        # as ExploreService._players_queryset. Rows with no coordinates drop out
-        # of a distance-FILTERED list, which is correct: the viewer asked for
-        # "within N km" and an unknown venue cannot answer that. Scoring treats
-        # the same unknown as neutral (+5) precisely because it is not a filter.
+        # DISTANCE, in two independent halves.
+        #
+        # ANNOTATING is unconditional on knowing where the viewer is, because
+        # the CARD reads it: a card that says "Kochi" with no number, on a
+        # trial whose nearest centre is six kilometres away, is the org public
+        # profile's whole problem. It costs the correlated subquery and
+        # nothing else — no row is added or dropped by annotating.
+        #
+        # FILTERING stays opt-in, and only when the viewer actually asked for
+        # "within N km". It is the bounding box first (it uses the existing
+        # (latitude, longitude) indexes), then the exact haversine — the same
+        # two-step as ExploreService._players_queryset. Rows with no
+        # coordinates drop out of a distance-FILTERED list, which is correct:
+        # the viewer asked a question an unknown venue cannot answer. Scoring
+        # treats the same unknown as neutral (+5) precisely because it is not
+        # a filter.
+        #
+        # The order matters: the filter reads the annotation.
+        if center:
+            queryset = RecruitmentSelector.annotate_distance(
+                queryset, center, now=now
+            )
         if center and max_distance_km:
-            queryset = RecruitmentSelector.annotate_distance(queryset, center)
             queryset = RecruitmentSelector.filter_within_distance(
-                queryset, center, max_distance_km
+                queryset, center, max_distance_km, now=now
             )
 
         return queryset
@@ -440,34 +467,136 @@ class RecruitmentSelector:
     # DISTANCE (§3 / §4) — the trig itself lives in services.geo
     # ------------------------------------------------------------ #
 
+    # ONE CORRELATED SUBQUERY PER ROW, and that is the intended trade. It
+    # keeps the whole thing a single round trip, and it reads the
+    # (latitude, longitude) index on recruitment_trial_sessions that stage 1
+    # added. At this project's scale — a corpus meant to stay in the low
+    # thousands (§1), bounded by MAX_SCORED_CANDIDATES — that is cheaper than
+    # any alternative that keeps the answer correct. If it ever does become
+    # slow, the next step is a flat search-points table (one row per centre,
+    # plus one per recruitment with none) or PostGIS, NOT a rewrite of this:
+    # the shape below is what those would replace, and the callers would not
+    # change.
     @staticmethod
-    def annotate_distance(queryset, center):
+    def annotate_distance(queryset, center, now=None):
         """
-        Add ``distance_km`` from ``center`` to each row's venue coordinates.
+        Add ``distance_km`` from ``center`` to the NEAREST live trial centre,
+        falling back to the recruitment's own venue coordinates.
+
+        A posting with centres in Kochi and Kannur is geocoded at ONE of them.
+        Read off that single pin, the trial sat 280 km from a Kannur player
+        who was 4 km from the ground it actually visits, so a "within 50 km"
+        search hid it. The nearest centre is the only distance that answers
+        the question the viewer asked.
+
+        ONLY LIVE CENTRES COUNT — see ``live_session_q``. A Kochi date that
+        has already run must stop making the trial "near Kochi"; its
+        coordinates stay on the row (the applicants who picked it still need
+        them) and simply stop being a reason to surface the posting.
+
+        Also adds ``nearest_session_id`` — WHICH centre that was, so the card
+        can name the place the number belongs to instead of the one venue the
+        org happened to geocode.
 
         NOT filtered: discovery scores every candidate, and a row with no
         coordinates has to survive to collect its +5 neutral. Such a row
-        annotates to NULL → ``distance_km is None`` in Python.
+        annotates to NULL → ``distance_km is None`` in Python. Both Coalesce
+        arms can be NULL and NULL is what comes out — there is deliberately no
+        third arm, because a 0 fallback would read as "right here" and sort an
+        unknown venue to the top of every nearby list.
+
+        ``nearest_session_id`` IS NULL ON EXACTLY THE SAME CONDITION that
+        makes ``distance_km`` fall through to the recruitment's own pin: no
+        live centre with coordinates. So "a distance but no centre" is a real
+        and normal state, and it means the number is measured to the trial's
+        OWN venue — which is what the card must then name. The two annotations
+        are derived from one queryset below so they can never disagree about
+        which centres were live.
         """
         lat, lng = center
-        return queryset.annotate(
-            distance_km=haversine.distance_expr(
-                lat, lng, "latitude", "longitude"
+
+        # The live centres we know the position of, nearest first. ONE base
+        # queryset for both subqueries: two copies of this filter would be two
+        # chances for the distance and the id to describe different rows.
+        #
+        # ``order_by("d")`` is not optional: the model has a Meta.ordering,
+        # and leaving it in would both order the subquery by date and drag its
+        # columns into a single-column SELECT.
+        nearest_centres = (
+            TrialSession.objects
+            .filter(
+                live_session_q(now),
+                recruitment=OuterRef("pk"),
+                latitude__isnull=False,
+                longitude__isnull=False,
             )
+            .annotate(
+                d=haversine.distance_expr(
+                    lat, lng, "latitude", "longitude"
+                )
+            )
+            .order_by("d")
+        )
+
+        return queryset.annotate(
+            distance_km=Coalesce(
+                # No live centre with coordinates → no rows → NULL → fall
+                # through to the trial's own pin.
+                Subquery(
+                    nearest_centres.values("d")[:1],
+                    output_field=FloatField(),
+                ),
+                haversine.distance_expr(
+                    lat, lng, "latitude", "longitude"
+                ),
+            ),
+            nearest_session_id=Subquery(
+                nearest_centres.values("id")[:1],
+                output_field=UUIDField(),
+            ),
         )
 
     @staticmethod
-    def filter_within_distance(queryset, center, radius_km):
-        """Box prefilter + exact circle. Expects ``annotate_distance`` first."""
+    def filter_within_distance(queryset, center, radius_km, now=None):
+        """
+        Box prefilter + exact circle. Expects ``annotate_distance`` first.
+
+        The box is an OR now: the trial's own point inside it, or ANY live
+        centre's. Reading the recruitment's pin alone dropped a posting whose
+        own point is far away while one of its centres is next door — the
+        exact row ``annotate_distance`` was changed to measure correctly, so
+        a box that disagreed would throw it away before the circle ever saw
+        it.
+
+        Still only a prefilter. ``distance_km`` is the correctness step and it
+        is unchanged: the box lets Postgres use the two coordinate indexes
+        instead of running the trig over the whole table, and a corner of the
+        box is further than its radius.
+        """
         lat, lng = center
         box = haversine.bounding_box(lat, lng, radius_km)
-        return queryset.filter(
+
+        own_point_in_box = Q(
             latitude__gte=box["min_lat"],
             latitude__lte=box["max_lat"],
             longitude__gte=box["min_lng"],
             longitude__lte=box["max_lng"],
-            distance_km__lte=radius_km,
         )
+        # ONE filter() call, so every condition lands on the SAME joined
+        # session row — chained calls would let one centre be live and a
+        # different one be in the box.
+        centre_in_box = live_session_q(now, prefix="sessions__") & Q(
+            sessions__latitude__gte=box["min_lat"],
+            sessions__latitude__lte=box["max_lat"],
+            sessions__longitude__gte=box["min_lng"],
+            sessions__longitude__lte=box["max_lng"],
+        )
+
+        return queryset.filter(
+            own_point_in_box | centre_in_box,
+            distance_km__lte=radius_km,
+        # A trial with two centres in range matches the join twice.
+        ).distinct()
 
     # ------------------------------------------------------------ #
     # DISCOVER (§4)
@@ -526,7 +655,7 @@ class RecruitmentSelector:
 
         if context.center:
             queryset = RecruitmentSelector.annotate_distance(
-                queryset, context.center
+                queryset, context.center, now=now
             )
 
         # Same bookmark the "All" tab carries — the rails render the same card.

@@ -43,6 +43,41 @@ def bounding_box(lat, lng, radius):
     }
 
 
+def distance_between(lat1, lng1, lat2, lng2):
+    """
+    Kilometres between two points, in PYTHON — or None when any coordinate is
+    missing.
+
+    FOR ROWS ALREADY LOADED, and only those: a handful of trial centres hanging
+    off one recruitment, where a round trip to the database would cost more
+    than the trig does. ``distance_expr`` remains the only way to measure
+    INSIDE a query — anything that filters, sorts or paginates on distance has
+    to do it in SQL, because a Python sort can only ever reorder the page it
+    was handed.
+
+    None means UNKNOWN and never 0: a centre whose coordinates nobody has
+    resolved is not one the viewer is standing on, and a 0 would sort it to
+    the top of a nearest-first list.
+
+    The acos input is clamped to [-1, 1] for the same reason the expression
+    clamps it — float rounding at distance ≈ 0 otherwise trips a domain error,
+    which is exactly the case a viewer at the venue produces.
+    """
+    if lat1 is None or lng1 is None or lat2 is None or lng2 is None:
+        return None
+
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+
+    cos_angle = (
+        math.sin(phi1) * math.sin(phi2)
+        + math.cos(phi1) * math.cos(phi2)
+        * math.cos(math.radians(lng2) - math.radians(lng1))
+    )
+
+    return math.acos(max(-1.0, min(1.0, cos_angle))) * EARTH_RADIUS_KM
+
+
 def distance_expr(lat, lng, lat_field, lng_field):
     """
     Haversine distance (km) from a fixed (lat, lng) to each row's

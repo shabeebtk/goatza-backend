@@ -2,6 +2,8 @@
 from datetime import time
 
 from rest_framework import serializers
+
+from services.geo import haversine
 from apps.recruitments.models import (
     Recruitment, RecruitmentMedia, RecruitmentQuestion,
     RecruitmentQuestionOption, RecruitmentApplication, RecruitmentPosition,
@@ -105,12 +107,35 @@ class RecruitmentEligibilityCriteriaSerializer(serializers.ModelSerializer):
 # parent in hand. Doing it as a nested ModelSerializer would mean reaching
 # for ``session.recruitment`` once per row — a query per date on every card.
 
-def trial_session_payload(session, recruitment):
+def trial_session_payload(session, recruitment, center=None):
     """
     One date, with its venue resolved: the session's own value where it set
     one, the recruitment's where it did not.
+
+    ``center`` is the VIEWER's (lat, lng). Given one, the payload also carries
+    ``distance_km`` to THIS centre — measured off the resolved coordinates
+    just below, so it is the distance to the place this row actually names.
+    That is what lets the apply picker put the centre a player can reach at
+    the top instead of the one whose date happens to come first.
+
+    Measured in Python (``haversine.distance_between``) rather than in SQL on
+    purpose: these rows are already loaded, there are a handful of them per
+    recruitment, and nothing here sorts or paginates on the number — the
+    nearest-centre ANNOTATION is still the SQL one. Absent without a centre,
+    and None rather than 0 when the coordinates are unknown.
     """
-    return {
+    latitude = (
+        session.latitude
+        if session.latitude is not None
+        else recruitment.latitude
+    )
+    longitude = (
+        session.longitude
+        if session.longitude is not None
+        else recruitment.longitude
+    )
+
+    payload = {
         "id": str(session.id),
         "title": session.title,
         "date": session.date,
@@ -120,16 +145,8 @@ def trial_session_payload(session, recruitment):
         "venue_name": session.venue_name or recruitment.venue_name,
         "venue_link": session.venue_link or recruitment.venue_link,
         "city": session.city or recruitment.city,
-        "latitude": (
-            session.latitude
-            if session.latitude is not None
-            else recruitment.latitude
-        ),
-        "longitude": (
-            session.longitude
-            if session.longitude is not None
-            else recruitment.longitude
-        ),
+        "latitude": latitude,
+        "longitude": longitude,
         # THE UNRESOLVED TRUTH, for the editor to round-trip. The resolved
         # keys above cannot tell "this centre has a venue of its own" from
         # "it inherited the trial's", so a wizard reading them back would
@@ -157,12 +174,29 @@ def trial_session_payload(session, recruitment):
         ),
     }
 
+    # Only when we know where the viewer is. The key is ABSENT otherwise
+    # rather than null, so a payload built without a centre is byte-for-byte
+    # the one every existing caller already gets.
+    if center is not None:
+        distance = haversine.distance_between(
+            center[0], center[1], latitude, longitude
+        )
+        payload["distance_km"] = (
+            None if distance is None else round(distance, 1)
+        )
 
-def trial_sessions_payload(recruitment):
+    return payload
+
+
+def trial_sessions_payload(recruitment, center=None):
     """
     Every date on a recruitment: live ones first, each group in the model's
     own ordering (date, start time, display order). Sorted in Python off the
     prefetched rows, so this costs no query.
+
+    ``center`` is passed straight down — see ``trial_session_payload``. The
+    ORDER here does not change with it: the client decides what to do with
+    the distances, and the detail page still lists the dates by date.
     """
     sessions = sorted(
         recruitment.sessions.all(),
@@ -174,7 +208,7 @@ def trial_sessions_payload(recruitment):
         ),
     )
     return [
-        trial_session_payload(session, recruitment)
+        trial_session_payload(session, recruitment, center)
         for session in sessions
     ]
 
@@ -247,7 +281,11 @@ class TrialSessionsMixin(metaclass=serializers.SerializerMetaclass):
     ]
 
     def get_sessions(self, obj):
-        return trial_sessions_payload(obj)
+        # ``center`` reaches a serializer the only way anything does: through
+        # the context. Absent on every mount that does not set it, which is
+        # every mount but the detail endpoint — so the key simply does not
+        # appear and nothing downstream changes.
+        return trial_sessions_payload(obj, self.context.get("center"))
 
 
 class RecruitmentListSerializer(
@@ -257,6 +295,10 @@ class RecruitmentListSerializer(
     sport = SportSerializer(read_only=True)
     positions = RecruitmentPositionMiniSerializer(many=True, read_only=True)
     cover_media = serializers.SerializerMethodField()
+    # Both read annotations that only exist when the viewer's location is
+    # known; both answer None when it is not.
+    distance_km = serializers.SerializerMethodField()
+    nearest_session = serializers.SerializerMethodField()
     # How many photos there are, so the card's media slot can badge "1/4".
     # Counted off the ALREADY-PREFETCHED list, never a second query — see
     # LIST_PREFETCH_RELATED. `.count()` here would be one query per row.
@@ -310,7 +352,84 @@ class RecruitmentListSerializer(
             # The bookmark. Always present so the card never has to guess.
             "is_saved",
             "is_trial_over",
+            # WHERE THIS TRIAL IS FOR THIS VIEWER. On the parent, not the
+            # discover subclass: the org public profile renders the same card
+            # off this serializer, and it used to show no distance at all.
+            "distance_km",
+            "nearest_session",
         ] + TrialSessionsMixin.SESSION_FIELDS
+
+    def get_distance_km(self, obj):
+        """
+        How far the viewer is from the NEAREST live centre, or from the
+        trial's own venue when no centre has coordinates. One decimal.
+
+        THE ONE SOURCE IS THE ANNOTATION — ``RecruitmentSelector
+        .annotate_distance``, which resolves the nearest centre in SQL. This
+        is the only reader of it in the payload: ``RecruitmentDiscoverItem
+        Serializer`` used to declare its own ``distance_km`` off
+        ``match.distance_km``, and that was the SAME annotation rounded the
+        same way by the scorer (``MatchScoreService.score``: ``round(getattr(
+        recruitment, "distance_km", None), 1)``). Two spellings of one number
+        is two chances to drift, so the subclass's copy is gone and it
+        inherits this.
+
+        None rather than 0 when the viewer has no location, or the trial has
+        no coordinates anywhere. An absent distance is not a short one.
+        """
+        distance = getattr(obj, "distance_km", None)
+        return None if distance is None else round(distance, 1)
+
+    def get_nearest_session(self, obj):
+        """
+        THE CENTRE THE VIEWER IS CLOSEST TO — the place ``distance_km``
+        actually measures, so the card can name it.
+
+        A trial that visits Kochi and Kannur is geocoded at one of them. The
+        card used to read that pin, so a Kannur player was shown "Kochi · 6
+        km": the right number against the wrong place.
+
+        Served through ``trial_session_payload``, the same function the
+        ``sessions`` array uses, so this centre's venue resolution and its
+        ``own_*`` keys are byte-identical to its entry there — the card must
+        never find two different answers for one date.
+
+        NO QUERY: the id comes from the annotation and the row is picked out
+        of the already-prefetched ``sessions``. A ``.get()`` here would be one
+        query per card.
+
+        NULL when:
+          * nothing annotated it (the viewer has no location), or
+          * no live centre has coordinates — the same condition that makes
+            ``distance_km`` fall through to the recruitment's own pin, so
+            "a distance with no centre" means the number is to the trial's
+            own venue, or
+          * the trial has ONE centre and it is simply the trial's own venue.
+            There is no second place to name, and the card's existing venue
+            line already says it.
+        """
+        session_id = getattr(obj, "nearest_session_id", None)
+        if session_id is None:
+            return None
+
+        sessions = list(obj.sessions.all())
+        session = next(
+            (row for row in sessions if str(row.id) == str(session_id)),
+            None,
+        )
+        if session is None:
+            return None
+
+        # One centre, no venue of its own: it IS the trial's venue.
+        live = [row for row in sessions if not row.is_cancelled]
+        inherits = not (session.location_id or session.venue_name)
+        if len(live) <= 1 and inherits:
+            return None
+
+        payload = trial_session_payload(session, obj)
+        # The annotation measures THIS centre, so the number belongs on it.
+        payload["distance_km"] = self.get_distance_km(obj)
+        return payload
 
     def get_is_saved(self, obj):
         """
@@ -354,6 +473,10 @@ class RecruitmentDiscoverItemSerializer(RecruitmentListSerializer):
     ``distance_km`` / ``days_to_deadline`` instead. It ships anyway because
     ordering is only debuggable if the number is visible somewhere.
 
+    ``distance_km`` is INHERITED and no longer declared here. It was the same
+    annotation the parent reads, rounded the same way by the scorer, so the
+    second spelling bought nothing and could drift.
+
     ``application_deadline`` used to be declared here on the argument that only
     a ranked card needed it. That stopped being true once the card grew a
     deadline countdown: the org public profile renders the SAME card off the
@@ -370,7 +493,9 @@ class RecruitmentDiscoverItemSerializer(RecruitmentListSerializer):
     sport_match = serializers.SerializerMethodField()
     position_match = serializers.SerializerMethodField()
     matched_positions = serializers.SerializerMethodField()
-    distance_km = serializers.SerializerMethodField()
+    # NO distance_km HERE. It is the parent's now and this inherits it — see
+    # RecruitmentListSerializer.get_distance_km for why one reader of the
+    # annotation beats one here off `match` and one there off the column.
     days_to_deadline = serializers.SerializerMethodField()
 
     class Meta(RecruitmentListSerializer.Meta):
@@ -382,7 +507,6 @@ class RecruitmentDiscoverItemSerializer(RecruitmentListSerializer):
             "sport_match",
             "position_match",
             "matched_positions",
-            "distance_km",
             "days_to_deadline",
         ]
 
@@ -416,10 +540,6 @@ class RecruitmentDiscoverItemSerializer(RecruitmentListSerializer):
     def get_matched_positions(self, obj):
         match = self._match(obj)
         return list(match.matched_positions) if match else []
-
-    def get_distance_km(self, obj):
-        match = self._match(obj)
-        return match.distance_km if match else None
 
     def get_days_to_deadline(self, obj):
         match = self._match(obj)
