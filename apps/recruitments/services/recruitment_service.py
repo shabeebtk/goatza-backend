@@ -1,4 +1,6 @@
 import logging
+from typing import NamedTuple
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -28,6 +30,23 @@ from services.storage.validators import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class SessionSync(NamedTuple):
+    """
+    What ``_sync_trial_sessions`` hands back.
+
+    ``changes`` is the schedule-ish change set ``update_recruitment`` turns
+    into ``schedule_changed_fields``.
+
+    ``sessions_by_ref`` is how the CATEGORIES find their dates. The two live
+    in one return value because they come from the same pass over the
+    payload, and because the categories cannot be synced until the sessions
+    have been — see ``_sync_age_categories``.
+    """
+
+    changes: set
+    sessions_by_ref: dict
 
 
 class RecruitmentService:
@@ -189,9 +208,6 @@ class RecruitmentService:
         RecruitmentService._sync_positions(recruitment, positions_data)
         RecruitmentService._sync_questions(recruitment, questions_data)
         RecruitmentService._sync_media(recruitment, media_data)
-        RecruitmentService._sync_age_categories(
-            recruitment, age_categories_data
-        )
         RecruitmentService._sync_contacts(recruitment, contacts_data)
         RecruitmentService._sync_benefits(recruitment, benefits_data)
         RecruitmentService._sync_requirements(
@@ -201,12 +217,20 @@ class RecruitmentService:
             recruitment, eligibility_criteria_data
         )
 
-        # DATES LAST. The sessions have to exist before the window can be
-        # derived from them, and event_date / trial_end_date are derived,
-        # never authored — whatever the payload carried for event_date is
-        # overwritten here.
-        RecruitmentService._sync_trial_sessions(recruitment, sessions_data)
+        # DATES BEFORE CATEGORIES. The sessions have to exist before the
+        # window can be derived from them — event_date / trial_end_date are
+        # derived, never authored, so whatever the payload carried for
+        # event_date is overwritten here — and before the categories,
+        # which point AT those dates and can only resolve a ref once the
+        # row behind it has been written.
+        session_sync = RecruitmentService._sync_trial_sessions(
+            recruitment, sessions_data
+        )
         RecruitmentService._sync_trial_window(recruitment)
+
+        RecruitmentService._sync_age_categories(
+            recruitment, age_categories_data, session_sync.sessions_by_ref
+        )
 
         # Nothing "changed" on a create — there is no previous schedule and
         # nobody has applied yet.
@@ -308,9 +332,6 @@ class RecruitmentService:
         RecruitmentService._sync_positions(recruitment, positions_data)
         RecruitmentService._sync_questions(recruitment, questions_data)
         RecruitmentService._sync_media(recruitment, media_data)
-        RecruitmentService._sync_age_categories(
-            recruitment, age_categories_data
-        )
         RecruitmentService._sync_contacts(recruitment, contacts_data)
         RecruitmentService._sync_benefits(recruitment, benefits_data)
         RecruitmentService._sync_requirements(
@@ -320,14 +341,17 @@ class RecruitmentService:
             recruitment, eligibility_criteria_data
         )
 
-        # DATES LAST. The sessions have to exist before the window can be
-        # derived from them, and event_date / trial_end_date are derived,
-        # never authored — whatever the payload carried for event_date is
-        # overwritten here.
-        schedule_changes = RecruitmentService._sync_trial_sessions(
+        # DATES BEFORE CATEGORIES — same order, and for the same two
+        # reasons, as create_recruitment.
+        session_sync = RecruitmentService._sync_trial_sessions(
             recruitment, sessions_data
         )
+        schedule_changes = session_sync.changes
         RecruitmentService._sync_trial_window(recruitment)
+
+        RecruitmentService._sync_age_categories(
+            recruitment, age_categories_data, session_sync.sessions_by_ref
+        )
 
         # The recruitment's OWN venue is part of the schedule too: "same date,
         # new ground" is exactly the thing applicants have to be told.
@@ -647,7 +671,9 @@ class RecruitmentService:
             )
 
     @staticmethod
-    def _sync_age_categories(recruitment, age_categories_data):
+    def _sync_age_categories(
+        recruitment, age_categories_data, sessions_by_ref
+    ):
         """
         DIFF sync, not the delete-and-recreate the sibling helpers use.
 
@@ -660,6 +686,12 @@ class RecruitmentService:
 
         An `id` the recruitment does not own is rejected rather than adopted,
         so an edit can never steal another recruitment's group.
+
+        RUNS AFTER ``_sync_trial_sessions``, whose ``sessions_by_ref`` map is
+        how each category's ``session_refs`` become real rows. A ref the map
+        does not know is a ValidationError, never a silent skip: dropping it
+        would quietly widen the category to every centre, which is the
+        opposite of what the org asked for.
         """
         existing = {
             str(category.id): category
@@ -669,28 +701,37 @@ class RecruitmentService:
         seen_ids = set()
         to_create = []
         to_update = []
+        # (category, [TrialSession, ...]) for every row in the payload. The
+        # M2M can only be written once the row exists, so it is held here
+        # and set after the bulk writes below — one query per category,
+        # and a trial has a handful of them.
+        session_links = []
 
         for idx, age in enumerate(age_categories_data):
             raw_id = age.get("id")
             display_order = age.get("display_order", idx)
+            linked_sessions = RecruitmentService._category_sessions(
+                age, sessions_by_ref
+            )
 
             if raw_id is None:
-                to_create.append(
-                    RecruitmentAgeCategory(
-                        recruitment=recruitment,
-                        title=age["title"],
-                        min_birth_year=age.get(
-                            "min_birth_year"
-                        ),
-                        max_birth_year=age.get(
-                            "max_birth_year"
-                        ),
-                        reporting_time=age.get(
-                            "reporting_time"
-                        ),
-                        display_order=display_order
-                    )
+                category = RecruitmentAgeCategory(
+                    recruitment=recruitment,
+                    title=age["title"],
+                    min_birth_year=age.get(
+                        "min_birth_year"
+                    ),
+                    max_birth_year=age.get(
+                        "max_birth_year"
+                    ),
+                    gender=age.get("gender"),
+                    reporting_time=age.get(
+                        "reporting_time"
+                    ),
+                    display_order=display_order
                 )
+                to_create.append(category)
+                session_links.append((category, linked_sessions))
                 continue
 
             category_id = str(raw_id)
@@ -711,9 +752,11 @@ class RecruitmentService:
             category.title = age["title"]
             category.min_birth_year = age.get("min_birth_year")
             category.max_birth_year = age.get("max_birth_year")
+            category.gender = age.get("gender")
             category.reporting_time = age.get("reporting_time")
             category.display_order = display_order
             to_update.append(category)
+            session_links.append((category, linked_sessions))
 
         removed_ids = set(existing) - seen_ids
         if removed_ids:
@@ -728,6 +771,7 @@ class RecruitmentService:
                     "title",
                     "min_birth_year",
                     "max_birth_year",
+                    "gender",
                     "reporting_time",
                     "display_order",
                 ]
@@ -737,6 +781,32 @@ class RecruitmentService:
             RecruitmentAgeCategory.objects.bulk_create(
                 to_create
             )
+
+        # WHERE EACH CATEGORY RUNS — written unconditionally, empty list
+        # included: an edit that drops a category's dates (or a trial
+        # switched to `all`, where the serializer clears them) has to clear
+        # the stored links, not leave yesterday's centres behind.
+        for category, linked_sessions in session_links:
+            category.sessions.set(linked_sessions)
+
+    @staticmethod
+    def _category_sessions(age, sessions_by_ref):
+        """
+        One category payload row's ``session_refs`` as TrialSession rows.
+
+        Empty means "runs at every centre" — the field's default reading, and
+        what the serializer leaves behind on an `all`-mode trial.
+        """
+        sessions = []
+        for ref in age.get("session_refs", []):
+            session = sessions_by_ref.get(ref)
+            if session is None:
+                raise ValidationError(
+                    "A category points at a trial date that isn't in "
+                    "this trial."
+                )
+            sessions.append(session)
+        return sessions
 
     # Which session columns count as the SCHEDULE moving, for
     # schedule_changed_fields and for voiding reminders. Split because the two
@@ -793,12 +863,20 @@ class RecruitmentService:
 
         Callers must follow this with ``_sync_trial_window``.
 
-        Returns the set of SCHEDULE-ish changes it made — which dates
-        moved, which were added, removed or cancelled, and whether a
-        per-date venue changed. ``update_recruitment`` surfaces it as
-        ``schedule_changed_fields`` so the client can offer to tell the
-        applicants, and the moved dates are also what clears each
-        affected applicant's reminder stamp.
+        Returns a ``SessionSync``. ``changes`` is the set of SCHEDULE-ish
+        changes it made — which dates moved, which were added, removed or
+        cancelled, and whether a per-date venue changed.
+        ``update_recruitment`` surfaces it as ``schedule_changed_fields`` so
+        the client can offer to tell the applicants, and the moved dates are
+        also what clears each affected applicant's reminder stamp.
+
+        ``sessions_by_ref`` maps every date in the payload to its stored row,
+        by whichever handle the client used for it — its invented ``ref``
+        and, for a row that had one, its id. ``_sync_age_categories`` reads
+        it to resolve each category's ``session_refs``, which is why this
+        helper has to run FIRST on both the create and the update path: on a
+        new trial the sessions have no rows at all when the categories
+        arrive.
         """
         existing = {
             str(session.id): session
@@ -812,16 +890,23 @@ class RecruitmentService:
         # Sessions whose DATE or TIME moved. The applicants attached to
         # these are the ones whose reminder is now about the wrong day.
         moved_session_ids = set()
+        # Handle -> row, for the categories. New rows go in by ref only
+        # (they have no id the client could have named them by yet); rows
+        # the payload identified by id go in under BOTH, because that is
+        # what the serializer accepts as a valid `session_refs` entry.
+        sessions_by_ref = {}
 
         for idx, data in enumerate(sessions_data):
             raw_id = data.get("id")
             fields = RecruitmentService._session_fields(data, idx)
+            ref = data.get("ref")
 
             if raw_id is None:
-                to_create.append(
-                    TrialSession(recruitment=recruitment, **fields)
-                )
+                session = TrialSession(recruitment=recruitment, **fields)
+                to_create.append(session)
                 changes.add("session_added")
+                if ref:
+                    sessions_by_ref[ref] = session
                 continue
 
             session_id = str(raw_id)
@@ -860,6 +945,10 @@ class RecruitmentService:
                 setattr(session, field, value)
             to_update.append(session)
 
+            if ref:
+                sessions_by_ref[ref] = session
+            sessions_by_ref[session_id] = session
+
         removed_ids = set(existing) - seen_ids
         if removed_ids:
             changes.add("session_removed")
@@ -876,13 +965,20 @@ class RecruitmentService:
             )
 
         if to_create:
+            # The objects come back carrying their ids, so the refs already
+            # in the map now point at written rows. The model uses UUID PKs,
+            # which Django fills in before the INSERT, so this holds
+            # regardless of the backend's returning support.
             TrialSession.objects.bulk_create(to_create)
 
         RecruitmentService._clear_reminders(
             recruitment, moved_session_ids
         )
 
-        return changes
+        return SessionSync(
+            changes=changes,
+            sessions_by_ref=sessions_by_ref,
+        )
 
     # The columns _sync_trial_sessions writes — one list, so a create and an
     # update can never write different sets.

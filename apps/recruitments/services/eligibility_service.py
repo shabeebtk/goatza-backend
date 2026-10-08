@@ -174,25 +174,66 @@ def _age_badge_text(categories):
     return f"{text} only"
 
 
+def effective_genders(recruitment):
+    """
+    Every gender this trial actually takes, as a set.
+
+    A CATEGORY MAY NARROW THE TRIAL'S GENDER. An open trial whose categories
+    are Boys U14 / Girls U14 is open to both; one whose only category is
+    Girls U16 is a girls' trial however the trial-level field was left. So
+    the trial's gender is the floor each category falls back to, not the
+    answer on its own:
+
+      {category.gender or recruitment.gender for each category}
+
+    falling back to ``{recruitment.gender}`` when there are no categories at
+    all. Reads an already-prefetched relation only — see this module's
+    docstring on who owns the query count.
+
+    Blank and ``all`` both mean "everyone" and are kept as-is rather than
+    normalised: the caller decides what to do with them, and
+    ``_gender_badge`` treats the two the same.
+    """
+    categories = list(recruitment.age_categories.all())
+    if not categories:
+        return {recruitment.gender}
+
+    return {
+        category.gender or recruitment.gender
+        for category in categories
+    }
+
+
 def _gender_badge(recruitment, gender):
     """
-    Passes when the recruitment is open to everyone, or the player's gender
-    matches. A blank recruitment gender means the same thing as "all" — the
-    field is optional on the create form and most postings leave it empty.
+    Passes when ANY of the trial's effective genders takes this player — one
+    reachable category is enough, the same "at least one row matches" reading
+    ``_age_badge`` gives the birth-year bands.
+
+    A blank gender means the same thing as "all" — the field is optional on
+    the create form and most postings leave it empty.
     """
-    required = recruitment.gender
-    if not required or required == Recruitment.Gender.ALL:
+    required_set = effective_genders(recruitment)
+
+    if any(
+        not required or required == Recruitment.Gender.ALL
+        for required in required_set
+    ):
         return None
 
     if not gender:
         # Profile gender unset — unknown, not a mismatch.
         return None
 
-    if gender == required:
+    if gender in required_set:
         return None
 
-    label = dict(Recruitment.Gender.choices).get(required, required)
-    return f"Open to {label.lower()} only"
+    labels = dict(Recruitment.Gender.choices)
+    shown = sorted(
+        labels.get(required, required).lower()
+        for required in required_set
+    )
+    return f"Open to {' / '.join(shown)} only"
 
 
 def _deadline_badge(recruitment, now):

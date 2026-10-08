@@ -2,6 +2,7 @@ import logging
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from core.views.base_views import BaseAPIView
+from apps.recruitments.models import Recruitment
 from apps.recruitments.serializers.recruitment_serializers import (
     RecruitmentCreateSerializer, RecruitmentUpdateSerializer,
     ChangeRecruitmentStatusSerializer
@@ -316,6 +317,17 @@ class ListRecruitmentsAPIView(BaseAPIView):
             except (ValueError, TypeError):
                 birth_year = None
 
+            # gender — "who can I apply to". Only the two a player can BE is
+            # accepted: `all` is not a filter (it is every trial, which is
+            # the unfiltered list), and anything else is junk, so both drop
+            # to None. Same leniency as every filter around it.
+            gender = request.query_params.get("gender")
+            if gender not in (
+                Recruitment.Gender.MALE,
+                Recruitment.Gender.FEMALE,
+            ):
+                gender = None
+
             # max_distance_km — same leniency. None means "no distance filter",
             # which is NOT the same as discover's 50 km default.
             max_distance_km = request.query_params.get("max_distance_km")
@@ -368,6 +380,7 @@ class ListRecruitmentsAPIView(BaseAPIView):
                 experience_level=experience_level,
                 apply_method=apply_method,
                 birth_year=birth_year,
+                gender=gender,
                 position_id=position_id,
                 max_distance_km=max_distance_km,
                 closing_within_days=closing_within_days,

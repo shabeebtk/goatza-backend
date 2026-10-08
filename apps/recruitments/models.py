@@ -544,6 +544,13 @@ class RecruitmentAgeCategory(BaseUUIDModel):
       min=None, max=1991 → born 1991 or earlier ("Veterans 35+")
     Both null is meaningless — "open to all ages" is expressed by the
     recruitment having NO age categories at all — so the DB rejects it.
+
+    A category is WHO a player applies as and WHERE that runs: a gender ×
+    birth-year band, optionally narrowed to some of the trial's dates. The UI
+    calls these "categories" for that reason — "Boys U14, Kochi only" is one
+    row here. Both of the extra fields are OPTIONAL and both fall back to the
+    recruitment: a null ``gender`` inherits the trial's, and an empty
+    ``sessions`` means the category runs at every one of its dates.
     """
 
     recruitment = models.ForeignKey(
@@ -554,6 +561,21 @@ class RecruitmentAgeCategory(BaseUUIDModel):
     title = models.CharField(max_length=50)
     min_birth_year = models.PositiveIntegerField(null=True, blank=True)
     max_birth_year = models.PositiveIntegerField(null=True, blank=True)
+    # null = inherits the recruitment's gender. Set only when a trial that
+    # is open to everyone splits its categories (Boys U14 / Girls U14).
+    gender = models.CharField(
+        max_length=10,
+        choices=Recruitment.Gender.choices,
+        null=True,
+        blank=True,
+    )
+    # Empty = runs at every centre. Set when a category is only held at
+    # some of a trial's sessions (U18 at Kochi, U21 at Kannur).
+    sessions = models.ManyToManyField(
+        "TrialSession",
+        blank=True,
+        related_name="age_categories",
+    )
     reporting_time = models.TimeField(null=True, blank=True)
     display_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)

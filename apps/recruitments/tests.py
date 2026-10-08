@@ -6691,7 +6691,7 @@ class RecruitmentMessagingTests(APITestCase):
                 "id": session.id, "date": date(2030, 9, 21),
                 "venue_name": "New Ground", "display_order": 0,
             },
-        ])
+        ]).changes
         application.refresh_from_db()
         self.assertIsNotNone(application.trial_reminder_sent_at)
         self.assertIn("session_venue", changes)
@@ -7262,4 +7262,835 @@ class TrialFeedbackTests(APITestCase):
             RecruitmentApplicationStatusHistory.objects.filter(
                 application=application
             ).exists()
+        )
+
+
+# =====================================================================
+# CATEGORY GENDER + CENTRE LINK - who a player applies AS, and WHERE
+# =====================================================================
+
+
+# The models and serializers this section reaches for directly. Imported here
+# rather than at the top for the same reason every other section below line
+# 3878 does: the block stays next to the tests that read it.
+from apps.recruitments.models import TrialSession as _TrialSession
+from apps.recruitments.serializers.recruitment_list_serializers import (
+    ApplicationAgeCategorySerializer,
+    RecruitmentAgeCategorySerializer,
+)
+
+
+class CategoryCentreLinkTests(APITestCase):
+    """
+    A category may be held at only SOME of a trial's centres.
+
+    The load-bearing part is the handle. On a NEW trial the sessions have no
+    ids when the categories arrive in the same payload, so a category names
+    its dates by the client's own `ref`; on an edit the client sends each
+    session's id as that ref. Both have to resolve to the same rows, because
+    a link that silently failed to resolve would widen a category to every
+    centre - the exact opposite of what the org asked for.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            email="link_owner@example.com", password="pass1234",
+            username="link_owner",
+        )
+        accept_current_terms(self.owner)
+        self.org = Organization.objects.create(
+            name="Link FC", username="linkfc", type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(
+            name="Football", icon_name="mdi:soccer"
+        )
+        self.position = SportPosition.objects.create(
+            sport=self.sport, name="Striker"
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def _org_headers(self):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(self.org.id),
+        }
+
+    def _body(self, sessions, age_categories, **overrides):
+        body = {
+            "title": "Two-centre trials",
+            "short_description": "Kochi and Kannur",
+            "recruitment_type": "open_trial",
+            "sport_id": str(self.sport.id),
+            "positions": [
+                {"position_id": str(self.position.id), "is_primary": True}
+            ],
+            "is_paid": False,
+            "session_mode": "choose_one",
+            "sessions": sessions,
+            "age_categories": age_categories,
+            "status": "active",
+        }
+        body.update(overrides)
+        return body
+
+    def _create(self, sessions, age_categories, **overrides):
+        return self.client.post(
+            CREATE_URL,
+            self._body(sessions, age_categories, **overrides),
+            format="json",
+            **self._org_headers(),
+        )
+
+    def _update(self, recruitment, sessions, age_categories, **overrides):
+        return self.client.patch(
+            f"/recruitments/{recruitment.id}/update",
+            self._body(sessions, age_categories, **overrides),
+            format="json",
+            **self._org_headers(),
+        )
+
+    # The two centres every test below is built on: U18 at Kochi, U21 at
+    # Kannur, named by refs the client invented.
+    NEW_SESSIONS = [
+        {"ref": "s-kochi", "date": "2030-06-15", "city": "Kochi"},
+        {"ref": "s-kannur", "date": "2030-06-22", "city": "Kannur"},
+    ]
+    NEW_CATEGORIES = [
+        {
+            "title": "U18", "min_birth_year": 2012,
+            "session_refs": ["s-kochi"],
+        },
+        {
+            "title": "U21", "min_birth_year": 2009,
+            "session_refs": ["s-kannur"],
+        },
+    ]
+
+    def _links(self, recruitment):
+        """{category title: {session city, ...}} - the stored M2M, readably."""
+        return {
+            category.title: {
+                session.city for session in category.sessions.all()
+            }
+            for category in recruitment.age_categories.all()
+        }
+
+    # -- 1. a new trial, where only refs exist --------------------
+
+    def test_refs_on_a_new_trial_resolve_to_the_right_centres(self):
+        resp = self._create(self.NEW_SESSIONS, self.NEW_CATEGORIES)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        recruitment = Recruitment.objects.get(
+            id=resp.data["data"]["recruitment_id"]
+        )
+
+        self.assertEqual(
+            self._links(recruitment),
+            {"U18": {"Kochi"}, "U21": {"Kannur"}},
+        )
+        # One centre each, not "everywhere" - an unresolved ref would have
+        # left the set empty, which READS as every centre.
+        for category in recruitment.age_categories.all():
+            self.assertEqual(category.sessions.count(), 1)
+
+    # -- 2. an edit, where the ref IS the id ----------------------
+
+    def test_an_edit_moves_a_link_and_keeps_both_session_ids(self):
+        created = self._create(self.NEW_SESSIONS, self.NEW_CATEGORIES)
+        recruitment = Recruitment.objects.get(
+            id=created.data["data"]["recruitment_id"]
+        )
+
+        sessions = {s.city: s for s in recruitment.sessions.all()}
+        kochi, kannur = sessions["Kochi"], sessions["Kannur"]
+        categories = {c.title: c for c in recruitment.age_categories.all()}
+
+        # The wizard's edit shape: every row carries its id AS its ref, and
+        # every category carries its own id so the sync is a diff.
+        resp = self._update(
+            recruitment,
+            [
+                {
+                    "id": str(kochi.id), "ref": str(kochi.id),
+                    "date": "2030-06-15", "city": "Kochi",
+                },
+                {
+                    "id": str(kannur.id), "ref": str(kannur.id),
+                    "date": "2030-06-22", "city": "Kannur",
+                },
+            ],
+            [
+                {
+                    "id": str(categories["U18"].id), "title": "U18",
+                    "min_birth_year": 2012,
+                    "session_refs": [str(kochi.id)],
+                },
+                {
+                    "id": str(categories["U21"].id), "title": "U21",
+                    "min_birth_year": 2009,
+                    # MOVED: Kannur -> Kochi.
+                    "session_refs": [str(kochi.id)],
+                },
+            ],
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        recruitment.refresh_from_db()
+
+        self.assertEqual(
+            self._links(recruitment),
+            {"U18": {"Kochi"}, "U21": {"Kochi"}},
+        )
+        # THE IDS SURVIVED. A date that loses its id is deleted and
+        # recreated, which SET_NULLs the date every applicant picked.
+        self.assertEqual(
+            {str(s.id) for s in recruitment.sessions.all()},
+            {str(kochi.id), str(kannur.id)},
+        )
+        # And so did the categories' - the applications point at these.
+        self.assertEqual(
+            {str(c.id) for c in recruitment.age_categories.all()},
+            {str(categories["U18"].id), str(categories["U21"].id)},
+        )
+
+    # -- 3. a ref naming nothing ----------------------------------
+
+    def test_a_ref_that_names_no_session_in_this_payload_is_refused(self):
+        resp = self._create(
+            self.NEW_SESSIONS,
+            [
+                {
+                    "title": "U18", "min_birth_year": 2012,
+                    "session_refs": ["s-nowhere"],
+                },
+            ],
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(
+            "trial date that isn", str(resp.data).lower(),
+        )
+
+    # -- 5. attend-every-date has no "runs at" --------------------
+
+    def test_session_refs_are_cleared_silently_under_session_mode_all(self):
+        """
+        Not a 400. The player attends every date, so "runs at" has nothing
+        left to say - the same spirit as the session_mode forcing that
+        already drops a stale value rather than arguing with it.
+        """
+        resp = self._create(
+            self.NEW_SESSIONS, self.NEW_CATEGORIES, session_mode="all",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        recruitment = Recruitment.objects.get(
+            id=resp.data["data"]["recruitment_id"]
+        )
+
+        self.assertEqual(recruitment.session_mode, "all")
+        for category in recruitment.age_categories.all():
+            self.assertEqual(
+                category.sessions.count(), 0,
+                f"{category.title} kept a centre link under session_mode=all",
+            )
+
+
+class CategoryGenderValidationTests(APITestCase):
+    """
+    A CATEGORY MAY NARROW THE TRIAL'S GENDER, NEVER CONTRADICT IT.
+
+    Under a boys-only trial a girls' category is unreachable - nobody could
+    ever apply under it - so it is a wizard mistake worth naming rather than
+    something to drop silently. Inheriting (null) and `all` are both fine
+    under any trial gender.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            email="cg_owner@example.com", password="pass1234",
+            username="cg_owner",
+        )
+        accept_current_terms(self.owner)
+        self.org = Organization.objects.create(
+            name="Gender FC", username="genderfc",
+            type=Organization.Type.CLUB,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.sport = Sport.objects.create(
+            name="Football", icon_name="mdi:soccer"
+        )
+        self.position = SportPosition.objects.create(
+            sport=self.sport, name="Striker"
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def _create(self, trial_gender, category_gender):
+        category = {"title": "U15", "min_birth_year": 2011}
+        if category_gender is not None:
+            category["gender"] = category_gender
+
+        return self.client.post(
+            CREATE_URL,
+            {
+                "title": "Gender trials",
+                "short_description": "Who can come",
+                "recruitment_type": "open_trial",
+                "sport_id": str(self.sport.id),
+                "positions": [
+                    {"position_id": str(self.position.id), "is_primary": True}
+                ],
+                "is_paid": False,
+                "gender": trial_gender,
+                "sessions": FUTURE_SESSIONS,
+                "age_categories": [category],
+                "status": "active",
+            },
+            format="json",
+            HTTP_X_ACTOR_TYPE="organization",
+            HTTP_X_ACTOR_ID=str(self.org.id),
+        )
+
+    def _stored_gender(self, resp):
+        recruitment = Recruitment.objects.get(
+            id=resp.data["data"]["recruitment_id"]
+        )
+        return recruitment.age_categories.get().gender
+
+    # -- 4. the contradiction, both ways round --------------------
+
+    def test_a_girls_category_under_a_boys_trial_is_refused(self):
+        resp = self._create("male", "female")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        message = str(resp.data).lower()
+        self.assertIn("boys-only trial", message)
+        self.assertIn("open to all", message)
+
+    def test_a_boys_category_under_a_girls_trial_is_refused(self):
+        resp = self._create("female", "male")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("girls-only trial", str(resp.data).lower())
+
+    # -- 4. the two that are always fine --------------------------
+
+    def test_an_inheriting_category_is_fine_under_a_single_gender_trial(self):
+        """No gender sent at all - the common case, stored as null."""
+        resp = self._create("male", None)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(self._stored_gender(resp))
+
+    def test_a_category_saying_all_is_fine_under_a_single_gender_trial(self):
+        resp = self._create("male", "all")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(self._stored_gender(resp), "all")
+
+    def test_a_split_by_gender_open_trial_stores_both(self):
+        """The format the whole feature exists for: Boys U14 / Girls U14."""
+        resp = self.client.post(
+            CREATE_URL,
+            {
+                "title": "Open trials",
+                "short_description": "Boys and girls",
+                "recruitment_type": "open_trial",
+                "sport_id": str(self.sport.id),
+                "positions": [
+                    {"position_id": str(self.position.id), "is_primary": True}
+                ],
+                "is_paid": False,
+                "gender": "all",
+                "sessions": FUTURE_SESSIONS,
+                "age_categories": [
+                    {
+                        "title": "U14 Boys", "min_birth_year": 2012,
+                        "gender": "male",
+                    },
+                    {
+                        "title": "U14 Girls", "min_birth_year": 2012,
+                        "gender": "female",
+                    },
+                ],
+                "status": "active",
+            },
+            format="json",
+            HTTP_X_ACTOR_TYPE="organization",
+            HTTP_X_ACTOR_ID=str(self.org.id),
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        recruitment = Recruitment.objects.get(
+            id=resp.data["data"]["recruitment_id"]
+        )
+        self.assertEqual(
+            {c.title: c.gender for c in recruitment.age_categories.all()},
+            {"U14 Boys": "male", "U14 Girls": "female"},
+        )
+
+
+class CategoryCentreApplyTests(APITestCase):
+    """
+    WHO x WHERE have to agree at apply time, and this one is a REFUSAL.
+
+    The age check is a soft flag because it is about the PLAYER - arguable,
+    worth letting the org see and decide on. This is the ORG'S OWN SCHEDULE:
+    "U21 doesn't run at Kochi" is a fact, and storing an application against
+    a session that never happens would leave a player holding a pass for a
+    slot nobody is keeping.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.org = Organization.objects.create(
+            name="Apply FC", username="applyfc",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(
+            name="Football", icon_name="mdi:soccer"
+        )
+        self.player = User.objects.create_user(
+            email="cc_player@example.com", password="pass1234",
+            username="cc_player",
+        )
+        accept_current_terms(self.player)
+        UserProfile.objects.create(user=self.player, name="Player")
+
+        self.trial = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            title="Two-centre trials", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            apply_method="goatza",
+            session_mode=Recruitment.SessionMode.CHOOSE_ONE,
+        )
+        self.kochi = _TrialSession.objects.create(
+            recruitment=self.trial, date=date(2030, 6, 15), city="Kochi",
+        )
+        self.kannur = _TrialSession.objects.create(
+            recruitment=self.trial, date=date(2030, 6, 22), city="Kannur",
+        )
+        RecruitmentService._sync_trial_window(self.trial)
+        self.trial.refresh_from_db()
+
+        # U18 everywhere, U21 at Kannur only.
+        self.u18 = RecruitmentAgeCategory.objects.create(
+            recruitment=self.trial, title="U18", min_birth_year=2012,
+        )
+        self.u21 = RecruitmentAgeCategory.objects.create(
+            recruitment=self.trial, title="U21", min_birth_year=2009,
+        )
+        self.u21.sessions.set([self.kannur])
+
+    def _apply(self, category, session):
+        self.client.force_authenticate(user=self.player)
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(
+                f"/recruitments/{self.trial.id}/apply",
+                {
+                    "shared_name": "Player",
+                    "shared_phone": "+919876543210",
+                    "age_category": str(category.id),
+                    "session": str(session.id),
+                },
+                format="json",
+            )
+
+    # -- 6. the pair the schedule forbids ------------------------
+
+    def test_a_category_not_held_at_the_chosen_centre_is_refused(self):
+        resp = self._apply(self.u21, self.kochi)
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(
+            "run at the centre you picked", str(resp.data).lower(),
+        )
+        # NOTHING STORED. A refusal, not a flag.
+        self.assertFalse(
+            RecruitmentApplication.objects.filter(
+                recruitment=self.trial, applicant=self.player
+            ).exists()
+        )
+
+    def test_the_same_category_at_its_own_centre_is_accepted(self):
+        resp = self._apply(self.u21, self.kannur)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        application = RecruitmentApplication.objects.get(
+            recruitment=self.trial, applicant=self.player
+        )
+        self.assertEqual(application.age_category_id, self.u21.id)
+        self.assertEqual(application.session_id, self.kannur.id)
+
+    def test_a_category_linked_to_nothing_runs_at_every_centre(self):
+        """An empty link set is "everywhere", so there is nothing to refuse."""
+        resp = self._apply(self.u18, self.kochi)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            RecruitmentApplication.objects.get(
+                recruitment=self.trial, applicant=self.player
+            ).session_id,
+            self.kochi.id,
+        )
+
+
+class EffectiveGendersTests(APITestCase):
+    """
+    THE GENDERS A TRIAL ACTUALLY TAKES, which is not the same as its own
+    field once categories can carry one.
+
+    The badge and the list filter both read it, and they have to agree: a
+    trial whose only reachable category is a girls' one is a girls' trial
+    however the trial-level field was left, and a female player must not be
+    badged out of a male trial that published a female category.
+    """
+
+    def setUp(self):
+        self.org = Organization.objects.create(
+            name="Effective FC", username="effectivefc",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(
+            name="Football", icon_name="mdi:soccer"
+        )
+
+    def _trial(self, gender):
+        return Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            title="Trials", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            gender=gender,
+        )
+
+    def _category(self, trial, title, gender):
+        return RecruitmentAgeCategory.objects.create(
+            recruitment=trial, title=title, min_birth_year=2010,
+            gender=gender,
+        )
+
+    # -- 7. the helper ------------------------------------------
+
+    def test_no_categories_falls_back_to_the_trials_own_gender(self):
+        trial = self._trial("male")
+
+        self.assertEqual(
+            eligibility_service.effective_genders(trial), {"male"},
+        )
+
+    def test_a_category_with_no_gender_inherits_the_trials(self):
+        trial = self._trial("male")
+        self._category(trial, "U15", None)
+        self._category(trial, "U17", None)
+
+        # Two inheriting categories collapse to the one gender they inherit.
+        self.assertEqual(
+            eligibility_service.effective_genders(trial), {"male"},
+        )
+
+    def test_mixed_categories_give_the_whole_set(self):
+        trial = self._trial("all")
+        self._category(trial, "U14 Boys", "male")
+        self._category(trial, "U14 Girls", "female")
+        self._category(trial, "U16", None)
+
+        self.assertEqual(
+            eligibility_service.effective_genders(trial),
+            {"male", "female", "all"},
+        )
+
+    # -- 7. the badge ------------------------------------------
+
+    def test_a_female_category_on_a_male_trial_passes_a_female_viewer(self):
+        """
+        ONE REACHABLE CATEGORY IS ENOUGH - the same "at least one row
+        matches" reading the age bands get. Before the helper this trial
+        badged her out on the trial-level field alone.
+        """
+        trial = self._trial("male")
+        self._category(trial, "U15 Girls", "female")
+
+        verdict = eligibility_service.evaluate(
+            trial, PlayerContext(gender="female")
+        )
+
+        self.assertNotIn(eligibility_service.REASON_GENDER, verdict.reasons)
+
+    def test_a_male_only_trial_still_badges_a_female_viewer(self):
+        trial = self._trial("male")
+        self._category(trial, "U15", None)
+
+        verdict = eligibility_service.evaluate(
+            trial, PlayerContext(gender="female")
+        )
+
+        self.assertIn(eligibility_service.REASON_GENDER, verdict.reasons)
+
+    def test_an_unknown_viewer_gender_still_passes(self):
+        """Missing data is never a disqualifier - this module's whole stance."""
+        trial = self._trial("male")
+        self._category(trial, "U15 Girls", "female")
+
+        for unknown in ("", None):
+            with self.subTest(gender=unknown):
+                verdict = eligibility_service.evaluate(
+                    trial, PlayerContext(gender=unknown)
+                )
+                self.assertNotIn(
+                    eligibility_service.REASON_GENDER, verdict.reasons
+                )
+
+
+class CategoryGenderListFilterTests(APITestCase):
+    """
+    ?gender= READS THE CATEGORIES, not just the trial's own field.
+
+    Three arms over one join, so the one thing worth asserting beyond
+    membership is that each trial comes back EXACTLY ONCE: a recruitment
+    with two matching categories duplicates across the join without the
+    .distinct() that collapses it.
+    """
+
+    LIST_URL = "/recruitments/list"
+
+    def setUp(self):
+        cache.clear()
+        self.player = User.objects.create_user(
+            email="gf_player@example.com", password="pass1234",
+            username="gf_player",
+        )
+        accept_current_terms(self.player)
+        self.org = Organization.objects.create(
+            name="Filter FC", username="filterfc",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(
+            name="Football", icon_name="mdi:soccer"
+        )
+
+        # A male trial that published a female category: reachable by a girl
+        # even though its own field says male.
+        self.male_with_female_category = self._trial("male", "Male + girls")
+        RecruitmentAgeCategory.objects.create(
+            recruitment=self.male_with_female_category,
+            title="U15 Girls", min_birth_year=2011, gender="female",
+        )
+
+        # A male trial whose categories say nothing: inherits male.
+        self.male_only = self._trial("male", "Male only")
+        RecruitmentAgeCategory.objects.create(
+            recruitment=self.male_only, title="U15", min_birth_year=2011,
+        )
+
+        # No categories at all, open to everyone: the trial's own field is
+        # the whole answer.
+        self.open_no_categories = self._trial("all", "Open, no categories")
+
+        # TWO matching categories - the .distinct() check.
+        self.two_female_categories = self._trial("all", "Two girls' groups")
+        for title in ("U15 Girls", "U17 Girls"):
+            RecruitmentAgeCategory.objects.create(
+                recruitment=self.two_female_categories, title=title,
+                min_birth_year=2009, gender="female",
+            )
+
+    def _trial(self, gender, title):
+        return Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            title=title, recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            gender=gender,
+            published_at=timezone.now(),
+        )
+
+    def _ids(self, **params):
+        self.client.force_authenticate(user=self.player)
+        resp = self.client.get(self.LIST_URL, params)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return [str(r["id"]) for r in resp.data["data"]["results"]]
+
+    # -- 8. the three arms -------------------------------------
+
+    def test_gender_female_reads_the_categories(self):
+        ids = self._ids(gender="female")
+
+        # Arm two: a category that names the gender, whatever the trial says.
+        self.assertIn(str(self.male_with_female_category.id), ids)
+        # Arm three: a category that inherits male is not a girls' group.
+        self.assertNotIn(str(self.male_only.id), ids)
+        # Arm one: no categories, and the trial takes everyone.
+        self.assertIn(str(self.open_no_categories.id), ids)
+        self.assertIn(str(self.two_female_categories.id), ids)
+
+    def test_every_match_is_returned_exactly_once(self):
+        ids = self._ids(gender="female")
+
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertEqual(ids.count(str(self.two_female_categories.id)), 1)
+
+    def test_gender_male_is_the_mirror(self):
+        ids = self._ids(gender="male")
+
+        self.assertIn(str(self.male_only.id), ids)
+        self.assertIn(str(self.male_with_female_category.id), ids)
+        self.assertIn(str(self.open_no_categories.id), ids)
+        # Two girls' groups under an open trial: no arm a boy can match.
+        self.assertNotIn(str(self.two_female_categories.id), ids)
+
+    def test_no_gender_param_filters_nothing(self):
+        ids = self._ids()
+
+        self.assertEqual(len(ids), 4)
+
+    def test_junk_and_all_are_ignored_rather_than_filtering(self):
+        """`all` is not a filter - it is the unfiltered list."""
+        for value in ("all", "other", "", "nonsense"):
+            with self.subTest(gender=value):
+                self.assertEqual(len(self._ids(gender=value)), 4)
+
+
+class CategoryPayloadShapeTests(APITestCase):
+    """
+    What the CLIENT reads back. The wizard round-trips `session_ids` into
+    the links it sends as `session_refs`, so a missing key here is an edit
+    that silently drops every centre link the org set.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.org = Organization.objects.create(
+            name="Shape2 FC", username="shape2fc",
+            type=Organization.Type.CLUB,
+        )
+        self.sport = Sport.objects.create(
+            name="Football", icon_name="mdi:soccer"
+        )
+        self.trial = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            title="Two-centre trials", recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+            session_mode=Recruitment.SessionMode.CHOOSE_ONE,
+            gender="all",
+        )
+        self.kochi = _TrialSession.objects.create(
+            recruitment=self.trial, date=date(2030, 6, 15), city="Kochi",
+        )
+        self.kannur = _TrialSession.objects.create(
+            recruitment=self.trial, date=date(2030, 6, 22), city="Kannur",
+        )
+        RecruitmentService._sync_trial_window(self.trial)
+        self.trial.refresh_from_db()
+
+        self.anywhere = RecruitmentAgeCategory.objects.create(
+            recruitment=self.trial, title="U18", min_birth_year=2012,
+        )
+        self.girls = RecruitmentAgeCategory.objects.create(
+            recruitment=self.trial, title="U21 Girls", min_birth_year=2009,
+            gender="female",
+        )
+        self.girls.sessions.set([self.kannur])
+
+        self.player = User.objects.create_user(
+            email="shape_player@example.com", password="pass1234",
+            username="shape_player",
+        )
+        accept_current_terms(self.player)
+        self.profile = UserProfile.objects.create(
+            user=self.player, name="Player", gender="female",
+        )
+
+    def _categories(self, resp):
+        return {
+            category["title"]: category
+            for category in resp.data["data"]["age_categories"]
+        }
+
+    def _detail(self, user=None):
+        if user is not None:
+            self.client.force_authenticate(user=user)
+        return self.client.get(f"/recruitments/{self.trial.id}/details")
+
+    # -- 9. the two new keys -----------------------------------
+
+    def test_gender_and_session_ids_are_on_every_category(self):
+        resp = self._detail(self.player)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        categories = self._categories(resp)
+
+        # The common case, and it has to be EXPLICIT rather than absent:
+        # null gender inherits, and an empty list means every centre.
+        self.assertIsNone(categories["U18"]["gender"])
+        self.assertEqual(categories["U18"]["session_ids"], [])
+
+        self.assertEqual(categories["U21 Girls"]["gender"], "female")
+        self.assertEqual(
+            categories["U21 Girls"]["session_ids"], [str(self.kannur.id)],
+        )
+
+    def test_viewer_gender_rides_the_authenticated_detail(self):
+        resp = self._detail(self.player)
+
+        self.assertEqual(resp.data["data"]["viewer_gender"], "female")
+
+    def test_an_anonymous_detail_carries_no_viewer_gender(self):
+        """
+        It is the viewer's own profile field. The public payload is
+        cacheable, and a gender does not belong in a response any layer
+        between us and the browser may keep.
+        """
+        self.client.force_authenticate(user=None)
+        resp = self._detail()
+
+        self.assertNotIn("viewer_gender", resp.data["data"])
+
+    def test_an_unset_profile_gender_reads_as_null_not_blank(self):
+        self.profile.gender = ""
+        self.profile.save(update_fields=["gender"])
+
+        resp = self._detail(self.player)
+
+        self.assertIsNone(resp.data["data"]["viewer_gender"])
+
+    def test_the_links_cost_no_query_per_category(self):
+        """
+        `session_ids` reads a prefetch. Without
+        ``age_categories__sessions`` on the list/detail prefetch it is one
+        SELECT per category per card.
+        """
+        queryset = Recruitment.objects.filter(id=self.trial.id).prefetch_related(
+            "age_categories__sessions"
+        )
+        recruitment = queryset.first()
+        # Prime the prefetch, then assert the serializer adds nothing.
+        list(recruitment.age_categories.all())
+
+        with self.assertNumQueries(0):
+            RecruitmentAgeCategorySerializer(
+                recruitment.age_categories.all(), many=True
+            ).data
+
+    def test_the_applicant_payload_carries_the_categorys_gender(self):
+        """The org side shows the word only when the category names one."""
+        fields = ApplicationAgeCategorySerializer().fields
+        self.assertIn("gender", fields)
+
+        data = ApplicationAgeCategorySerializer(self.girls).data
+        self.assertEqual(data["gender"], "female")
+        self.assertIsNone(
+            ApplicationAgeCategorySerializer(self.anywhere).data["gender"]
         )
