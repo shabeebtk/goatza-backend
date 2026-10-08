@@ -69,7 +69,12 @@ CACHE_TTL_SECONDS = 600
 # TRIAL CENTRE rather than the recruitment's single pin, so a v1 entry would
 # keep serving the old number — and the old "Near you" membership — for up to
 # ten minutes after deploy.
-CACHE_VERSION = "v2"
+# v3: the GENDER BADGE changed meaning. It used to read the trial's own field;
+# it now reads the genders its CATEGORIES actually take (effective_genders),
+# so a trial open to everyone whose only category is Girls U16 is a girls'
+# trial. A v2 entry would keep serving the old verdict — and with it the old
+# ranking position, since an ineligible row is sunk ×0.05.
+CACHE_VERSION = "v3"
 
 # The corpus is supposed to stay in the low thousands (§1). If it ever doesn't,
 # scoring everything per request stops being free — so bound the work and SAY

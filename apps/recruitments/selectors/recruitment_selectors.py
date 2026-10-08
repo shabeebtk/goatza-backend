@@ -25,6 +25,10 @@ LIST_PREFETCH_RELATED = (
     "positions__position",
     "media",
     "age_categories",
+    # Which dates each category runs at — the card's category chip reads
+    # it (RecruitmentAgeCategorySerializer.session_ids), so without it that
+    # key costs a query per category per card.
+    "age_categories__sessions",
     "benefits",
     # The location comes along with the dates: trial_session_payload reads
     # it for the editor's own_location key, so without it that key costs a
@@ -47,6 +51,7 @@ class RecruitmentSelector:
         experience_level=None,
         apply_method=None,
         birth_year=None,
+        gender=None,
         position_id=None,
         center=None,
         max_distance_km=None,
@@ -78,6 +83,7 @@ class RecruitmentSelector:
             experience_level=experience_level,
             apply_method=apply_method,
             birth_year=birth_year,
+            gender=gender,
             position_id=position_id,
             center=center,
             max_distance_km=max_distance_km,
@@ -220,6 +226,7 @@ class RecruitmentSelector:
         experience_level=None,
         apply_method=None,
         birth_year=None,
+        gender=None,
         position_id=None,
         center=None,
         max_distance_km=None,
@@ -399,6 +406,33 @@ class RecruitmentSelector:
                 | Q(age_categories__min_birth_year__lte=birth_year),
                 Q(age_categories__max_birth_year__isnull=True)
                 | Q(age_categories__max_birth_year__gte=birth_year),
+            ).distinct()
+
+        # GENDER — keep recruitments a player of this gender can apply to at
+        # all. A CATEGORY MAY NARROW THE TRIAL'S GENDER but a category that
+        # sets none inherits the trial's, so a trial open to everyone whose
+        # only category is Girls U16 is a girls' trial and a boys-only trial
+        # whose categories say nothing is still boys-only. Three arms, OR'd:
+        # no categories at all (the trial's own field decides), a category
+        # that names a gender, or a category that inherits one. `all` and
+        # blank both mean "everyone" and match any asked-for gender. The
+        # related join can duplicate a recruitment across matching
+        # categories, so .distinct() collapses it back — same shape as the
+        # birth-year filter above.
+        if gender in Recruitment.Gender.values and gender != Recruitment.Gender.ALL:
+            open_to_all = [gender, Recruitment.Gender.ALL, ""]
+            queryset = queryset.filter(
+                Q(
+                    age_categories__isnull=True,
+                    gender__in=open_to_all,
+                )
+                | Q(
+                    age_categories__gender__in=[gender, Recruitment.Gender.ALL],
+                )
+                | Q(
+                    age_categories__gender__isnull=True,
+                    gender__in=open_to_all,
+                )
             ).distinct()
 
         # POSITION — unique (recruitment, position) means the join cannot
@@ -711,6 +745,7 @@ class RecruitmentSelector:
             "questions__options",
             "applications",
             "age_categories",
+            "age_categories__sessions",
             "sessions__location",
             "contacts",
             "benefits",

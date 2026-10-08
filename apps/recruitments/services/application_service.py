@@ -11,6 +11,7 @@ from apps.recruitments.models import (
     RecruitmentApplication,
     RecruitmentApplicationAnswer,
     RecruitmentApplicationStatusHistory,
+    TrialSession,
 )
 from apps.recruitments.pass_code import mint_for
 from apps.recruitments.legacy_status import (
@@ -214,6 +215,12 @@ class ApplicationService:
         # form was open is caught here and not stored.
         session_id = ApplicationService._resolve_session(
             recruitment, validated_data.get("session")
+        )
+
+        # WHO x WHERE have to agree. Needs both of the above resolved, which
+        # is why it sits here and not in either of them.
+        ApplicationService._check_category_runs_at(
+            age_category_id, session_id
         )
 
         if existing:
@@ -493,6 +500,41 @@ class ApplicationService:
             raise ValidationError("That date has passed. Pick another.")
 
         return session.id
+
+    @staticmethod
+    def _check_category_runs_at(age_category_id, session_id):
+        """
+        REFUSE an application whose category is not held at the date it
+        picked.
+
+        Unlike the age check this is not a soft flag, and the difference is
+        deliberate: an age mismatch is about the PLAYER — arguable, worth
+        letting the org see and decide on — while this is the ORG'S OWN
+        SCHEDULE. "U21 doesn't run at Kochi" is a fact about the trial, and
+        storing an application against a session that never happens would
+        leave a player with a pass for a slot nobody is holding.
+
+        A category with no linked sessions runs everywhere, so there is
+        nothing to disagree with. Nor is there when the trial has no date to
+        pick (``session_id`` is None on every `all`-mode and non-trial
+        posting), which is also the reading the serializer enforces by
+        clearing session_refs there.
+
+        One query on the through table, and only on a choose_one trial.
+        """
+        if age_category_id is None or session_id is None:
+            return
+
+        linked_session_ids = set(
+            TrialSession.objects
+            .filter(age_categories__id=age_category_id)
+            .values_list("id", flat=True)
+        )
+
+        if linked_session_ids and session_id not in linked_session_ids:
+            raise ValidationError(
+                "That category doesn't run at the centre you picked."
+            )
 
     @staticmethod
     def _age_mismatch(recruitment, applicant, age_category_id):

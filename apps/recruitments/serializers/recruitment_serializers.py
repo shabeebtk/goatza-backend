@@ -56,6 +56,21 @@ class RecruitmentAgeCategoryInputSerializer(
         required=False,
         allow_null=True
     )
+    # Absent / null means "inherit the trial's gender". Only a trial open to
+    # everyone has a reason to send one, splitting its groups into Boys U14 /
+    # Girls U14; the create serializer rejects a value that contradicts the
+    # trial.
+    gender = serializers.ChoiceField(
+        choices=Recruitment.Gender.choices,
+        required=False,
+        allow_null=True
+    )
+    # WHICH DATES this group runs at, as session `ref` handles (see
+    # TrialSessionInputSerializer.ref). Absent or empty means every date.
+    session_refs = serializers.ListField(
+        child=serializers.CharField(max_length=64),
+        required=False
+    )
     reporting_time = serializers.TimeField(
         required=False,
         allow_null=True
@@ -256,6 +271,13 @@ class RecruitmentLocationInputSerializer(serializers.Serializer):
 class TrialSessionInputSerializer(serializers.Serializer):
 
     id = serializers.UUIDField(required=False)
+    # A CLIENT HANDLE, never stored. On a NEW trial the sessions have no ids
+    # yet when the categories arrive in the same payload, so a category names
+    # the date it runs at by this handle (`session_refs`) and the service
+    # resolves it once the rows exist. On an EDIT the client sends the
+    # session's own id as its ref. Any stable string the client invents works
+    # — it only has to agree with what the categories point at.
+    ref = serializers.CharField(max_length=64, required=False)
     title = serializers.CharField(
         max_length=120, required=False, allow_blank=True
     )
@@ -648,6 +670,74 @@ class RecruitmentCreateSerializer(serializers.Serializer):
                 "Duplicate age categories."
             )
 
+        # A CATEGORY MAY NARROW THE TRIAL'S GENDER, NEVER CONTRADICT IT.
+        # Under a boys-only trial a girls' category is unreachable — nobody
+        # could ever apply under it — so it is a wizard mistake worth
+        # naming, not something to silently drop. Only the OPPOSITE gender
+        # is a contradiction: a null category gender just inherits the
+        # trial's, and `all` is accepted under any trial gender — note that
+        # eligibility_service reads such a category as open to everyone, so
+        # `all` on a single-gender trial WIDENS it rather than inheriting.
+        #
+        # The gender the trial will HAVE once this payload is stored: the
+        # one it carries, or — on an edit that leaves the field out, which
+        # keeps the stored value — the one already on the row. Read off the
+        # instance for the same reason the deadline rule below does: a check
+        # against the payload alone would miss exactly the edit that breaks
+        # the invariant.
+        instance_for_gender = self.context.get("recruitment")
+        trial_gender = attrs.get("gender")
+        if trial_gender is None and instance_for_gender is not None:
+            trial_gender = instance_for_gender.gender
+
+        if trial_gender in (
+            Recruitment.Gender.MALE,
+            Recruitment.Gender.FEMALE,
+        ):
+            opposite = (
+                Recruitment.Gender.FEMALE
+                if trial_gender == Recruitment.Gender.MALE
+                else Recruitment.Gender.MALE
+            )
+            if any(
+                category.get("gender") == opposite
+                for category in age_categories
+            ):
+                wording = (
+                    ("boys-only", "girls'")
+                    if trial_gender == Recruitment.Gender.MALE
+                    else ("girls-only", "boys'")
+                )
+                raise serializers.ValidationError(
+                    f"A {wording[0]} trial can't have a {wording[1]} "
+                    "category. Set the trial to open to all first."
+                )
+
+        # WHERE A CATEGORY RUNS only means something when the player picks a
+        # date. Under `all` they attend every one of them, so "runs at" has
+        # nothing left to say — cleared silently, the same way session_mode
+        # itself is forced above rather than argued with.
+        if attrs.get("session_mode") == Recruitment.SessionMode.ALL:
+            for category in age_categories:
+                category.pop("session_refs", None)
+        else:
+            # A ref must name a date in THIS payload. Both handles are
+            # accepted because both are what the client has: a brand-new
+            # date only has its invented `ref`, an existing one sends its id.
+            known_refs = set()
+            for session in sessions:
+                if session.get("ref"):
+                    known_refs.add(session["ref"])
+                if session.get("id"):
+                    known_refs.add(str(session["id"]))
+
+            for category in age_categories:
+                for ref in category.get("session_refs", []):
+                    if ref not in known_refs:
+                        raise serializers.ValidationError(
+                            "A category points at a trial date that "
+                            "isn't in this trial."
+                        )
 
    
         # PAYMENT VALIDATION

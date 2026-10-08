@@ -31,6 +31,19 @@ class RecruitmentPositionMiniSerializer(serializers.ModelSerializer):
 
 
 class RecruitmentAgeCategorySerializer(serializers.ModelSerializer):
+    """
+    One category: WHO a player applies as, and WHERE that runs.
+
+    ``gender`` is null for the common case — the category inherits the
+    trial's. ``session_ids`` is empty for the common case too, which means
+    the category runs at every date; a non-empty list is the subset it is
+    held at. Both are read off prefetches
+    (``age_categories__sessions`` in LIST_PREFETCH_RELATED and in the
+    detail selector), so neither costs a query per card.
+    """
+
+    session_ids = serializers.SerializerMethodField()
+
     class Meta:
         model = RecruitmentAgeCategory
 
@@ -39,8 +52,13 @@ class RecruitmentAgeCategorySerializer(serializers.ModelSerializer):
             "title",
             "min_birth_year",
             "max_birth_year",
+            "gender",
+            "session_ids",
             "reporting_time",
         ]
+
+    def get_session_ids(self, obj):
+        return [str(session.id) for session in obj.sessions.all()]
 
     
 # The age group ON AN APPLICATION — the slice both sides need: which group the
@@ -53,6 +71,7 @@ class ApplicationAgeCategorySerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "title",
+            "gender",
             "reporting_time",
         ]
 
@@ -823,10 +842,12 @@ class RecruitmentViewerDetailSerializer(RecruitmentDetailSerializer):
     """
 
     viewer_birth_year = serializers.SerializerMethodField()
+    viewer_gender = serializers.SerializerMethodField()
 
     class Meta(RecruitmentDetailSerializer.Meta):
         fields = RecruitmentDetailSerializer.Meta.fields + [
             "viewer_birth_year",
+            "viewer_gender",
         ]
 
     def get_viewer_birth_year(self, obj):
@@ -840,6 +861,26 @@ class RecruitmentViewerDetailSerializer(RecruitmentDetailSerializer):
         profile = getattr(actor.user, "profile", None)
         birthdate = getattr(profile, "birthdate", None)
         return birthdate.year if birthdate else None
+
+    def get_viewer_gender(self, obj):
+        """
+        None for an org actor, an anonymous caller, or an unset profile
+        gender — the same three cases as the birth year, and gated the same
+        way (see the class docstring: signed-in detail only).
+
+        It is there so the apply modal can warn on a category's gender the
+        way it already warns on its age band. A WARNING, never a gate: the
+        server records an age mismatch and says nothing about gender, so the
+        client must not turn this into a disabled button.
+        """
+        request = self.context.get("request")
+        actor = getattr(request, "actor", None)
+
+        if not actor or not actor.is_user:
+            return None
+
+        profile = getattr(actor.user, "profile", None)
+        return getattr(profile, "gender", "") or None
 
 
 # OWNER DETAIL SERIALIZER
