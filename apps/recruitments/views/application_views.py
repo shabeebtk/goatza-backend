@@ -137,6 +137,10 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
             status_filter = ",".join(request.query_params.getlist("status"))
             search = request.query_params.get("search", "").strip()
             age_category = request.query_params.get("age_category")
+            # WHICH CENTRE they picked, on a trial that visits several. Read
+            # raw and checked against this recruitment's own sessions in the
+            # selector, exactly like age_category above.
+            session_id = request.query_params.get("session")
 
             # The fee, and the two AGE questions this list answers. The
             # age_category chips above are the group the applicant applied
@@ -192,6 +196,7 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
                     status=status_filter,
                     search=search,
                     age_category=age_category,
+                    session_id=session_id,
                     fee_paid=fee_paid,
                     birth_year_min=birth_year_min,
                     birth_year_max=birth_year_max,

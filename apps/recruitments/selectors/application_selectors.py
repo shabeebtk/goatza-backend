@@ -60,6 +60,7 @@ class ApplicationSelector:
         status=None,
         search=None,
         age_category=None,
+        session_id=None,
         fee_paid=None,
         birth_year_min=None,
         birth_year_max=None,
@@ -85,6 +86,11 @@ class ApplicationSelector:
         ``selected`` / ``not_selected`` / ``waiting``, plus ``attended`` /
         ``not_attended``. It narrows by what somebody SAID, never by what
         the org decided — that is ``status``.
+
+        ``session_id`` is WHICH CENTRE they said they were coming to, on a
+        trial that visits several. It is the gate list: an org running a
+        four-city tour checks in the Kozhikode players at Kozhikode, and
+        three quarters of this list is nothing to do with them.
         """
         queryset = RecruitmentApplication.objects.filter(
             recruitment=recruitment
@@ -117,6 +123,19 @@ class ApplicationSelector:
             }
             if str(age_category) in owned_category_ids:
                 queryset = queryset.filter(age_category_id=age_category)
+
+        # CENTRE FILTER — the date/centre the applicant picked. Same rule as
+        # the age group above: only honour an id this recruitment actually
+        # owns, so junk (or another recruitment's session) is ignored rather
+        # than 500ing on a malformed UUID or, worse, leaking that some other
+        # org's session id exists by filtering on it.
+        if session_id:
+            owned_session_ids = {
+                str(value)
+                for value in recruitment.sessions.values_list("id", flat=True)
+            }
+            if str(session_id) in owned_session_ids:
+                queryset = queryset.filter(session_id=session_id)
 
         # FEE FILTER — tri-state: absent means no filter, and so does junk.
         fee_paid = _as_bool(fee_paid)
