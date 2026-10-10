@@ -41,3 +41,53 @@ def ping():
     """
     logger.info("celery | ping | pong")
     return "pong"
+
+
+@app.task(name="core.heartbeat", acks_late=False, ignore_result=True)
+def heartbeat():
+    """
+    Write "a worker was alive at this moment" to the cache, once a minute.
+
+    THE ONE FAILURE NOTHING ELSE SEES. ``utils.background_jobs`` bounds a sick
+    broker and falls back when a publish fails, but a broker that ACCEPTS the
+    publish proves nothing about anybody consuming it: with the worker dead and
+    Redis healthy, every request succeeds, every log line says "queued", and no
+    email or push ever arrives. This timestamp is what makes that visible \u2014
+    ``worker_state()`` reads it, ``_dispatch`` runs jobs inline when it is old,
+    and /healthz reports it as a component.
+
+    ``timeout=None`` \u2014 NO EXPIRY, on purpose. The reader treats a missing key
+    as "unknown" and keeps publishing (a fresh deploy and a flushed Redis both
+    look like missing), so a key that expired on its own would read as healthy
+    minutes after the worker died. A stale value that lingers IS the signal.
+
+    EVERY FAILURE HERE IS SWALLOWED. A degraded cache must make the heartbeat
+    unknown, never an error: the write is already dropped silently by the
+    resilient backend (core/cache/resilient.py), and the try/except covers
+    anything else. A worker that retried or crashed over its own liveness probe
+    would be the probe taking down the thing it measures.
+
+    ``acks_late=False`` for the reason the other tasks have it (CLAUDE.md,
+    "Background jobs"), plus one of its own: a redelivered heartbeat would
+    write a timestamp from before the crash, which is worse than no write.
+    """
+    # Imported inside the function: this module is imported from
+    # core/__init__.py, before Django has finished setting up.
+    from django.core.cache import cache
+    from django.utils import timezone
+
+    from utils.background_jobs import WORKER_LAST_SEEN_KEY
+
+    now = timezone.now()
+
+    try:
+        # An ISO-8601 string rather than a float: the value of an ops signal is
+        # being readable with `redis-cli GET celery:worker:last_seen` at 3am.
+        cache.set(WORKER_LAST_SEEN_KEY, now.isoformat(), timeout=None)
+    except Exception:
+        logger.warning(
+            "celery | heartbeat | could not write last_seen", exc_info=True
+        )
+        return
+
+    logger.info("celery | heartbeat | last_seen=%s", now.isoformat())

@@ -20,7 +20,8 @@ from apps.recruitments.models import (
 )
 from apps.sports.models import Sport
 from services.location.location_service import LocationService
-from services.storage.factory import get_storage_service
+from shared.tasks import delete_keys
+from utils.background_jobs import enqueue
 from services.storage.validators import (
     allowed_image_extensions,
     allowed_video_extensions,
@@ -527,25 +528,6 @@ class RecruitmentService:
                         f"media[{idx}]: invalid thumbnail source"
                     )
 
-    @staticmethod
-    def _delete_orphaned_assets(public_ids):
-        """
-        Best-effort deletion of stored objects no longer referenced by the
-        recruitment. Never raises — a failed cleanup must not break the request.
-        Scheduled via transaction.on_commit so nothing is destroyed on rollback.
-        """
-        TAG = "RecruitmentService._delete_orphaned_assets"
-        storage = get_storage_service()
-
-        for public_id in public_ids:
-            try:
-                storage.delete_file(public_id)
-            except Exception as exc:
-                logger.warning(
-                    f"{TAG} | Failed to delete asset | "
-                    f"public_id={public_id} | {exc}"
-                )
-
     # -----------------------------------------------------------------
     # NESTED CHILD HELPERS
     # Each helper deletes existing children for the recruitment and
@@ -662,13 +644,15 @@ class RecruitmentService:
             )
 
         # Delete orphaned assets only AFTER the DB transaction commits, so files
-        # are never destroyed if the transaction rolls back. Best-effort.
+        # are never destroyed if the transaction rolls back. enqueue's
+        # on_commit default IS that guarantee — no explicit on_commit here, or
+        # the deferral would be doubled.
+        #
+        # The sweep used to run in this request's own commit hook, which meant
+        # a slow R2 was time the user waited after being told the edit was
+        # saved. storage.delete_keys retries instead of orphaning on a blip.
         if orphaned_public_ids:
-            transaction.on_commit(
-                lambda: RecruitmentService._delete_orphaned_assets(
-                    orphaned_public_ids
-                )
-            )
+            enqueue(delete_keys, (list(orphaned_public_ids),))
 
     @staticmethod
     def _sync_age_categories(

@@ -14,8 +14,9 @@ wrong for a probe Render polls every few seconds, forever:
     service and gets the instance recycled.
 
 It also stays out of ``core.public_urls`` (routed from ``core.urls`` instead):
-that file is an allow-list of anonymous reads of OUR data, and this returns two
-booleans about our own plumbing. See the note at the top of it.
+that file is an allow-list of anonymous reads of OUR data, and this returns a
+handful of one-word verdicts about our own plumbing. See the note at the top of
+it.
 
 RENDER: the Health Check Path must be set to ``/healthz`` in the service's
 dashboard (Settings → Health Check Path). There is no way to declare that from
@@ -43,6 +44,7 @@ from django.http import JsonResponse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
+from utils.background_jobs import worker_state
 from utils.cache import cache_is_degraded
 
 logger = logging.getLogger(__name__)
@@ -116,9 +118,9 @@ def _check_cache():
 @require_GET
 def healthz(request):
     """
-    GET /healthz → 200 {"status": "ok",       "db": "ok",    "redis": "ok"}
-                   200 {"status": "degraded", "db": "ok",    "redis": "degraded"}
-                   503 {"status": "degraded", "db": "error", "redis": "ok"}
+    GET /healthz → 200 {"status": "ok",       "db": "ok",    "redis": "ok",       "worker": "ok"}
+                   200 {"status": "degraded", "db": "ok",    "redis": "degraded", "worker": "unknown"}
+                   503 {"status": "degraded", "db": "error", "redis": "ok",       "worker": "stale"}
 
     THE DATABASE ALONE DECIDES THE STATUS CODE. Postgres is the system of
     record: without it this process can serve nothing and deserves to be
@@ -127,12 +129,26 @@ def healthz(request):
     slow service with an equally slow service, having dropped every in-flight
     request to do it.
 
-    Both checks still run and both are still reported. A probe that stops at
-    the first failure tells you one thing is broken and hides whether the
-    other is too.
+    ``worker`` IS REPORTED AND NEVER ACTED ON, for a sharper version of the
+    same reason. It describes a DIFFERENT PROCESS — the Celery worker, on its
+    own Render service — and recycling this web container would not bring that
+    one back; it would drop every in-flight request to replace a healthy
+    process. A stale worker is also already handled where it does damage:
+    ``utils.background_jobs`` runs jobs inline while it lasts, so the product
+    keeps working. This line is here so somebody can SEE it.
+
+    ``"unknown"`` is the honest answer in three ordinary situations (fresh
+    deploy, flushed Redis, degraded cache) and does NOT mean the worker is
+    down — see ``worker_state``. It must not be alerted on as if it did.
+
+    Every check still runs and every one is still reported. A probe that stops
+    at the first failure tells you one thing is broken and hides whether the
+    others are too.
     """
     db_ok = _check_database()
     cache_ok = _check_cache()
+    # Reads one cache key, writes nothing, and cannot raise.
+    worker = worker_state()
 
     # The status WORD covers both components; the status CODE covers only the
     # one Render should act on.
@@ -156,6 +172,9 @@ def healthz(request):
             "status": OK if healthy else DEGRADED,
             "db": OK if db_ok else ERROR,
             "redis": OK if cache_ok else DEGRADED,
+            # "ok" | "stale" | "unknown". Deliberately NOT folded into
+            # ``status`` or the status code: see the docstring.
+            "worker": worker,
         },
         status=200 if db_ok else 503,
     )

@@ -47,11 +47,12 @@ from apps.matches.models import (
     MatchEntryStat,
     SportMatchStatField,
 )
-from services.storage.factory import get_storage_service
 from services.storage.validators import (
     allowed_image_extensions,
     validate_media,
 )
+from shared.tasks import delete_keys
+from utils.background_jobs import enqueue
 from apps.sports.models import Sport, SportPosition
 from utils.validations import is_valid_uuid
 
@@ -841,15 +842,14 @@ class MatchService:
             if was_played or entry.status == MatchEntry.Status.PLAYED:
                 MatchService.recompute_streak(user)
 
-        # The old image is now unreferenced. Deferred and best-effort, so a
-        # storage outage cannot fail an edit that has already committed.
+        # The old image is now unreferenced. enqueue defers to commit itself,
+        # so a storage outage cannot fail an edit that has already committed —
+        # and the delete now retries instead of orphaning the object.
         if (
             previous_public_id
             and previous_public_id != entry.photo_public_id
         ):
-            transaction.on_commit(
-                lambda: MatchService._delete_orphaned_assets([previous_public_id])
-            )
+            enqueue(delete_keys, ([previous_public_id],))
 
         return entry
 
@@ -882,35 +882,9 @@ class MatchService:
         MatchService.recompute_streak(user)
 
         if public_id:
-            transaction.on_commit(
-                lambda: MatchService._delete_orphaned_assets([public_id])
-            )
+            enqueue(delete_keys, ([public_id],))
 
         return entry
-
-    @staticmethod
-    def _delete_orphaned_assets(public_ids) -> None:
-        """
-        Best-effort deletion of match photos nothing references any more. Never
-        raises — a failed cleanup must not break the request. Scheduled via
-        ``transaction.on_commit`` so nothing is destroyed on a rollback.
-        """
-        TAG = "MatchService._delete_orphaned_assets"
-
-        try:
-            storage = get_storage_service()
-        except Exception as exc:
-            logger.warning(f"{TAG} | Storage unavailable | {exc}")
-            return
-
-        for public_id in public_ids:
-            try:
-                storage.delete_file(public_id)
-            except Exception as exc:
-                logger.warning(
-                    f"{TAG} | Failed to delete asset | "
-                    f"public_id={public_id} | {exc}"
-                )
 
     # =================================================================
     # STREAKS

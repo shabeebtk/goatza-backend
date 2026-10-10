@@ -52,7 +52,14 @@ FUTURE_SESSIONS = [{"date": "2030-06-15"}]
 # Deterministic media host so URL validation is env-independent.
 CLOUD = "democloud"
 
+# What `_cloud_url` below builds, and what MEDIA_PUBLIC_BASE_URL has to be for
+# those URLs to pass `is_valid_media_source` (a plain prefix check). Without
+# the override the suite validated against whatever host the developer's .env
+# happened to carry, which is the opposite of the comment above.
+MEDIA_HOST = "https://media.goatza.test/v1"
 
+
+@override_settings(MEDIA_PUBLIC_BASE_URL=MEDIA_HOST)
 class RecruitmentMediaPipelineTests(APITestCase):
 
     def setUp(self):
@@ -107,10 +114,7 @@ class RecruitmentMediaPipelineTests(APITestCase):
         )
 
     def _cloud_url(self, public_id, ext="jpg"):
-        return (
-            f"https://media.goatza.test/"
-            f"v1/{public_id}.{ext}"
-        )
+        return f"{MEDIA_HOST}/{public_id}.{ext}"
 
     def _valid_media(self, media_type="image", ext="jpg"):
         public_id = self._public_id()
@@ -305,9 +309,13 @@ class RecruitmentMediaPipelineTests(APITestCase):
         )
         update_url = f"/recruitments/{recruitment.id}/update"
 
-        with patch(
-            "apps.recruitments.services.recruitment_service.get_storage_service"
-        ) as mock_get_storage:
+        # PATCHED IN shared.tasks, NOT in recruitment_service. The orphan sweep
+        # moved into the storage.delete_keys task, so the service no longer
+        # imports get_storage_service at all — this patch target is where the
+        # storage service is now reached. The assertion below is unchanged,
+        # because the OUTCOME is unchanged: with Celery off, enqueue runs the
+        # task inline inside the on_commit callback captured here.
+        with patch("shared.tasks.get_storage_service") as mock_get_storage:
             mock_storage = mock_get_storage.return_value
             with self.captureOnCommitCallbacks(execute=True):
                 resp = self.client.patch(
@@ -7277,6 +7285,7 @@ from apps.recruitments.models import TrialSession as _TrialSession
 from apps.recruitments.serializers.recruitment_list_serializers import (
     ApplicationAgeCategorySerializer,
     RecruitmentAgeCategorySerializer,
+    RecruitmentViewerDetailSerializer,
 )
 
 
@@ -7356,9 +7365,14 @@ class CategoryCentreLinkTests(APITestCase):
 
     # The two centres every test below is built on: U18 at Kochi, U21 at
     # Kannur, named by refs the client invented.
+    # Told apart by DATE, not by city: `city` is not a field on the session
+    # input serializer (a centre's city arrives inside the nested `location`
+    # block), so a bare one would be dropped and every row would look alike.
+    KOCHI_DATE = "2030-06-15"
+    KANNUR_DATE = "2030-06-22"
     NEW_SESSIONS = [
-        {"ref": "s-kochi", "date": "2030-06-15", "city": "Kochi"},
-        {"ref": "s-kannur", "date": "2030-06-22", "city": "Kannur"},
+        {"ref": "s-kochi", "date": KOCHI_DATE, "title": "Kochi"},
+        {"ref": "s-kannur", "date": KANNUR_DATE, "title": "Kannur"},
     ]
     NEW_CATEGORIES = [
         {
@@ -7372,10 +7386,10 @@ class CategoryCentreLinkTests(APITestCase):
     ]
 
     def _links(self, recruitment):
-        """{category title: {session city, ...}} - the stored M2M, readably."""
+        """{category title: {session date, ...}} - the stored M2M, readably."""
         return {
             category.title: {
-                session.city for session in category.sessions.all()
+                str(session.date) for session in category.sessions.all()
             }
             for category in recruitment.age_categories.all()
         }
@@ -7392,7 +7406,7 @@ class CategoryCentreLinkTests(APITestCase):
 
         self.assertEqual(
             self._links(recruitment),
-            {"U18": {"Kochi"}, "U21": {"Kannur"}},
+            {"U18": {self.KOCHI_DATE}, "U21": {self.KANNUR_DATE}},
         )
         # One centre each, not "everywhere" - an unresolved ref would have
         # left the set empty, which READS as every centre.
@@ -7407,8 +7421,9 @@ class CategoryCentreLinkTests(APITestCase):
             id=created.data["data"]["recruitment_id"]
         )
 
-        sessions = {s.city: s for s in recruitment.sessions.all()}
-        kochi, kannur = sessions["Kochi"], sessions["Kannur"]
+        sessions = {str(s.date): s for s in recruitment.sessions.all()}
+        kochi = sessions[self.KOCHI_DATE]
+        kannur = sessions[self.KANNUR_DATE]
         categories = {c.title: c for c in recruitment.age_categories.all()}
 
         # The wizard's edit shape: every row carries its id AS its ref, and
@@ -7418,11 +7433,11 @@ class CategoryCentreLinkTests(APITestCase):
             [
                 {
                     "id": str(kochi.id), "ref": str(kochi.id),
-                    "date": "2030-06-15", "city": "Kochi",
+                    "date": self.KOCHI_DATE, "title": "Kochi",
                 },
                 {
                     "id": str(kannur.id), "ref": str(kannur.id),
-                    "date": "2030-06-22", "city": "Kannur",
+                    "date": self.KANNUR_DATE, "title": "Kannur",
                 },
             ],
             [
@@ -7445,7 +7460,7 @@ class CategoryCentreLinkTests(APITestCase):
 
         self.assertEqual(
             self._links(recruitment),
-            {"U18": {"Kochi"}, "U21": {"Kochi"}},
+            {"U18": {self.KOCHI_DATE}, "U21": {self.KOCHI_DATE}},
         )
         # THE IDS SURVIVED. A date that loses its id is deleted and
         # recreated, which SET_NULLs the date every applicant picked.
@@ -7945,15 +7960,50 @@ class CategoryGenderListFilterTests(APITestCase):
         ids = self._ids(gender="male")
 
         self.assertIn(str(self.male_only.id), ids)
-        self.assertIn(str(self.male_with_female_category.id), ids)
         self.assertIn(str(self.open_no_categories.id), ids)
         # Two girls' groups under an open trial: no arm a boy can match.
         self.assertNotIn(str(self.two_female_categories.id), ids)
+
+    def test_the_categories_override_the_trials_own_field_both_ways(self):
+        """
+        A trial whose ONLY category is a girls' one is a girls' trial, even
+        with `gender="male"` on the row itself: there is no category a boy
+        could apply under, so offering it to him is offering nothing.
+
+        The filter and ``effective_genders`` have to agree on that, because
+        one decides what a player SEES and the other what the badge SAYS.
+
+        The API refuses to create this pair in the first place (see
+        CategoryGenderValidationTests) - it is reachable only by writing the
+        rows directly, as this fixture does - so what is pinned here is the
+        SQL's reading of a row that already exists.
+        """
+        self.assertEqual(
+            eligibility_service.effective_genders(
+                self.male_with_female_category
+            ),
+            {"female"},
+        )
+
+        self.assertNotIn(
+            str(self.male_with_female_category.id),
+            self._ids(gender="male"),
+        )
+        self.assertIn(
+            str(self.male_with_female_category.id),
+            self._ids(gender="female"),
+        )
 
     def test_no_gender_param_filters_nothing(self):
         ids = self._ids()
 
         self.assertEqual(len(ids), 4)
+
+    def test_gender_male_returns_only_what_a_boy_can_apply_to(self):
+        self.assertEqual(
+            set(self._ids(gender="male")),
+            {str(self.male_only.id), str(self.open_no_categories.id)},
+        )
 
     def test_junk_and_all_are_ignored_rather_than_filtering(self):
         """`all` is not a filter - it is the unfiltered list."""
@@ -8047,16 +8097,40 @@ class CategoryPayloadShapeTests(APITestCase):
 
         self.assertEqual(resp.data["data"]["viewer_gender"], "female")
 
-    def test_an_anonymous_detail_carries_no_viewer_gender(self):
+    def test_the_public_payload_carries_no_viewer_gender(self):
         """
-        It is the viewer's own profile field. The public payload is
+        It is the viewer's own profile field, so it rides the AUTHENTICATED
+        detail and nothing else: /public/recruitments/<id> is anonymous and
         cacheable, and a gender does not belong in a response any layer
         between us and the browser may keep.
         """
         self.client.force_authenticate(user=None)
-        resp = self._detail()
+        resp = self.client.get(f"/public/recruitments/{self.trial.id}")
 
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertNotIn("viewer_gender", resp.data["data"])
+        self.assertNotIn("viewer_birth_year", resp.data["data"])
+
+    def test_the_viewer_fields_live_on_one_serializer_only(self):
+        """
+        WHERE A FIELD IS DECLARED IS THE GATE. `viewer_gender` sits beside
+        `viewer_birth_year` on the signed-in viewer serializer and nowhere
+        else, so the public payload and the owner's cannot grow it by
+        accident - the same reasoning the owner-only fields are gated by.
+        """
+        self.assertEqual(
+            {"viewer_birth_year", "viewer_gender"}
+            - set(RecruitmentViewerDetailSerializer().fields),
+            set(),
+        )
+
+        for serializer_class in (
+            RecruitmentDetailSerializer, RecruitmentOwnerDetailSerializer,
+        ):
+            with self.subTest(serializer=serializer_class.__name__):
+                fields = set(serializer_class().fields)
+                self.assertNotIn("viewer_gender", fields)
+                self.assertNotIn("viewer_birth_year", fields)
 
     def test_an_unset_profile_gender_reads_as_null_not_blank(self):
         self.profile.gender = ""

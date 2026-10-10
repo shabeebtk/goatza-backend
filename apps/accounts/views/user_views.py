@@ -26,7 +26,6 @@ from apps.moderation.selectors.profile_visibility import (
     hide_if_blocked,
     profile_block_state,
 )
-from services.storage.factory import get_storage_service
 from services.storage.validators import (
     allowed_image_extensions,
     validate_media,
@@ -43,6 +42,8 @@ from apps.accounts.services.age_service import (
 from services.location.location_service import LocationService
 from apps.usernames.exceptions import UsernameTaken
 from apps.usernames.services.username_service import UsernameService
+from shared.tasks import delete_keys
+from utils.background_jobs import enqueue
 from utils.validations import validate_username_format
 from core.constant import TYPE_USER
 from core.actor import Actor
@@ -256,15 +257,19 @@ class UpdateUserMediaAPIView(APIView):
             except UserProfile.DoesNotExist:
                 return response_data(False, error="Profile not found", status_code=404)
 
-            storage = get_storage_service()
             data = serializer.validated_data
 
             update_fields = []
 
+            # Keys this request orphans, collected and handed over in ONE job
+            # at the end: deleting a profile photo and a cover photo in the
+            # same call is one R2 cleanup, not two.
+            orphaned_keys = []
+
             #  DELETE PROFILE PHOTO
             if data.get("is_delete_profile"):
                 if profile.profile_photo_public_id:
-                    storage.delete_file(profile.profile_photo_public_id)
+                    orphaned_keys.append(profile.profile_photo_public_id)
 
                 profile.profile_photo = ""
                 profile.profile_photo_public_id = ""
@@ -273,7 +278,7 @@ class UpdateUserMediaAPIView(APIView):
             # DELETE COVER PHOTO
             if data.get("is_delete_cover"):
                 if profile.cover_photo_public_id:
-                    storage.delete_file(profile.cover_photo_public_id)
+                    orphaned_keys.append(profile.cover_photo_public_id)
 
                 profile.cover_photo = ""
                 profile.cover_photo_public_id = ""
@@ -315,6 +320,15 @@ class UpdateUserMediaAPIView(APIView):
             if update_fields:
                 update_fields.append("updated_at")
                 profile.save(update_fields=update_fields)
+
+            # AFTER the row is saved, and that order now matters. The delete
+            # used to run before the save, so a save that failed left the
+            # column pointing at an object that no longer existed — a broken
+            # image with no way back. enqueue defers past a commit when one is
+            # open and dispatches immediately when none is, so the object goes
+            # only once this view has done its own work.
+            if orphaned_keys:
+                enqueue(delete_keys, (orphaned_keys,))
 
             return response_data(success=True, message="Media updated successfully")
 

@@ -1,15 +1,14 @@
 from django.db import transaction
 from django.db.models import F, Value
 from django.db.models.functions import Greatest
-from services.storage.factory import get_storage_service
 from apps.posts.models import Comment, Post
+from shared.tasks import delete_folder
+from utils.background_jobs import enqueue
     
 class PostService:
 
     @staticmethod
     def delete_post(post_id, actor):
-        storage = get_storage_service()
-
         # get post
         if actor.is_user:
             post = Post.objects.filter(
@@ -37,10 +36,14 @@ class PostService:
                 if first_media and first_media.public_id:
                     folder_path = "/".join(first_media.public_id.split("/")[:-1])
 
-                    try:
-                        storage.delete_folder_data(folder_path)
-                    except Exception as e:
-                        print(f"Folder delete failed: {e}")
+                    # AFTER COMMIT, which it was not before: the sweep used to
+                    # run here, inside the atomic block, so a transaction that
+                    # rolled back below left the post in the database with its
+                    # media already deleted from R2. enqueue's on_commit
+                    # default is what fixes that — the job is published only if
+                    # this block commits. No try/except: enqueue never raises
+                    # into its caller.
+                    enqueue(delete_folder, (folder_path,))
 
                 #  delete DB
                 deleted_count, _ = post.delete()

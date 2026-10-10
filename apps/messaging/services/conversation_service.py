@@ -1,4 +1,3 @@
-from asgiref.sync import async_to_sync
 from django.template.defaultfilters import default
 from django.db import transaction, IntegrityError
 from django.db.models import Q, Count
@@ -10,6 +9,7 @@ from apps.organization.models import Organization
 from apps.moderation.services.block_guard import require_not_blocked
 from apps.moderation.selectors.blocked_filters import blocked_id_sets
 from django.utils import timezone
+from utils.realtime import safe_group_send
 
 
 class ConversationService:
@@ -370,27 +370,23 @@ class ConversationService:
         Best-effort by design: a dead channel layer must never fail a read the
         user has already been shown as done. The ticks then catch up from
         ``is_read`` the next time the thread loads.
+
+        That guarantee used to be a local ``try/except Exception: pass``, which
+        held the request open but threw the reason away — a channel layer that
+        had been dead for a week looked exactly like one that worked.
+        ``safe_group_send`` keeps the behaviour and logs the failure.
         """
-        from channels.layers import get_channel_layer
-
-        try:
-            channel_layer = get_channel_layer()
-
-            if channel_layer is None:
-                return
-
-            async_to_sync(channel_layer.group_send)(
-                f"chat_{conversation.id}",
-                {
-                    "type": "conversation_read",
-                    "reader_id": reader_id,
-                    # isoformat, not the raw datetime: this dict is msgpack'd
-                    # onto the channel layer, which only carries primitives.
-                    "last_read_at": read_at.isoformat(),
-                }
-            )
-        except Exception:
-            pass
+        safe_group_send(
+            f"chat_{conversation.id}",
+            {
+                "type": "conversation_read",
+                "reader_id": reader_id,
+                # isoformat, not the raw datetime: this dict is msgpack'd
+                # onto the channel layer, which only carries primitives.
+                "last_read_at": read_at.isoformat(),
+            },
+            tag="messaging.conversation_read",
+        )
 
     # ----------------------------------------
     # MESSAGE TARGET SEARCH
