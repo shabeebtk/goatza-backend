@@ -6,15 +6,26 @@ THIN, per CLAUDE.md ("Background jobs"): a task loads what it needs by id and
 calls an existing service or command, so the same code runs from a view, a
 management command or a worker.
 
-NOTHING IS SCHEDULED YET. CELERY_BEAT_SCHEDULE stays empty and Render Cron
-drives both of these for now:
+BEAT DRIVES BOTH OF THESE (CELERY_BEAT_SCHEDULE in core/settings.py):
 
-    */5 * * * *  python manage.py dispatch_announcements
-    0 * * * *    python manage.py send_trial_reminders
+    recruitments.dispatch_announcements   every 5 minutes
+    recruitments.send_trial_reminders     hourly, at minute 0 IST
 
-These tasks exist so that turning Celery on later is a schedule entry and not a
-code change — each calls the very same command its cron line does, so the two
-paths can never drift.
+They used to be Render Cron lines running the commands directly. THE COMMANDS
+REMAIN, unchanged and still the way to run either job by hand — with
+``--dry-run``, with a ``--limit``, or to catch up after an outage:
+
+    python manage.py dispatch_announcements
+    python manage.py send_trial_reminders
+
+That is the whole point of the wrapper being this thin: one implementation, two
+triggers, so a hand-run and a scheduled run can never drift. Retire the Render
+Cron services only once the worker's heartbeat reads "ok" at /healthz — until
+then they are the thing actually doing the work.
+
+``send_trial_reminders`` MUST STAY AT MINUTE 0: the command is gated on the
+hour, so an entry at :30 would run on time and find the window shut, every
+hour, reporting nothing wrong.
 """
 
 import logging

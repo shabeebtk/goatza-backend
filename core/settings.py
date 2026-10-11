@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from datetime import timedelta
 
+from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 load_dotenv()
@@ -610,11 +611,39 @@ FIREBASE_CLIENT_ID = os.getenv("FIREBASE_CLIENT_ID")
 
 
 # --------- REDIS CHANNEL --------
+# A HOST IS A DICT, NOT A BARE URL, so it can carry connection kwargs.
+# channels_redis>=4 (4.3.0 installed) runs each dict entry through
+# ``decode_hosts`` -> ``create_pool``, which pops "address" and hands the rest
+# to ``redis.asyncio.ConnectionPool.from_url(address, **rest)`` — so anything
+# redis-py accepts there can go here. A plain string entry still works and is
+# what this was; it just has no way to express a timeout.
+#
+# socket_connect_timeout BOUNDS A DEAD REDIS. Without it the TCP connect for a
+# realtime fan-out waits on the OS (minutes on a blackholed host, not a
+# refused one), and it is a REQUEST that waits: _trigger_realtime runs inline
+# after the message is saved. utils.realtime.safe_group_send already keeps the
+# failure from reaching the client — this is what keeps the failure from being
+# slow. Same 2s shape as the broker and cache connect timeouts.
+#
+# socket_timeout IS DELIBERATELY NOT SET. It would apply to every read on the
+# socket, and a consumer waiting for messages sits in a BLPOP with
+# ``RedisChannelLayer.brpop_timeout`` = 5 seconds (channels_redis/core.py). A
+# 2-second read timeout would raise redis.TimeoutError out of every idle
+# receive and break the websockets this layer exists to serve. The publish side
+# gets its bound from the connect timeout; the consumer side must not be
+# bounded here at all.
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [os.getenv("REDIS_URL")],
+            "hosts": [
+                {
+                    "address": os.getenv("REDIS_URL"),
+                    "socket_connect_timeout": int(
+                        os.getenv("CHANNEL_LAYER_CONNECT_TIMEOUT") or 2
+                    ),
+                }
+            ],
         },
     },
 }
@@ -723,13 +752,112 @@ CELERY_WORKER_SEND_TASK_EVENTS = False
 # and the Sentry-on-ERROR behaviour with it.
 CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 
-CELERY_BEAT_SCHEDULE = {}
+# EVERY TIME HERE IS IST (Asia/Kolkata), because CELERY_TIMEZONE is — see
+# above. `crontab(hour=2, minute=30)` means 02:30 India, not 02:30 UTC.
+# Django's TIME_ZONE stays UTC and is unaffected.
+#
+# Beat runs as a process: without `celery -A core beat` (or `-B` on the worker)
+# nothing here fires. That is the default state of a checkout, and it is safe —
+# no heartbeat reads as "unknown", which changes nothing
+# (utils.background_jobs.worker_state).
+#
+# EVERY ENTRY CARRIES `expires`, set at roughly its own interval. Without it, a
+# worker that was down for an hour comes back to sixty queued heartbeats and
+# twelve announcement drains and runs the lot; with it, the broker drops the
+# ticks that are already pointless and only the newest survives. The nightly
+# jobs get a generous window (an hour or more) because a purge that runs at
+# 04:00 instead of 03:00 is still the night's purge, while a heartbeat two
+# minutes late is worse than no heartbeat at all.
+#
+# The commands behind these entries all remain runnable by hand; the tasks are
+# thin `call_command` wrappers, and every one of them is idempotent (each
+# task's docstring says how).
+CELERY_BEAT_SCHEDULE = {
+    # Drain the announcement outbox. Every 5 minutes, expiring just under
+    # that: a drain that waited out its slot is replaced by the next one,
+    # which picks up the same PENDING rows anyway.
+    "recruitments.dispatch_announcements": {
+        "task": "recruitments.dispatch_announcements",
+        "schedule": crontab(minute="*/5"),
+        "options": {"expires": 240},
+    },
+
+    # Trial reminders, hourly ON THE HOUR. The command is GATED ON THE HOUR
+    # itself, so this must stay at minute 0 — moved to :30 it would run and
+    # find the window shut, every hour, silently. Expires in 55 minutes: late
+    # is fine, but it must never survive into the next hour's window.
+    "recruitments.send_trial_reminders": {
+        "task": "recruitments.send_trial_reminders",
+        "schedule": crontab(hour="*", minute=0),
+        "options": {"expires": 3300},
+    },
+
+    # ── Nightly, spaced so two jobs never spend the Places budget or walk the
+    # same rows at the same minute ──────────────────────────────────────────
+
+    # 02:30 IST — refresh stale coordinates, expire dormant ones. Bounded by
+    # PLACES_DAILY_CAP_DETAILS (1000), which is also what stops a redelivered
+    # run spending the budget twice: the second one hits the cap and exits.
+    "places.refresh_place_coords": {
+        "task": "places.refresh_place_coords",
+        "schedule": crontab(hour=2, minute=30),
+        "options": {"expires": 3600},
+    },
+
+    # 03:00 IST — purge accounts whose 30-day deletion window is up.
+    "accounts.purge_deleted_accounts": {
+        "task": "accounts.purge_deleted_accounts",
+        "schedule": crontab(hour=3, minute=0),
+        "options": {"expires": 3600},
+    },
+
+    # 03:15 IST — purge minors no guardian ever approved. AFTER the account
+    # purge on purpose: it calls that command's own _purge, and the two should
+    # not be anonymizing rows through the same code path concurrently.
+    "guardians.purge_unconsented": {
+        "task": "guardians.purge_unconsented",
+        "schedule": crontab(hour=3, minute=15),
+        "options": {"expires": 3600},
+    },
+
+    # 03:30 IST — sweep any profile still holding a precise location. Normally
+    # selects nothing: it is a backfill kept on the schedule as a guard (see
+    # the task docstring). Last, because it spends the same Places budget as
+    # the 02:30 job and is the one that can afford to find none left.
+    "accounts.downgrade_precise_locations": {
+        "task": "accounts.downgrade_precise_locations",
+        "schedule": crontab(hour=3, minute=30),
+        "options": {"expires": 3600},
+    },
+
+    # ── Liveness ────────────────────────────────────────────────────────────
+
+    # 60s against a 180s stale threshold — three ticks of slack, so one missed
+    # beat (a worker restart, a deploy, a slow Redis) does not read as a dead
+    # worker. Expires in 120s: a heartbeat is a statement about NOW, and a
+    # stale tick executed late would write a fresh timestamp for a moment that
+    # has passed — reporting a dead worker as healthy.
+    "core.heartbeat": {
+        "task": "core.heartbeat",
+        "schedule": 60.0,
+        "options": {"expires": 120},
+    },
+}
 CELERY_BEAT_SCHEDULE_FILENAME = str(BASE_DIR / "celerybeat-schedule")
 
 # Seconds the dispatch helper stops trying the broker after a publish failure.
 CELERY_DISPATCH_FAILURE_COOLDOWN = int(
     os.getenv("CELERY_DISPATCH_FAILURE_COOLDOWN") or 60
 )
+
+# How old core.heartbeat's timestamp may get before a worker counts as dead and
+# jobs run inline instead of being published. Three heartbeat intervals.
+#
+# Raise it if deploys or restarts are slow enough to trip it; LOWERING it below
+# ~2 intervals makes a single missed beat inline every job in the fleet. Only a
+# PRESENT-and-old timestamp counts — a missing one is "unknown" and changes
+# nothing. See utils.background_jobs.worker_state.
+CELERY_WORKER_STALE_AFTER = int(os.getenv("CELERY_WORKER_STALE_AFTER") or 180)
 # ------ CELERY END ------/
 
 AUTH_COOKIE_DOMAIN = os.getenv("AUTH_COOKIE_DOMAIN")  # None = host-only

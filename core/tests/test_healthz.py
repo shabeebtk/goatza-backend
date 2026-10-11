@@ -21,13 +21,29 @@ therefore a named component at 200. An unreachable Postgres is still a 503,
 because without it this process can serve nothing.
 """
 
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.core.cache import cache
+from django.test import TestCase, override_settings
+from django.utils import timezone
+
+from utils.background_jobs import WORKER_LAST_SEEN_KEY
 
 HEALTH_URL = "/healthz"
 
+# The worker field is read out of the cache, so the cache has to round-trip for
+# these to mean anything. LocMemCache makes them independent of whether the
+# developer has REDIS_URL set and Redis actually running.
+LOCMEM = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "healthz-worker-tests",
+    }
+}
 
+
+@override_settings(CACHES=LOCMEM)
 class HealthzTests(TestCase):
 
     # =================================================================
@@ -41,7 +57,11 @@ class HealthzTests(TestCase):
 
         self.assertEqual(res.status_code, 200)
         self.assertEqual(
-            res.json(), {"status": "ok", "db": "ok", "redis": "ok"}
+            res.json(),
+            # "worker" is "unknown" because no heartbeat has been written in
+            # this process — which is NOT a failure and must not read as one.
+            # WorkerHeartbeatHealthzTests below pins all three worker states.
+            {"status": "ok", "db": "ok", "redis": "ok", "worker": "unknown"},
         )
 
     def test_the_probe_needs_no_authorization_header(self):
@@ -85,7 +105,11 @@ class HealthzTests(TestCase):
 
         self.assertEqual(res.status_code, 200)
         self.assertEqual(
-            res.json(), {"status": "degraded", "db": "ok", "redis": "degraded"}
+            res.json(),
+            {
+                "status": "degraded", "db": "ok",
+                "redis": "degraded", "worker": "unknown",
+            },
         )
 
     def test_a_cache_that_loses_the_value_is_also_degraded(self):
@@ -112,7 +136,11 @@ class HealthzTests(TestCase):
 
         self.assertEqual(res.status_code, 503)
         self.assertEqual(
-            res.json(), {"status": "degraded", "db": "error", "redis": "ok"}
+            res.json(),
+            {
+                "status": "degraded", "db": "error",
+                "redis": "ok", "worker": "unknown",
+            },
         )
 
     def test_one_failure_does_not_mask_the_other_component(self):
@@ -137,7 +165,10 @@ class HealthzTests(TestCase):
         self.assertEqual(res.status_code, 503)
         self.assertEqual(
             res.json(),
-            {"status": "degraded", "db": "error", "redis": "degraded"},
+            {
+                "status": "degraded", "db": "error",
+                "redis": "degraded", "worker": "unknown",
+            },
         )
 
     def test_no_exception_detail_reaches_the_body(self):
@@ -152,6 +183,97 @@ class HealthzTests(TestCase):
             res = self.client.get(HEALTH_URL)
 
         self.assertEqual(
-            sorted(res.json().keys()), ["db", "redis", "status"]
+            sorted(res.json().keys()), ["db", "redis", "status", "worker"]
         )
         self.assertNotIn("password", res.content.decode())
+
+
+@override_settings(CACHES=LOCMEM, CELERY_WORKER_STALE_AFTER=180)
+class WorkerHeartbeatHealthzTests(TestCase):
+    """
+    The ``worker`` component: reported in every state, acted on in none.
+
+    A DEAD WORKER IS NOT THIS CONTAINER'S FAULT AND NOT ITS FIX. It is a
+    different process on a different Render service; answering non-200 here
+    would have Render recycle a healthy web container, drop every in-flight
+    request to do it, and still not bring the worker back. The job backlog is
+    already handled where it does damage — utils.background_jobs runs jobs
+    inline while the heartbeat is stale — so this field exists to be SEEN.
+    """
+
+    def setUp(self):
+        cache.clear()
+
+    def _write_heartbeat(self, age_seconds):
+        cache.set(
+            WORKER_LAST_SEEN_KEY,
+            (timezone.now() - timedelta(seconds=age_seconds)).isoformat(),
+            timeout=None,
+        )
+
+    def test_a_fresh_heartbeat_reports_ok(self):
+        self._write_heartbeat(age_seconds=5)
+
+        res = self.client.get(HEALTH_URL)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["worker"], "ok")
+        self.assertEqual(res.json()["status"], "ok")
+
+    def test_a_stale_worker_is_reported_at_200_and_does_not_degrade_the_status(self):
+        # The load-bearing assertion in this file for the worker field.
+        self._write_heartbeat(age_seconds=400)
+
+        res = self.client.get(HEALTH_URL)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["worker"], "stale")
+        self.assertEqual(res.json()["status"], "ok")
+
+    def test_no_heartbeat_is_unknown_at_200(self):
+        # A fresh deploy and a flushed Redis both look like this, and neither
+        # is a dead worker. It must not be alerted on as if it were.
+        res = self.client.get(HEALTH_URL)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["worker"], "unknown")
+        self.assertEqual(res.json()["status"], "ok")
+
+    def test_the_status_code_still_comes_from_the_database_alone(self):
+        self._write_heartbeat(age_seconds=400)
+        broken = MagicMock()
+        broken.cursor.side_effect = Exception("could not connect to server")
+
+        for state, age in (("ok", 5), ("stale", 400)):
+            with self.subTest(worker=state):
+                self._write_heartbeat(age_seconds=age)
+
+                healthy = self.client.get(HEALTH_URL)
+                self.assertEqual(healthy.status_code, 200)
+                self.assertEqual(healthy.json()["worker"], state)
+
+                with patch("core.views.health_views.connection", broken):
+                    sick = self.client.get(HEALTH_URL)
+
+                # 503 because of Postgres, never because of the worker.
+                self.assertEqual(sick.status_code, 503)
+                self.assertEqual(sick.json()["worker"], state)
+
+    def test_a_dead_cache_makes_the_worker_unknown_not_stale(self):
+        """
+        The probe is polled every few seconds forever, so the worker check has
+        to be unable to break it. It cannot: ``worker_state`` swallows its own
+        cache failures and answers "unknown", which is also the honest answer —
+        a web process that cannot reach Redis knows nothing about the worker,
+        and must not guess "stale" and inline every job in the fleet.
+        """
+        broken = MagicMock()
+        broken.get.side_effect = ConnectionError("redis is gone")
+        broken.set.side_effect = ConnectionError("redis is gone")
+
+        with patch("core.views.health_views.cache", broken),                 patch("utils.background_jobs.cache", broken):
+            res = self.client.get(HEALTH_URL)
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["worker"], "unknown")
+        self.assertEqual(res.json()["redis"], "degraded")

@@ -13,12 +13,13 @@ from apps.organization.serializers.organization_serializers import (
 from apps.organization.serializers.update_organization_serializer import UpdateOrganizationSerializer
 from utils.response import response_data
 from utils.validations import is_valid_uuid
-from services.storage.factory import get_storage_service
 from services.storage.validators import (
     allowed_image_extensions,
     validate_media,
     with_cache_buster,
 )
+from shared.tasks import delete_keys
+from utils.background_jobs import enqueue
 from apps.organization.services.organization_member_service import OrganizationMemberService
 from apps.connections.services.follow_services import FollowService
 from apps.moderation.selectors.profile_visibility import (
@@ -278,14 +279,17 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
                 )
 
             profile = org.profile
-            storage = get_storage_service()
 
             update_fields = []
+
+            # Keys this request orphans, handed over in ONE job at the end:
+            # clearing a logo and a cover in the same call is one R2 cleanup.
+            orphaned_keys = []
 
             # DELETE LOGO
             if data.get("is_delete_logo"):
                 if profile.logo_public_id:
-                    storage.delete_file(profile.logo_public_id)
+                    orphaned_keys.append(profile.logo_public_id)
 
                 profile.logo = ""
                 profile.logo_public_id = ""
@@ -295,7 +299,7 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
             # DELETE COVER
             if data.get("is_delete_cover"):
                 if profile.cover_image_public_id:
-                    storage.delete_file(profile.cover_image_public_id)
+                    orphaned_keys.append(profile.cover_image_public_id)
 
                 profile.cover_image = ""
                 profile.cover_image_public_id = ""
@@ -341,6 +345,12 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
             if update_fields:
                 update_fields.append("updated_at")
                 profile.save(update_fields=update_fields)
+
+            # AFTER the row is saved, for the reason the user-profile view
+            # gives: the delete used to run first, so a failed save left the
+            # column pointing at an object that was already gone.
+            if orphaned_keys:
+                enqueue(delete_keys, (orphaned_keys,))
 
             return response_data(
                 success=True,

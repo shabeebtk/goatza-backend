@@ -3,9 +3,9 @@ from django.db import transaction
 from django.utils import timezone
 from apps.notifications.models import Notification
 from apps.notifications.services.deeplink_service import build_notification_url
-from apps.notifications.services.fcm_service import FCMService
 from apps.accounts.models import User
 from apps.organization.models import OrganizationMember
+from utils.background_jobs import enqueue
 
 # A single recruitment can attract hundreds of applies; only one push per
 # recruitment is sent within this window (extra rows are still saved so the
@@ -364,12 +364,34 @@ def build_notification_payload(notification: "Notification") -> dict:
 
 def _dispatch(notification: "Notification") -> None:
     """
-    Build payload and fan out push to all relevant recipient users.
-    Wraps FCMService so callers don't need to think about user vs org.
+    Hand the push for `notification` to the worker.
+
+    This used to build the payload and call FCMService right here, on the
+    request thread: one HTTPS round trip to Firebase per recipient, inside the
+    request that created the row. ``notifications.push`` does the same work
+    outside it. The in-app row is already committed by then, so a broker or FCM
+    that is down costs the push and never the notification.
+
+    An ID, NOT THE INSTANCE: the serializer is JSON (CLAUDE.md, "Background
+    jobs") and the task reloads the row with the related columns the payload
+    needs.
+
+    ``enqueue`` defaults to ``on_commit=True``, which is what makes one line
+    correct at every call site. Some of the callers below create the row inside
+    ``transaction.atomic()``; others are themselves already running inside an
+    ``on_commit`` callback. Deferred, the first group cannot hand the worker an
+    id for a row it would not find; and because Django executes the callback
+    immediately when no transaction is open — which is the case while commit
+    hooks are running — the second group still dispatches at once. So DO NOT
+    ADD ANOTHER ``transaction.on_commit`` around this: it would not be wrong,
+    it would be a second hop that reads as if the deferral mattered twice.
     """
-    payload = build_notification_payload(notification)
-    for user in _get_recipient_users(notification):
-        FCMService.send_to_user(user, payload)
+    # Imported here, not at module scope: apps/notifications/tasks.py imports
+    # this module for the two helpers the task calls, so a top-level import
+    # would be a cycle. After the first call this is a sys.modules lookup.
+    from apps.notifications.tasks import push_notification
+
+    enqueue(push_notification, (str(notification.id),))
 
 
 # ─────────────────────────────────────────────

@@ -14,9 +14,9 @@ fan-out and push happen in exactly one place.
 
 from django.utils import timezone
 from django.db import transaction
-from asgiref.sync import async_to_sync
 
 from apps.messaging.models import Message, Conversation, ConversationParticipant
+from apps.messaging.tasks import push_message
 from apps.messaging.selectors.share_selectors import (
     ShareViewer,
     is_org_profile_shareable,
@@ -36,12 +36,6 @@ from apps.messaging.services.exceptions import (
 )
 from apps.feed.services.affinity_services import AffinityService
 from apps.moderation.services.block_guard import require_not_blocked
-from apps.notifications.services.deeplink_service import build_conversation_url
-from apps.notifications.services.fcm_service import FCMService
-from apps.notifications.services.notification_service import (
-    NotificationService,
-    get_org_admin_users,
-)
 from services.storage.metadata import MAX_DIMENSION, clamp_int
 from services.storage.validators import (
     extract_storage_key,
@@ -49,6 +43,8 @@ from services.storage.validators import (
     is_valid_media_source,
     same_storage_folder,
 )
+from utils.background_jobs import enqueue
+from utils.realtime import safe_group_send
 
 # Chat images. No "heic": the stored object is the byte-for-byte file the
 # browser uploaded and nothing transcodes it on delivery, so a .heic bubble
@@ -588,16 +584,22 @@ class MessageService:
 
     @staticmethod
     def _trigger_realtime_delete(conversation, message):
-        from channels.layers import get_channel_layer
+        """
+        Tell the open chat window and the conversation lists that a message is
+        gone.
 
-        channel_layer = get_channel_layer()
-
-        async_to_sync(channel_layer.group_send)(
+        BEST EFFORT, for the same reason as ``_trigger_realtime``: the row is
+        already flagged deleted in Postgres, so losing this costs an open
+        window the live removal until its next fetch. It must not cost the
+        unsend itself — the user was already shown the message disappearing.
+        """
+        safe_group_send(
             f"chat_{conversation.id}",
             {
                 "type": "message_deleted",
                 "message_id": str(message.id),
-            }
+            },
+            tag="messaging.message_deleted",
         )
 
         # Same conversation-list nudge the send path uses.
@@ -607,13 +609,14 @@ class MessageService:
         for participant in participants:
             recipient_id = participant.user_id or participant.org_id
             if recipient_id:
-                async_to_sync(channel_layer.group_send)(
+                safe_group_send(
                     f"user_notifications_{recipient_id}",
                     {
                         "type": "notification_message",
                         "notification_type": "conversation_updated",
                         "conversation_id": str(conversation.id),
-                    }
+                    },
+                    tag="messaging.conversation_updated",
                 )
 
     # VALIDATION
@@ -677,10 +680,18 @@ class MessageService:
     # ----------------------------------------
     @staticmethod
     def _trigger_realtime(conversation, message):
-        from channels.layers import get_channel_layer
-        from apps.messaging.serializers.message_serializers import MessageSerializer
+        """
+        Push the new message to the open chat window and nudge every
+        participant's conversation list.
 
-        channel_layer = get_channel_layer()
+        BEST EFFORT, through ``safe_group_send``. The message row is already
+        committed when this runs; a dead channel layer loses the live bubble
+        and the list reorder, and the client picks both up on its next fetch or
+        socket reconnect. It used to lose the request instead — a bare
+        group_send raised ConnectionError out of here, the sender saw their
+        delivered message marked failed, and sent it again.
+        """
+        from apps.messaging.serializers.message_serializers import MessageSerializer
 
         # One group_send serves every socket in the room, so the payload is
         # rendered with no viewer: previews that depend on who is looking
@@ -692,7 +703,7 @@ class MessageService:
         # ----------------------------------------
         # 🔥 SEND CHAT MESSAGE
         # ----------------------------------------
-        async_to_sync(channel_layer.group_send)(
+        safe_group_send(
             f"chat_{conversation.id}",
             {
                 "type": "chat_message",
@@ -707,7 +718,8 @@ class MessageService:
                 "content": payload["content"],
                 "sender": payload["sender"],
                 "created_at": payload["created_at"],
-            }
+            },
+            tag="messaging.chat_message",
         )
 
         # Notify participants for conversation list update
@@ -718,13 +730,14 @@ class MessageService:
             org_id = participant.org_id if participant.org else None
             recipient_id = user_id or org_id
             if recipient_id:
-                async_to_sync(channel_layer.group_send)(
+                safe_group_send(
                     f"user_notifications_{recipient_id}",
                     {
                         "type": "notification_message",
                         "notification_type": "conversation_updated",
                         "conversation_id": str(conversation.id),
-                    }
+                    },
+                    tag="messaging.conversation_updated",
                 )
 
     # ----------------------------------------
@@ -732,66 +745,23 @@ class MessageService:
     # ----------------------------------------
     @staticmethod
     def _trigger_push(conversation, message):
-        participants = ConversationParticipant.objects.filter(
-            conversation=conversation
-        ).select_related("user", "org")
+        """
+        Hand the chat push to the worker.
 
-        if message.sender_user:
-            participants = participants.exclude(user=message.sender_user)
-        elif message.sender_org:
-            participants = participants.exclude(org=message.sender_org)
+        The body of this moved to ``messaging.push_message`` verbatim: the
+        participant query, the share branch and the per-recipient FCM calls all
+        ran here, on the request thread, so a send to a ten-member org waited
+        on ten Firebase round trips before returning the bubble.
 
-        for participant in participants:
-            if message.message_type in Message.SHARED_TYPES:
-                # Shares go through the notifications module: it writes the
-                # in-app row (grouped per conversation, deduped per message)
-                # and sends the push itself.
-                NotificationService.message_share(
-                    message,
-                    recipient_user=participant.user,
-                    recipient_org=participant.org,
-                )
-                continue
+        An ID, NOT THE INSTANCE — the serializer is JSON (CLAUDE.md,
+        "Background jobs"), and the task reloads the message with its
+        conversation and sender.
 
-            # Text/media keep the existing push-only behaviour — no in-app
-            # notification row is written for ordinary chat.
-            #
-            # An org has no device of its own, so its push fans out to the
-            # OWNER/ADMIN members the same way a notification row does. Without
-            # this branch an org participant got no push at all for ordinary
-            # chat — only for shares, which go through NotificationService above.
-            if participant.user:
-                targets = [participant.user]
-            elif participant.org:
-                targets = get_org_admin_users(participant.org)
-            else:
-                continue
-
-            if not targets:
-                continue
-
-            # Caption if there is one, else a media-type-specific line.
-            if message.content:
-                body = message.content[:50]
-            elif message.message_type == Message.Type.IMAGE:
-                body = "📷 Sent you a photo"
-            elif message.message_type == Message.Type.VIDEO:
-                body = "🎥 Sent you a video"
-            else:
-                body = ""
-
-            payload = {
-                "type": "message",
-                "title": "New message",
-                "body": body,
-                "conversation_id": str(conversation.id),
-                "sender_name": message.sender_user.profile_name
-                if message.sender_user else "",
-                # Resolved in the RECIPIENT's route space — an org member opening
-                # this must land inside /organization/admin/<id>/… or the client
-                # switches them back to their personal account.
-                "url": build_conversation_url(conversation.id, participant.org_id),
-            }
-
-            for target in targets:
-                FCMService.send_to_user(target, payload)
+        ``enqueue`` defaults to ``on_commit=True``. _create_and_dispatch calls
+        this after its ``transaction.atomic()`` block has closed, so with no
+        transaction open Django runs the dispatch immediately — and if a caller
+        ever wraps the whole send in an outer atomic block, the push waits for
+        that commit instead of pushing a message no reader could fetch. Nothing
+        to add around it either way.
+        """
+        enqueue(push_message, (str(message.id),))

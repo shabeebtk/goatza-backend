@@ -25,6 +25,8 @@ import logging
 
 from django.contrib.auth.models import update_last_login
 
+from utils.background_jobs import enqueue
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,8 +39,10 @@ def on_successful_login(user):
     so an exception at this point would turn a successful sign-in into a 500.
     Each step is isolated so a failure in one still lets the other run.
 
-    Costs at most one Google call (4 s ceiling, and only for a user whose city
-    coordinates are stale or expired — for almost every login, none).
+    COSTS THE REQUEST NOTHING. The coordinate top-up is a queued job now
+    (``places.refresh_user_location``); the Google call it may make — 4 s
+    ceiling, and only for a user whose coordinates are stale — happens in a
+    worker, after this returns.
     """
     TAG = "on_successful_login"
 
@@ -53,8 +57,22 @@ def on_successful_login(user):
         # coords_refresh_service reaches into UserProfile — and an import error
         # in the Places stack must not be able to take the auth views down with
         # it. It is one cached module lookup per login.
-        from apps.places.services.coords_refresh_service import ensure_fresh_for_user
+        from apps.places.tasks import refresh_user_location
 
-        ensure_fresh_for_user(user)
+        # fallback="skip", AND THIS IS THE ONLY PLACE IN THE CODEBASE WHERE
+        # SKIPPING IS RIGHT — so the next reader does not "fix" it to the
+        # default. enqueue's default fallback runs the job inline when Celery
+        # is disabled or the broker is in cooldown, which here would put the
+        # Google call straight back into the login request: exactly the 4
+        # seconds this change exists to remove, and reintroduced on the very
+        # days the infrastructure is already unhealthy. A login must never wait
+        # on Google, so when the job cannot be queued it is DROPPED.
+        #
+        # Nothing is lost by dropping it. Stale coordinates only affect whether
+        # this player appears in somebody's nearby search, the next login
+        # queues the job again, and the nightly refresh_place_coords command
+        # sweeps whatever is still stale. (Dev consequence, worth knowing: with
+        # CELERY_ENABLED off, coordinates are never refreshed at login.)
+        enqueue(refresh_user_location, (str(user.id),), fallback="skip")
     except Exception as e:
-        logger.warning(f"{TAG} | coords not refreshed | {type(e).__name__}")
+        logger.warning(f"{TAG} | coords refresh not queued | {type(e).__name__}")
