@@ -1,5 +1,6 @@
 # recruitments/services/application_service.py
 import logging
+from django.conf import settings
 from django.db import transaction, IntegrityError
 from django.db.models import F
 from django.db.models.functions import Greatest
