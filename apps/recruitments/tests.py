@@ -40,6 +40,7 @@ from apps.recruitments.services.match_score_service import (
 )
 from apps.notifications.models import Notification
 from apps.legal.testing import accept_current_terms
+from apps.guardians.testing import grant_guardian_consent
 
 SIGNATURE_URL = "/user/get/upload/signature"
 CREATE_URL = "/recruitments/create"
@@ -8168,3 +8169,84 @@ class CategoryPayloadShapeTests(APITestCase):
         self.assertIsNone(
             ApplicationAgeCategorySerializer(self.anywhere).data["gender"]
         )
+
+
+class ApplyEndpointSuccessTests(APITestCase):
+    """The plain successful apply, end to end through the real endpoint.
+
+    Every other apply test in this file asserts a REFUSAL, so the happy path
+    carried no coverage at all — which is how a NameError on every single
+    apply reached production as a 500 "Something went wrong".
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            email="own_ok@example.com", password="pass1234", username="owner_ok"
+        )
+        accept_current_terms(self.owner)
+        self.org = Organization.objects.create(
+            name="Hawk FC", username="hawkfc", type=Organization.Type.CLUB
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        self.player = User.objects.create_user(
+            email="p_ok@example.com", password="pass1234", username="player_ok"
+        )
+        accept_current_terms(self.player)
+        grant_guardian_consent(self.player)
+        self.sport = Sport.objects.create(name="Football", icon_name="mdi:soccer")
+        # session_mode `all` (the default): every date is the one trial, so
+        # _resolve_session has no date to demand of the applicant.
+        self.recruitment = Recruitment.objects.create(
+            organization=self.org, sport=self.sport,
+            status=Recruitment.Status.ACTIVE, title="U17 Trials",
+            recruitment_type=Recruitment.Type.OPEN_TRIAL,
+            apply_method="goatza",
+            visibility=Recruitment.Visibility.PUBLIC,
+            session_mode=Recruitment.SessionMode.ALL,
+        )
+
+    def test_apply_succeeds_and_claims_alert(self):
+        # Guards the alert-claim path against a missing import: only the
+        # outbound mailers are patched, so _claim_applicant_alert itself runs.
+        self.client.force_authenticate(user=self.player)
+
+        with patch(
+            "apps.recruitments.services.application_service"
+            ".send_application_received_email"
+        ), patch(
+            "apps.recruitments.services.application_service"
+            ".send_new_applicant_alert_email"
+        ) as alert_email:
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self.client.post(
+                    f"/recruitments/{self.recruitment.id}/apply",
+                    {
+                        "shared_name": "Player Ok",
+                        "shared_phone": "+919876543210",
+                        "shared_email": "p_ok@example.com",
+                    },
+                    format="json",
+                    HTTP_X_ACTOR_TYPE="user",
+                    HTTP_X_ACTOR_ID=str(self.player.id),
+                )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data["success"])
+
+        application = RecruitmentApplication.objects.get(
+            recruitment=self.recruitment, applicant=self.player
+        )
+        self.assertEqual(application.status, "applied")
+        self.assertEqual(
+            resp.data["data"]["application_id"], str(application.id)
+        )
+
+        # The claim really happened: the first applicant alerts instantly, so
+        # the stamp moved and the mail was handed to the sender.
+        self.recruitment.refresh_from_db()
+        self.assertIsNotNone(self.recruitment.last_applicant_alert_at)
+        alert_email.assert_called_once()
