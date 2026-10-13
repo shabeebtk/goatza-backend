@@ -3,9 +3,10 @@ from typing import NamedTuple
 
 from django.db import transaction
 from django.utils import timezone
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from apps.recruitments.models import (
     Recruitment,
+    RecruitmentAnnouncement,
     RecruitmentApplication,
     RecruitmentPosition,
     RecruitmentQuestion,
@@ -18,10 +19,15 @@ from apps.recruitments.models import (
     RecruitmentEligibilityCriteria,
     TrialSession,
 )
+from apps.recruitments.removal import IN_PLAY_STATUSES
+from apps.recruitments.services.announcement_service import AnnouncementService
+from apps.recruitments.tasks import notify_recruitment_removed
 from apps.sports.models import Sport
 from services.location.location_service import LocationService
 from shared.tasks import delete_keys
 from utils.background_jobs import enqueue
+from utils.cache import cache_delete
+from utils.cache_keys import CacheKeys
 from services.storage.validators import (
     allowed_image_extensions,
     allowed_video_extensions,
@@ -31,6 +37,12 @@ from services.storage.validators import (
 
 
 logger = logging.getLogger(__name__)
+
+# The note an owner must write when people are still waiting (rule 4).
+DELETE_NOTE_MIN = 10
+DELETE_NOTE_MAX = 500
+
+DELETE_FORBIDDEN_MESSAGE = "Only owners and admins can delete a recruitment."
 
 
 class SessionSync(NamedTuple):
@@ -453,10 +465,157 @@ class RecruitmentService:
         if recruitment.is_deleted:
             return False
 
+        # deleted_at only: no member decided this, and the club has no note
+        # to give — the player's card reads "This recruitment was removed."
         recruitment.is_deleted = True
-        recruitment.save(update_fields=["is_deleted"])
+        recruitment.deleted_at = timezone.now()
+        recruitment.save(update_fields=["is_deleted", "deleted_at"])
 
         return True
+
+    # -----------------------------------------------------------------
+    # OWNER DELETE
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _is_past(recruitment):
+        """
+        Is this trial behind us, for the purpose of deleting it?
+
+        A trial is past once its last day has ended (``is_trial_over``). A
+        recruitment with no dates at all — a looking-for-players post — has
+        no day to end, so there "past" is the club having closed or cancelled
+        it.
+        """
+        if recruitment.event_date is None and not recruitment.sessions.exists():
+            return recruitment.status in (
+                Recruitment.Status.CLOSED,
+                Recruitment.Status.CANCELLED,
+            )
+        return recruitment.is_trial_over
+
+    @staticmethod
+    def delete_requirements(recruitment):
+        """
+        ``{"needs_note": bool, "notify_count": int}`` — THE one place it is
+        decided whether a delete must explain itself.
+
+        The delete-check endpoint and ``delete_recruitment`` both call this,
+        so the dialog can never ask for a note the server then ignores, or
+        skip one the server then demands.
+
+        A note is needed when the trial is NOT past and somebody is still in
+        play (``removal.IN_PLAY_STATUSES``): those people are waiting on the
+        club and will be told why. A draft, a past trial, or a posting where
+        everybody already has an answer deletes quietly. ``notify_count`` is
+        the number who will be messaged, so it is 0 whenever no note is.
+        """
+        quiet = {"needs_note": False, "notify_count": 0}
+
+        if recruitment.status == Recruitment.Status.DRAFT:
+            return quiet
+        if RecruitmentService._is_past(recruitment):
+            return quiet
+
+        notify_count = recruitment.applications.filter(
+            status__in=IN_PLAY_STATUSES
+        ).count()
+        if notify_count == 0:
+            return quiet
+
+        return {"needs_note": True, "notify_count": notify_count}
+
+    @staticmethod
+    def require_deleter(actor):
+        """
+        The OrganizationMember allowed to delete, or PermissionDenied (→ 403).
+
+        The announcement gate's role rule (owner/admin) under this action's
+        own words — that gate's message is about posting announcements.
+        """
+        try:
+            return AnnouncementService.require_reviewer(actor)
+        except PermissionDenied:
+            raise PermissionDenied(DELETE_FORBIDDEN_MESSAGE)
+
+    @staticmethod
+    @transaction.atomic
+    def delete_recruitment(actor, recruitment, note=""):
+        """
+        An owner or admin deletes their own recruitment. Soft, like the
+        moderator path: ``is_deleted`` is the flag every read already honours.
+
+        Status is left alone and media stays in R2 — the player's Applied
+        card keeps showing the cover, greyed, with the club's note.
+
+        When ``delete_requirements`` says people are still waiting, the org
+        MUST say why (10–500 chars) and every one of them is told — in-app,
+        push and email — by ``recruitments.notify_removed``. Otherwise
+        nobody is messaged and a note sent anyway is dropped, not stored.
+        """
+        member = RecruitmentService.require_deleter(actor)
+
+        # Locked, so two admins pressing Delete at once produce one delete
+        # and one "already deleted" — and one fan-out, not two.
+        recruitment = (
+            Recruitment.objects
+            .select_for_update(of=("self",))
+            .select_related("organization")
+            .get(id=recruitment.id)
+        )
+        if recruitment.is_deleted:
+            raise ValidationError("This recruitment has already been deleted.")
+
+        requirements = RecruitmentService.delete_requirements(recruitment)
+        needs_note = requirements["needs_note"]
+        note = (note or "").strip()
+
+        if needs_note:
+            if len(note) < DELETE_NOTE_MIN:
+                raise ValidationError(
+                    {"note": "Tell applicants why — at least 10 characters."}
+                )
+            if len(note) > DELETE_NOTE_MAX:
+                raise ValidationError(
+                    {"note": "Keep it under 500 characters."}
+                )
+
+        recruitment.is_deleted = True
+        recruitment.deleted_at = timezone.now()
+        recruitment.deleted_by = member
+        recruitment.deleted_note = note if needs_note else ""
+        recruitment.save(
+            update_fields=[
+                "is_deleted", "deleted_at", "deleted_by", "deleted_note",
+            ]
+        )
+
+        # A queued announcement for a trial that no longer exists must never
+        # go out — the drain skips deleted announcements.
+        RecruitmentAnnouncement.objects.filter(
+            recruitment=recruitment, is_deleted=False
+        ).update(is_deleted=True)
+
+        if needs_note:
+            # enqueue defers to commit itself; no second on_commit here.
+            enqueue(notify_recruitment_removed, (str(recruitment.id),))
+
+        # The logged-out org bundle is cached 60s; drop it so the listing
+        # disappears on the next visit. Discover is cached per viewer for 10
+        # minutes with no global key and simply expires — the same window
+        # CLAUDE.md already accepts for an ended trial.
+        username = recruitment.organization.username
+        transaction.on_commit(
+            lambda: cache_delete(CacheKeys.public_org_profile(username))
+        )
+
+        logger.info(
+            f"RecruitmentService.delete_recruitment | "
+            f"recruitment={recruitment.id} | member={member.id} | "
+            f"notified={requirements['notify_count']}"
+        )
+
+        return recruitment
 
     # -----------------------------------------------------------------
     # MEDIA VALIDATION + CLEANUP

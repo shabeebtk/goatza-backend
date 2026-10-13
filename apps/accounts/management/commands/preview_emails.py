@@ -40,6 +40,8 @@ from utils.transactional_emails import (
     PASSWORD_CHANGED_TEMPLATE,
     PASSWORD_RESET_OTP_COPY,
     RECRUITMENT_ANNOUNCEMENT_TEMPLATE,
+    RECRUITMENT_REMOVED_SUBJECT,
+    RECRUITMENT_REMOVED_TEMPLATE,
     SIGNUP_OTP_COPY,
     TRIAL_REMINDER_TEMPLATE,
     STATUS_EMAIL_COPY,
@@ -255,6 +257,21 @@ PREVIEWS = [
             "age_group": "U-17",
             "bring_items": ["Aadhaar card", "Boots", "Water bottle"],
             "fee_line": "Entry fee: INR 300 — payable at the venue.",
+        },
+    ),
+    (
+        "12-recruitment-removed.html",
+        RECRUITMENT_REMOVED_TEMPLATE,
+        {
+            **RECRUITMENT_CARD,
+            "subject": RECRUITMENT_REMOVED_SUBJECT.format(
+                org=ORG_NAME, title=RECRUITMENT_TITLE
+            ),
+            "player_name": NAME,
+            "note": (
+                "The trial is called off — the ground isn't available "
+                "that weekend. Sorry for the trouble."
+            ),
         },
     ),
     (

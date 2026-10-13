@@ -2,7 +2,8 @@ from django.urls import path
 from apps.recruitments.views.recruitment_views import (
     CreateRecruitmentAPIView, ListRecruitmentsAPIView, RecruitmentDetailAPIView,
     UpdateRecruitmentAPIView, ChangeRecruitmentStatusAPIView,
-    DiscoverRecruitmentsAPIView
+    DiscoverRecruitmentsAPIView, RecruitmentDeleteCheckAPIView,
+    DeleteRecruitmentAPIView
 )
 from apps.recruitments.views.save_views import (
     ToggleSaveRecruitmentAPIView, SavedRecruitmentsListAPIView
@@ -15,6 +16,7 @@ from apps.recruitments.views.announcement_views import (
 from apps.recruitments.views.application_views import (
     ApplyRecruitmentAPIView,
     ListRecruitmentApplicationsAPIView,
+    ApplicationExportAPIView,
     RecruitmentApplicationDetailAPIView,
     WithdrawApplicationAPIView,
     BulkApplicationStatusAPIView,
@@ -36,8 +38,11 @@ urlpatterns = [
     path('<uuid:recruitment_id>/details', RecruitmentDetailAPIView.as_view()),
     path('<uuid:recruitment_id>/update', UpdateRecruitmentAPIView.as_view()),
     path('<uuid:recruitment_id>/status', ChangeRecruitmentStatusAPIView.as_view()),
+    path('<uuid:recruitment_id>/delete-check', RecruitmentDeleteCheckAPIView.as_view()),
+    path('<uuid:recruitment_id>/delete', DeleteRecruitmentAPIView.as_view()),
     path('<uuid:recruitment_id>/apply', ApplyRecruitmentAPIView.as_view()),
     path('<uuid:recruitment_id>/applications', ListRecruitmentApplicationsAPIView.as_view()),
+    path('<uuid:recruitment_id>/applications/export', ApplicationExportAPIView.as_view()),
     path('<uuid:recruitment_id>/applications/bulk-status', BulkApplicationStatusAPIView.as_view()),
     path('<uuid:recruitment_id>/applications/bulk-fee', BulkApplicationFeeAPIView.as_view()),
     path('<uuid:recruitment_id>/applications/message', MessageApplicantsAPIView.as_view()),

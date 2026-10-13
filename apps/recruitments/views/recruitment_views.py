@@ -1,12 +1,13 @@
 import logging
 from rest_framework import status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from core.views.base_views import BaseAPIView
 from apps.recruitments.models import Recruitment
 from apps.recruitments.serializers.recruitment_serializers import (
     RecruitmentCreateSerializer, RecruitmentUpdateSerializer,
-    ChangeRecruitmentStatusSerializer
+    ChangeRecruitmentStatusSerializer, DeleteRecruitmentSerializer
 )
+from apps.recruitments.services.announcement_service import REVIEWER_ROLES
 from apps.recruitments.services.recruitment_service import (
     RecruitmentService
 )
@@ -281,6 +282,150 @@ class ChangeRecruitmentStatusAPIView(BaseAPIView):
             )
 
 
+
+
+def _owned_live_recruitment(actor, recruitment_id):
+    """
+    The actor's org's own, not-yet-deleted recruitment, or None. Missing,
+    already deleted and another org's all resolve to the same None → 404,
+    the applicants list's rule, so a prober learns nothing.
+    """
+    return Recruitment.objects.filter(
+        id=recruitment_id,
+        is_deleted=False,
+        organization=actor.organization,
+    ).first()
+
+
+class RecruitmentDeleteCheckAPIView(BaseAPIView):
+    """
+    GET /recruitments/<recruitment_id>/delete-check
+
+    What the delete dialog needs before it draws: whether a note is required,
+    how many people will get it, and whether this member may delete at all.
+
+    ``needs_note`` / ``notify_count`` come from the SAME function the delete
+    calls (RecruitmentService.delete_requirements). ``can_delete`` is an
+    answer, not a 403 — the dialog shows a coach why there is no button.
+    """
+
+    @org_required
+    def get(self, request, recruitment_id):
+        TAG = "RecruitmentDeleteCheckAPIView"
+        try:
+            actor = request.actor
+
+            recruitment = _owned_live_recruitment(actor, recruitment_id)
+            if not recruitment:
+                return response_data(
+                    success=False,
+                    message="Recruitment not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+
+            requirements = RecruitmentService.delete_requirements(recruitment)
+            member = actor.organization_member
+
+            return response_data(
+                success=True,
+                data={
+                    **requirements,
+                    "can_delete": bool(
+                        member and member.role in REVIEWER_ROLES
+                    ),
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"{TAG} | Error | {str(e)}")
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=str(e)
+            )
+
+
+class DeleteRecruitmentAPIView(BaseAPIView):
+    """
+    POST /recruitments/<recruitment_id>/delete   { "note"?: string }
+
+    POST, not DELETE: it carries a body (the note to applicants), and DELETE
+    bodies are dropped by enough proxies and clients to make it a trap.
+
+    403 for a coach or staff member, 404 for missing / another org's /
+    already deleted, 400 with ``data.errors.note`` when people are still
+    waiting and the note is missing or out of bounds.
+    """
+
+    @org_required
+    def post(self, request, recruitment_id):
+        TAG = "DeleteRecruitmentAPIView"
+        try:
+            actor = request.actor
+
+            recruitment = _owned_live_recruitment(actor, recruitment_id)
+            if not recruitment:
+                return response_data(
+                    success=False,
+                    message="Recruitment not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+
+            # Role gate BEFORE the body: a coach gets a 403, not a critique
+            # of a note that was never going to be accepted.
+            RecruitmentService.require_deleter(actor)
+
+            serializer = DeleteRecruitmentSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+
+            RecruitmentService.delete_recruitment(
+                actor=actor,
+                recruitment=recruitment,
+                note=serializer.validated_data.get("note", ""),
+            )
+
+            logger.info(
+                f"{TAG} | Recruitment deleted | "
+                f"recruitment_id={recruitment.id}"
+            )
+
+            return response_data(
+                success=True,
+                message="Recruitment deleted",
+                data={"recruitment_id": str(recruitment.id)}
+            )
+
+        except PermissionDenied as e:
+            detail = str(getattr(e, "detail", e))
+            return response_data(
+                success=False,
+                message=detail,
+                status_code=status.HTTP_403_FORBIDDEN,
+                error=detail,
+            )
+
+        except ValidationError as e:
+            flat = flatten_validation_error(e.detail)
+            logger.warning(
+                f"{TAG} | Validation Error | {flat['message']}"
+            )
+            return response_data(
+                success=False,
+                message=flat["message"],
+                status_code=400,
+                error=flat["message"],
+                data={"errors": flat["errors"]}
+            )
+
+        except Exception as e:
+            logger.error(f"{TAG} | Error | {str(e)}")
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=str(e)
+            )
 
 
 class ListRecruitmentsAPIView(BaseAPIView):

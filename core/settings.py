@@ -527,6 +527,11 @@ CORS_ALLOW_METHODS = [
     'POST',
     'PUT',
 ]
+
+# Cross-origin JS cannot read a response header unless it is exposed. The
+# applicants download names its file (rows 101-200 of which recruitment) in
+# Content-Disposition, and the browser would otherwise hide it.
+CORS_EXPOSE_HEADERS = ["Content-Disposition"]
 # ------ CORS END --------/
 
 

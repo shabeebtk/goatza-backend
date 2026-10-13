@@ -891,3 +891,12 @@ class ChangeRecruitmentStatusSerializer(serializers.Serializer):
     status = serializers.ChoiceField(
         choices=Recruitment.Status.choices
     )
+
+
+class DeleteRecruitmentSerializer(serializers.Serializer):
+    # Shape only. WHETHER a note is required, and its 10–500 bounds, depend on
+    # who is still waiting — RecruitmentService.delete_requirements decides
+    # that, so a note sent for a quiet delete is accepted here and dropped.
+    note = serializers.CharField(
+        required=False, allow_blank=True, default=""
+    )

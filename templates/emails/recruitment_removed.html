@@ -1,0 +1,25 @@
+{% extends "emails/base.html" %}
+{% comment %}
+The club deleted a recruitment this player was still waiting on.
+
+The CLUB'S NOTE is the email. It is quoted in the same left-ruled block the
+announcement uses, because it is the one paragraph here the club wrote; the
+rest is this app saying, plainly, that nothing is expected of the player.
+
+`note` arrives as plain text and is rendered with `linebreaks`, so newlines
+survive and angle brackets are escaped. It is never marked safe.
+
+The button goes to the recruitments LIST: the posting is deleted, and a
+"View details" link to it would 404.
+
+Context: note, player_name, plus the shared recruitment-card values.
+{% endcomment %}
+{% block preheader %}{{ org_name }} removed a recruitment you applied to.{% endblock %}
+{% block content %}<span style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:11px;letter-spacing:1px;text-transform:uppercase;border-radius:999px;padding:5px 12px;background-color:#eef2ee;color:#556655;">Removed</span><div style="height:12px;line-height:12px;">&nbsp;</div><div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">This recruitment was removed</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Hi <b style="color:#111111;">{{ player_name }}</b>, <b style="color:#111111;">{{ org_name }}</b> removed a recruitment you applied to:</p>{% include "emails/_recruitment_card.html" %}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;">
+  <tr><td style="border-left:3px solid #00B562;padding:2px 0 2px 14px;">
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#333333;line-height:1.65;">{{ note|linebreaks }}</div>
+  </td></tr></table><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Your application is closed &mdash; you don&rsquo;t need to do anything.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#00B562;border-radius:10px;">
+    <a href="{{ frontend_base_url }}/recruitments" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#ffffff;text-decoration:none;letter-spacing:0.4px;">Explore recruitments</a>
+  </td></tr></table>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because you applied to this recruitment on Goatza.{% endblock %}

@@ -143,6 +143,11 @@ def build_notification_url(notification) -> str:
         recruitment_id = notification.recruitment_id or data.get("recruitment_id", "")
         return f"{base}/recruitments/{recruitment_id}" if recruitment_id else fallback
 
+    if ntype == Notification.Type.RECRUITMENT_REMOVED:
+        # The player's Applied tab, NEVER the posting: it is deleted and
+        # would 404. The card there is greyed and carries the club's note.
+        return f"{base}/recruitments?tab=applications"
+
     if ntype == Notification.Type.CAREER_ADD_PROMPT:
         # An action, not a destination: the in-app row opens CareerAddPromptSheet
         # in place, so the notifications list is exactly where the working

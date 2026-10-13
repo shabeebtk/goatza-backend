@@ -28,6 +28,7 @@ from django.db.models import Avg, Count
 from django.utils import timezone
 
 from apps.recruitments.models import RecruitmentApplication
+from apps.recruitments.removal import refuse_if_removed
 
 # The columns this service owns. Named once so the UPDATE cannot drift into
 # touching anything else — `status` in particular.
@@ -55,7 +56,12 @@ class TrialFeedbackService:
         The caller has already decided this player may answer at all
         (``feedback_window``) and the serializer has already blanked the
         outcome and the rating for somebody who did not attend.
+
+        A deleted recruitment refuses here too, not only in the view: a hint
+        for an org about a trial it took down is a hint nobody will read.
         """
+        refuse_if_removed(application.recruitment)
+
         application.attended_self_reported = validated_data["attended"]
         application.outcome_self_reported = validated_data.get("outcome", "")
         application.trial_rating = validated_data.get("rating")

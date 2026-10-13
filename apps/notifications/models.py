@@ -19,6 +19,9 @@ class Notification(BaseUUIDModel):
         # An org speaking to the people on ONE recruitment. Written by the
         # announcement outbox drain, never by a request.
         RECRUITMENT_ANNOUNCEMENT = "recruitment_announcement", "Recruitment Announcement"
+        # The club deleted a recruitment somebody was still waiting on. Written
+        # by the recruitments.notify_removed task, with the club's note in data.
+        RECRUITMENT_REMOVED = "recruitment_removed", "Recruitment Removed"
         # The evening before. Written by send_trial_reminders, never by
         # a request.
         TRIAL_REMINDER = "trial_reminder", "Trial Reminder"

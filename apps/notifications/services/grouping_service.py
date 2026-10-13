@@ -240,6 +240,10 @@ class NotificationGroupingService:
                 return f"{who} shared {total_count} things with you"
             return f"{who} shared {MESSAGE_SHARE_NOUN.get(shared_kind, 'something')} with you"
 
+        if notification_type == "recruitment_removed":
+            org = names[0] if names else "The organization"
+            return f"{org} removed {recruitment_title or 'a recruitment'}"
+
         if notification_type == "recruitment_application_status":
             org = names[0] if names else "The organization"
             copy = RECRUITMENT_STATUS_COPY.get(
