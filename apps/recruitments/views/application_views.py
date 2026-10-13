@@ -1,4 +1,6 @@
 import logging
+from django.http import HttpResponse
+from django.utils.text import slugify
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from core.views.base_views import BaseAPIView
@@ -27,7 +29,12 @@ from apps.highlights.selectors.highlight_selectors import (
     visible_highlight_counts_for,
 )
 from apps.recruitments.selectors.trial_pass_selectors import build_trial_pass
+from apps.recruitments.removal import REMOVED_MESSAGE, refuse_if_removed
 from apps.recruitments.services.announcement_service import AnnouncementService
+from apps.recruitments.services.application_export_service import (
+    MAX_ROWS as EXPORT_MAX_ROWS,
+    build_applicants_workbook,
+)
 from apps.recruitments.services.application_service import ApplicationService
 from apps.recruitments.services.trial_feedback_service import (
     TrialFeedbackService,
@@ -38,6 +45,48 @@ from utils.errors import flatten_validation_error
 
 
 logger = logging.getLogger(__name__)
+
+EXPORT_FORBIDDEN_MESSAGE = "Only owners and admins can download applicants."
+XLSX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
+def read_application_filters(query_params):
+    """
+    The applicants list's filters, read off the query string — THE one
+    reader, so the list and the Excel export parse a URL identically.
+
+    Everything is passed through raw; ``ApplicationSelector
+    .filtered_applications`` normalizes it and is lenient about junk by
+    design. ``sort`` is not here: it orders the list, and the export has its
+    own fixed order.
+    """
+    return {
+        # One status, a comma-separated list, or the key repeated — all
+        # arrive at the selector as one comma-separated string.
+        "status": ",".join(query_params.getlist("status")),
+        "search": query_params.get("search", "").strip(),
+        "age_category": query_params.get("age_category"),
+        # WHICH CENTRE they picked, on a trial that visits several. Checked
+        # against this recruitment's own sessions in the selector.
+        "session_id": query_params.get("session"),
+        # The fee, and the two AGE questions: the group they applied UNDER
+        # is age_category; birth_year_* is how old they actually ARE.
+        "fee_paid": query_params.get("fee_paid"),
+        "birth_year_min": query_params.get("birth_year_min"),
+        "birth_year_max": query_params.get("birth_year_max"),
+        "age_mismatch": query_params.get("age_mismatch"),
+        # What the PLAYER said about the trial — a hint, where `status` is
+        # the org's decision.
+        "self_outcome": query_params.get("self_outcome"),
+        "gender": query_params.get("gender"),
+        "position": query_params.get("position"),
+        "city": query_params.get("city"),
+        "has_highlights": query_params.get("has_highlights"),
+        "applied_from": query_params.get("applied_from"),
+        "applied_to": query_params.get("applied_to"),
+    }
 
 
 class ApplyRecruitmentAPIView(BaseAPIView):
@@ -132,29 +181,7 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
         try:
             actor = request.actor
 
-            # One status, a comma-separated list, or the key repeated — all
-            # arrive at the selector as one comma-separated string.
-            status_filter = ",".join(request.query_params.getlist("status"))
-            search = request.query_params.get("search", "").strip()
-            age_category = request.query_params.get("age_category")
-            # WHICH CENTRE they picked, on a trial that visits several. Read
-            # raw and checked against this recruitment's own sessions in the
-            # selector, exactly like age_category above.
-            session_id = request.query_params.get("session")
-
-            # The fee, and the two AGE questions this list answers. The
-            # age_category chips above are the group the applicant applied
-            # UNDER; birth_year_* is how old they actually ARE. Every one
-            # of these is read raw and normalized in the selector, which
-            # is lenient about junk by design.
-            fee_paid = request.query_params.get("fee_paid")
-            birth_year_min = request.query_params.get("birth_year_min")
-            birth_year_max = request.query_params.get("birth_year_max")
-            age_mismatch = request.query_params.get("age_mismatch")
-            # What the PLAYER said about the trial, which is a different
-            # question from `status` above: status is the org's decision,
-            # this is the hint they are deciding from.
-            self_outcome = request.query_params.get("self_outcome")
+            filters = read_application_filters(request.query_params)
             sort = request.query_params.get("sort")
 
             # Validate + clamp pagination — exactly like ListPostLikesAPIView.
@@ -193,18 +220,10 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
             applications, total_count, no_birth_year_count = (
                 ApplicationSelector.list_applications(
                     recruitment=recruitment,
-                    status=status_filter,
-                    search=search,
-                    age_category=age_category,
-                    session_id=session_id,
-                    fee_paid=fee_paid,
-                    birth_year_min=birth_year_min,
-                    birth_year_max=birth_year_max,
-                    age_mismatch=age_mismatch,
-                    self_outcome=self_outcome,
                     sort=sort,
                     limit=limit,
-                    offset=offset
+                    offset=offset,
+                    **filters,
                 )
             )
 
@@ -249,6 +268,104 @@ class ListRecruitmentApplicationsAPIView(BaseAPIView):
             logger.error(
                 f"{TAG} | Error | {str(e)}"
             )
+            return response_data(
+                success=False,
+                message="Something went wrong",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=str(e)
+            )
+
+
+class ApplicationExportAPIView(BaseAPIView):
+    """
+    GET /recruitments/<recruitment_id>/applications/export
+        ?scope=filtered|all&start=1&<the list's own params>
+
+    The applicants as an .xlsx — owner/admin only, at most 100 rows a file,
+    rows ``start``..``start+99`` in a FIXED oldest-first order (see
+    ``ApplicationSelector.export_queryset`` for why the order never follows
+    the list's sort).
+
+    ``scope=filtered`` reads the list's params through the SAME reader the
+    list uses (``read_application_filters``), so the file is the view.
+
+    THE AUDIT TRAIL. These files carry minors' phone numbers and emails, and
+    once downloaded nothing here can take them back. One INFO line per export
+    says who took which rows of which recruitment — never the data itself.
+    """
+
+    @org_required
+    def get(self, request, recruitment_id):
+        TAG = "ApplicationExportAPIView"
+        try:
+            actor = request.actor
+
+            # OWNERSHIP GATE — the applicants list's rule: missing, deleted
+            # and another org's all answer the same 404.
+            recruitment = Recruitment.objects.filter(
+                id=recruitment_id,
+                is_deleted=False,
+                organization=actor.organization
+            ).first()
+            if not recruitment:
+                return response_data(
+                    success=False,
+                    message="Recruitment not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+
+            try:
+                member = AnnouncementService.require_reviewer(actor)
+            except PermissionDenied:
+                return response_data(
+                    success=False,
+                    message=EXPORT_FORBIDDEN_MESSAGE,
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    error=EXPORT_FORBIDDEN_MESSAGE,
+                )
+
+            scope = "all" if request.query_params.get("scope") == "all" else "filtered"
+            try:
+                start = max(int(request.query_params.get("start", 1)), 1)
+            except (TypeError, ValueError):
+                start = 1
+
+            queryset = ApplicationSelector.export_queryset(
+                recruitment,
+                scope=scope,
+                filters=read_application_filters(request.query_params),
+            )
+            total = queryset.count()
+            if start > total:
+                return response_data(
+                    success=False,
+                    message="Nothing left to download.",
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    error="Nothing left to download.",
+                )
+
+            applications = list(
+                queryset[start - 1: start - 1 + EXPORT_MAX_ROWS]
+            )
+            end = start + len(applications) - 1
+
+            content = build_applicants_workbook(recruitment, applications, start)
+
+            title_slug = slugify(recruitment.title)[:40].strip("-") or "recruitment"
+            filename = f"goatza-{title_slug}-applicants-{start}-{end}.xlsx"
+
+            logger.info(
+                f"{TAG} | export | org={recruitment.organization_id} | "
+                f"member={member.id} | recruitment={recruitment.id} | "
+                f"scope={scope} | start={start} | rows={len(applications)}"
+            )
+
+            response = HttpResponse(content, content_type=XLSX_CONTENT_TYPE)
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+
+        except Exception as e:
+            logger.error(f"{TAG} | Error | {str(e)}")
             return response_data(
                 success=False,
                 message="Something went wrong",
@@ -346,6 +463,9 @@ class RecruitmentApplicationDetailAPIView(BaseAPIView):
                 not application
                 or str(application.recruitment.organization_id)
                 != str(actor.organization.id)
+                # A deleted posting is gone for the org too — same 404 as
+                # the recruitment-level endpoints.
+                or application.recruitment.is_deleted
             ):
                 return response_data(
                     success=False,
@@ -546,6 +666,9 @@ class ApplicationStatusAPIView(BaseAPIView):
                 not application
                 or str(application.recruitment.organization_id)
                 != str(actor.organization.id)
+                # A deleted posting is gone for the org too — same 404 as
+                # the recruitment-level endpoints.
+                or application.recruitment.is_deleted
             ):
                 return response_data(
                     success=False,
@@ -649,6 +772,9 @@ class ApplicationFeeAPIView(BaseAPIView):
                 not application
                 or str(application.recruitment.organization_id)
                 != str(actor.organization.id)
+                # A deleted posting is gone for the org too — same 404 as
+                # the recruitment-level endpoints.
+                or application.recruitment.is_deleted
             ):
                 return response_data(
                     success=False,
@@ -920,6 +1046,16 @@ class TrialPassAPIView(BaseAPIView):
                     status_code=status.HTTP_404_NOT_FOUND
                 )
 
+            # No pass for a trial the club deleted — it would send them to a
+            # gate that is not expecting anyone.
+            if application.recruitment.is_deleted:
+                return response_data(
+                    success=False,
+                    message=REMOVED_MESSAGE,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    error=REMOVED_MESSAGE,
+                )
+
             # A pass exists once the org has CALLED them to the trial.
             # Anything else gets a clear "not yet" rather than a pass with
             # half its fields missing, which would read as a bug on the day
@@ -997,14 +1133,22 @@ class TrialFeedbackAPIView(BaseAPIView):
                 .first()
             )
 
-            # NOT THEIRS, or they were never called to the trial. One 404 for
-            # both: somebody who was not shortlisted must not be asked how the
+            if not application:
+                return response_data(
+                    success=False,
+                    message="Application not found",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+
+            # Theirs, but the club deleted the posting: say so (400) before
+            # any status or date rule gets a chance to answer differently.
+            refuse_if_removed(application.recruitment)
+
+            # Never called to the trial. A 404, same as not-theirs:
+            # somebody who was not shortlisted must not be asked how the
             # trial went — it is a bad question and an unkind one — and the
             # answer must not tell them anything either way.
-            if (
-                not application
-                or not status_allows_feedback(application.status)
-            ):
+            if not status_allows_feedback(application.status):
                 return response_data(
                     success=False,
                     message="Application not found",

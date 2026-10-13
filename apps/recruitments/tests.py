@@ -8250,3 +8250,563 @@ class ApplyEndpointSuccessTests(APITestCase):
         self.recruitment.refresh_from_db()
         self.assertIsNotNone(self.recruitment.last_applicant_alert_at)
         alert_email.assert_called_once()
+
+
+
+# =====================================================================
+# DELETE A RECRUITMENT, THE PLAYER'S REMOVED CARD, THE EXCEL EXPORT AND
+# THE NEW APPLICANT FILTERS
+# =====================================================================
+
+import io as _io
+from datetime import datetime as _datetime
+
+import openpyxl
+
+from apps.highlights.models import Highlight
+from apps.recruitments.models import RecruitmentAnnouncement as _Announcement
+from apps.recruitments.removal import REMOVED_MESSAGE
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+class _OrgFixtures:
+    """An org with an owner and a coach, and the factories every class below
+    shares. A mixin rather than a base TestCase so it adds no tests of its own."""
+
+    FUTURE_DATE = date(2030, 7, 12)
+    PAST_DATE = date(2020, 7, 12)
+
+    def _setup_org(self, slug):
+        self.owner = self._user(f"{slug}_owner", "Owner")
+        self.coach = self._user(f"{slug}_coach", "Coach")
+        self.org = Organization.objects.create(
+            name=f"{slug.title()} FC", username=f"{slug}fc",
+            type=Organization.Type.CLUB,
+        )
+        self.member = OrganizationMember.objects.create(
+            organization=self.org, user=self.owner,
+            role=OrganizationMember.Role.OWNER,
+        )
+        OrganizationMember.objects.create(
+            organization=self.org, user=self.coach,
+            role=OrganizationMember.Role.COACH,
+        )
+        self.sport = Sport.objects.create(
+            name=f"{slug.title()}ball", icon_name="mdi:soccer"
+        )
+        self.org_actor = Actor(
+            actor_type="organization",
+            organization=self.org,
+            organization_member=self.member,
+        )
+
+    def _user(self, username, name, password="pass1234", **profile):
+        user = User.objects.create_user(
+            email=f"{username}@example.com", password=password,
+            username=username,
+        )
+        accept_current_terms(user)
+        grant_guardian_consent(user)
+        UserProfile.objects.create(user=user, name=name, **profile)
+        return user
+
+    def _trial(self, day=None, **overrides):
+        data = dict(
+            organization=self.org, sport=self.sport, title="Removable Trial",
+            recruitment_type="open_trial",
+            status=Recruitment.Status.ACTIVE,
+            visibility=Recruitment.Visibility.PUBLIC,
+        )
+        data.update(overrides)
+        recruitment = Recruitment.objects.create(**data)
+        TrialSession.objects.create(
+            recruitment=recruitment, date=day or self.FUTURE_DATE
+        )
+        RecruitmentService._sync_trial_window(recruitment)
+        recruitment.refresh_from_db()
+        return recruitment
+
+    def _application(self, recruitment, user, status_value="applied", **overrides):
+        data = dict(
+            recruitment=recruitment, applicant=user,
+            shared_name=user.username, shared_phone="9999999999",
+            status=status_value,
+        )
+        data.update(overrides)
+        return RecruitmentApplication.objects.create(**data)
+
+    def _org_headers(self):
+        return {
+            "HTTP_X_ACTOR_TYPE": "organization",
+            "HTTP_X_ACTOR_ID": str(self.org.id),
+        }
+
+    def _as(self, user):
+        self.client.force_authenticate(user=user)
+
+
+class RecruitmentDeleteTests(_OrgFixtures, APITestCase):
+    """
+    An owner or admin deletes a recruitment. When people are still waiting on
+    it the club must say why, and every one of them is told; otherwise it goes
+    quietly. delete-check and the delete share one rule, so they must agree.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self._setup_org("del")
+        self.trial = self._trial()
+        self.applied = self._application(self.trial, self._user("del_a", "A"))
+        self.confirmed = self._application(
+            self.trial, self._user("del_b", "B"), "trial_confirmed"
+        )
+        self.withdrawn = self._application(
+            self.trial, self._user("del_w", "W"), "withdrawn"
+        )
+        self.turned_down = self._application(
+            self.trial, self._user("del_n", "N"), "not_shortlisted"
+        )
+
+    def _delete(self, recruitment, body=None):
+        return self.client.post(
+            f"/recruitments/{recruitment.id}/delete",
+            body or {}, format="json", **self._org_headers(),
+        )
+
+    def _check(self, recruitment):
+        return self.client.get(
+            f"/recruitments/{recruitment.id}/delete-check", **self._org_headers()
+        )
+
+    def _removed_recipients(self):
+        return set(
+            Notification.objects.filter(
+                type=Notification.Type.RECRUITMENT_REMOVED
+            ).values_list("recipient_user_id", flat=True)
+        )
+
+    def test_people_waiting_means_a_note_is_required(self):
+        self._as(self.owner)
+
+        response = self._delete(self.trial)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("note", response.data["data"]["errors"])
+        self.trial.refresh_from_db()
+        self.assertFalse(self.trial.is_deleted)
+
+    def test_a_short_note_is_refused_too(self):
+        self._as(self.owner)
+
+        response = self._delete(self.trial, {"note": "   too short "})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("note", response.data["data"]["errors"])
+
+    def test_with_a_note_it_deletes_and_tells_everyone_still_in_play(self):
+        _Announcement.objects.create(
+            recruitment=self.trial, title="Venue", body="Gate 3",
+            audience=_Announcement.Audience.ALL_APPLICANTS,
+        )
+        self._as(self.owner)
+        note = "The trial is called off - the ground isn't available."
+
+        with patch(
+            "utils.transactional_emails.send_email_async"
+        ) as email, self.captureOnCommitCallbacks(execute=True):
+            response = self._delete(self.trial, {"note": f"  {note}  "})
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.trial.refresh_from_db()
+        self.assertTrue(self.trial.is_deleted)
+        self.assertIsNotNone(self.trial.deleted_at)
+        self.assertEqual(self.trial.deleted_by_id, self.member.id)
+        self.assertEqual(self.trial.deleted_note, note)
+        # Status is the org's own record and is left alone.
+        self.assertEqual(self.trial.status, Recruitment.Status.ACTIVE)
+        # A queued announcement for a removed trial must never go out.
+        self.assertFalse(
+            _Announcement.objects.filter(
+                recruitment=self.trial, is_deleted=False
+            ).exists()
+        )
+        # Exactly the two still in play — never the withdrawn or the
+        # turned-down.
+        self.assertEqual(
+            self._removed_recipients(),
+            {self.applied.applicant_id, self.confirmed.applicant_id},
+        )
+        removed = Notification.objects.filter(
+            type=Notification.Type.RECRUITMENT_REMOVED
+        ).first()
+        self.assertEqual(removed.data["note"], note)
+        self.assertEqual(email.call_count, 2)
+
+    def test_a_past_trial_deletes_quietly_and_drops_a_note(self):
+        past = self._trial(day=self.PAST_DATE)
+        self._application(past, self.applied.applicant)
+        self._as(self.owner)
+
+        with patch(
+            "utils.transactional_emails.send_email_async"
+        ) as email, self.captureOnCommitCallbacks(execute=True):
+            response = self._delete(past, {"note": "Nobody needs to hear this."})
+
+        self.assertEqual(response.status_code, 200, response.data)
+        past.refresh_from_db()
+        self.assertTrue(past.is_deleted)
+        # Not stored: a delete that needed no note keeps none.
+        self.assertEqual(past.deleted_note, "")
+        self.assertEqual(self._removed_recipients(), set())
+        email.assert_not_called()
+
+    def test_a_coach_is_refused_and_told_why(self):
+        self._as(self.coach)
+
+        response = self._delete(self.trial, {"note": "A perfectly fine note."})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.data["message"],
+            "Only owners and admins can delete a recruitment.",
+        )
+        self.trial.refresh_from_db()
+        self.assertFalse(self.trial.is_deleted)
+
+        # The check answers rather than refuses, so the dialog can say why.
+        check = self._check(self.trial)
+        self.assertEqual(check.status_code, 200)
+        self.assertFalse(check.data["data"]["can_delete"])
+
+    def test_delete_check_agrees_with_the_delete(self):
+        self._as(self.owner)
+
+        check = self._check(self.trial).data["data"]
+        self.assertEqual(
+            check, {"needs_note": True, "notify_count": 2, "can_delete": True}
+        )
+
+        past = self._trial(day=self.PAST_DATE)
+        self._application(past, self.applied.applicant)
+        past_check = self._check(past).data["data"]
+        self.assertFalse(past_check["needs_note"])
+        self.assertEqual(past_check["notify_count"], 0)
+
+    def test_another_orgs_recruitment_is_a_404(self):
+        other_org = Organization.objects.create(
+            name="Other FC", username="otherdelfc",
+            type=Organization.Type.CLUB,
+        )
+        theirs = Recruitment.objects.create(
+            organization=other_org, sport=self.sport, title="Theirs",
+            recruitment_type="open_trial", status=Recruitment.Status.ACTIVE,
+        )
+        self._as(self.owner)
+
+        self.assertEqual(self._delete(theirs).status_code, 404)
+        self.assertEqual(self._check(theirs).status_code, 404)
+
+    def test_org_side_reads_404_once_deleted(self):
+        RecruitmentService.moderator_delete_recruitment(self.trial)
+        self._as(self.owner)
+
+        self.assertEqual(
+            self.client.get(
+                f"/recruitments/{self.trial.id}/applications",
+                **self._org_headers(),
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(
+                f"/recruitments/applications/{self.applied.id}/details",
+                **self._org_headers(),
+            ).status_code,
+            404,
+        )
+        self.trial.refresh_from_db()
+        # A takedown stamps the time, and has no club note.
+        self.assertIsNotNone(self.trial.deleted_at)
+        self.assertEqual(self.trial.deleted_note, "")
+
+
+class RemovedRecruitmentPlayerTests(_OrgFixtures, APITestCase):
+    """The player keeps the application, greyed, with the club's note — and
+    nothing on it can be acted on any more."""
+
+    NOTE = "Called off, sorry - the ground flooded overnight."
+
+    def setUp(self):
+        cache.clear()
+        self._setup_org("rem")
+        self.player = self._user("rem_player", "Player")
+        self.trial = self._trial()
+        self.application = self._application(self.trial, self.player)
+
+    def _remove(self):
+        with patch(
+            "utils.transactional_emails.send_email_async"
+        ), self.captureOnCommitCallbacks(execute=True):
+            RecruitmentService.delete_recruitment(
+                self.org_actor, self.trial, note=self.NOTE
+            )
+
+    def _my_applications(self):
+        self._as(self.player)
+        response = self.client.get("/recruitments/applications/my")
+        self.assertEqual(response.status_code, 200)
+        return response.data["data"]["results"]
+
+    def test_my_applications_keeps_the_removed_one_with_the_note(self):
+        self._remove()
+
+        rows = self._my_applications()
+
+        self.assertEqual([row["id"] for row in rows], [str(self.application.id)])
+        recruitment = rows[0]["recruitment"]
+        self.assertTrue(recruitment["is_removed"])
+        self.assertEqual(recruitment["removed_note"], self.NOTE)
+        self.assertIsNotNone(recruitment["removed_at"])
+        # Never asked how a removed trial went.
+        self.assertFalse(rows[0]["can_give_feedback"])
+
+    def test_withdrawing_from_a_removed_one_is_refused(self):
+        self._remove()
+        self._as(self.player)
+
+        response = self.client.post(
+            f"/recruitments/applications/{self.application.id}/withdraw"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["message"], REMOVED_MESSAGE)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.status, "applied")
+
+    def test_no_pass_for_a_removed_one(self):
+        self.application.status = "trial_confirmed"
+        self.application.save(update_fields=["status"])
+        self._remove()
+        self._as(self.player)
+
+        response = self.client.get(
+            f"/recruitments/applications/{self.application.id}/pass"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["message"], REMOVED_MESSAGE)
+
+    def test_my_applications_carries_the_cover(self):
+        RecruitmentMedia.objects.create(
+            recruitment=self.trial, media_type="image",
+            file_url="https://media.goatza.test/cover.webp",
+            public_id="organizations/x/cover.webp",
+            thumbnail_url="https://media.goatza.test/cover-thumb.webp",
+            order=0,
+        )
+
+        rows = self._my_applications()
+
+        self.assertEqual(
+            rows[0]["recruitment"]["cover_media"],
+            {
+                "media_type": "image",
+                "file_url": "https://media.goatza.test/cover.webp",
+                "thumbnail_url": "https://media.goatza.test/cover-thumb.webp",
+            },
+        )
+
+
+class ApplicantsExportTests(_OrgFixtures, APITestCase):
+    """The .xlsx: owner/admin only, at most 100 rows a file, oldest first so
+    a batch is the same people whenever it is fetched, and player text that
+    can never become a formula."""
+
+    def setUp(self):
+        cache.clear()
+        self._setup_org("exp")
+        self.trial = self._trial()
+
+    def _applicants(self, count, start_at=None, status_value="applied"):
+        """`count` applications, applied one minute apart from `start_at`.
+        Unusable passwords: hashing hundreds of real ones is the slow part."""
+        start_at = start_at or _datetime(2030, 1, 1, 10, 0, tzinfo=_IST)
+        apps = []
+        for index in range(count):
+            user = User.objects.create_user(
+                email=f"exp_{status_value}_{index}@example.com",
+                password=None,
+                username=f"exp_{status_value}_{index}",
+            )
+            application = self._application(
+                self.trial, user, status_value,
+                shared_name=f"Player {status_value} {index}",
+            )
+            RecruitmentApplication.objects.filter(id=application.id).update(
+                applied_at=start_at + timedelta(minutes=index)
+            )
+            apps.append(application)
+        return apps
+
+    def _export(self, **params):
+        return self.client.get(
+            f"/recruitments/{self.trial.id}/applications/export",
+            params, **self._org_headers(),
+        )
+
+    def _sheet(self, response):
+        self.assertEqual(response.status_code, 200, getattr(response, "data", None))
+        self.assertEqual(
+            response["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        workbook = openpyxl.load_workbook(_io.BytesIO(response.content))
+        return workbook["Applicants"]
+
+    def test_owner_gets_an_oldest_first_xlsx_without_the_withdrawn(self):
+        self._applicants(3)
+        self._applicants(1, status_value="withdrawn")
+        self._as(self.owner)
+
+        response = self._export(scope="all")
+        sheet = self._sheet(response)
+
+        self.assertIn("attachment;", response["Content-Disposition"])
+        self.assertIn("-applicants-1-3.xlsx", response["Content-Disposition"])
+        header = [cell.value for cell in sheet[1]]
+        self.assertEqual(header[:3], ["#", "Name", "Phone"])
+        names = [row[1] for row in sheet.iter_rows(min_row=2, values_only=True)]
+        self.assertEqual(
+            names, ["Player applied 0", "Player applied 1", "Player applied 2"]
+        )
+
+    def test_start_hands_back_the_next_slice_of_at_most_100(self):
+        self._applicants(105)
+        self._as(self.owner)
+
+        first = self._sheet(self._export(scope="all"))
+        self.assertEqual(first.max_row - 1, 100)
+
+        second = self._sheet(self._export(scope="all", start=101))
+        rows = list(second.iter_rows(min_row=2, values_only=True))
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0][0], 101)
+        self.assertEqual(rows[0][1], "Player applied 100")
+
+        nothing = self._export(scope="all", start=200)
+        self.assertEqual(nothing.status_code, 400)
+        self.assertEqual(nothing.data["message"], "Nothing left to download.")
+
+    def test_filtered_scope_is_exactly_the_list_view(self):
+        self._applicants(2)
+        self._applicants(1, status_value="trial_confirmed")
+        self._as(self.owner)
+
+        sheet = self._sheet(self._export(scope="filtered", status="trial_confirmed"))
+
+        self.assertEqual(sheet.max_row - 1, 1)
+
+    def test_a_coach_cannot_download(self):
+        self._applicants(1)
+        self._as(self.coach)
+
+        response = self._export(scope="all")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.data["message"],
+            "Only owners and admins can download applicants.",
+        )
+
+    def test_a_formula_typed_by_a_player_is_stored_as_text(self):
+        user = self._user("exp_formula", "Formula")
+        self._application(
+            self.trial, user, shared_name='=HYPERLINK("x")',
+            shared_phone="+919876543210",
+        )
+        self._as(self.owner)
+
+        sheet = self._sheet(self._export(scope="all"))
+
+        name_cell = sheet.cell(row=2, column=2)
+        self.assertEqual(name_cell.value, '=HYPERLINK("x")')
+        self.assertEqual(name_cell.data_type, "s")
+        # And the phone keeps its leading "+": text, not a number.
+        phone_cell = sheet.cell(row=2, column=3)
+        self.assertEqual(phone_cell.value, "+919876543210")
+        self.assertEqual(phone_cell.data_type, "s")
+
+
+class ApplicantNewFiltersTests(_OrgFixtures, APITestCase):
+    """gender, position, has_highlights and the applied-between window each
+    narrow the list — and junk in any of them is no filter at all."""
+
+    def setUp(self):
+        cache.clear()
+        self._setup_org("flt")
+        self.trial = self._trial()
+        self.anna = self._user("flt_anna", "Anna", gender="female")
+        self.ravi = self._user("flt_ravi", "Ravi", gender="male")
+        self.anna_app = self._application(self.trial, self.anna)
+        self.ravi_app = self._application(self.trial, self.ravi)
+        self._as(self.owner)
+
+    def _ids(self, **params):
+        response = self.client.get(
+            f"/recruitments/{self.trial.id}/applications",
+            params, **self._org_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        return {row["id"] for row in response.data["data"]["results"]}
+
+    def test_gender_narrows(self):
+        self.assertEqual(self._ids(gender="female"), {str(self.anna_app.id)})
+        # Junk is no filter.
+        self.assertEqual(len(self._ids(gender="robot")), 2)
+
+    def test_position_narrows_and_another_sports_id_is_ignored(self):
+        striker = SportPosition.objects.create(sport=self.sport, name="Striker")
+        UserSportPosition.objects.create(
+            user=self.anna, sport=self.sport, position=striker
+        )
+        other_sport = Sport.objects.create(name="Fltcricket", icon_name="mdi:cricket")
+        bowler = SportPosition.objects.create(sport=other_sport, name="Bowler")
+
+        self.assertEqual(self._ids(position=str(striker.id)), {str(self.anna_app.id)})
+        self.assertEqual(len(self._ids(position=str(bowler.id))), 2)
+        self.assertEqual(len(self._ids(position="not-a-uuid")), 2)
+
+    def test_has_highlights_counts_only_what_a_recruiter_can_watch(self):
+        Highlight.objects.create(
+            user=self.anna, file_url="https://media.goatza.test/a.mp4",
+            public_id="goatza/highlights/anna-0",
+            visibility=Highlight.Visibility.RECRUITERS_ONLY,
+        )
+        Highlight.objects.create(
+            user=self.ravi, file_url="https://media.goatza.test/r.mp4",
+            public_id="goatza/highlights/ravi-0",
+            visibility=Highlight.Visibility.EVERYONE, is_deleted=True,
+        )
+
+        self.assertEqual(self._ids(has_highlights="true"), {str(self.anna_app.id)})
+
+    def test_applied_between_is_inclusive_days_in_the_trials_zone(self):
+        # 23:30 IST on the 10th is still the 10th at the ground, though it is
+        # already 18:00 UTC — the day boundary must be the trial's.
+        RecruitmentApplication.objects.filter(id=self.anna_app.id).update(
+            applied_at=_datetime(2030, 1, 10, 23, 30, tzinfo=_IST)
+        )
+        RecruitmentApplication.objects.filter(id=self.ravi_app.id).update(
+            applied_at=_datetime(2030, 1, 12, 9, 0, tzinfo=_IST)
+        )
+
+        self.assertEqual(
+            self._ids(applied_from="2030-01-10", applied_to="2030-01-10"),
+            {str(self.anna_app.id)},
+        )
+        self.assertEqual(self._ids(applied_from="2030-01-11"), {str(self.ravi_app.id)})
+        # A backwards range is junk, and ignored.
+        self.assertEqual(
+            len(self._ids(applied_from="2030-01-12", applied_to="2030-01-10")), 2
+        )

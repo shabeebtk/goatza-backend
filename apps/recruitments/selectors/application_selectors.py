@@ -1,11 +1,18 @@
 # recruitments/selectors/application_selectors.py
-from django.db.models import Count, F, Prefetch, Q
+import uuid
+from datetime import date, datetime, time, timedelta
+
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q
 from django.db.models.functions import ExtractYear
+from apps.accounts.models import UserProfile
+from apps.highlights.models import Highlight
+from apps.highlights.selectors.highlight_selectors import recruiter_visible_q
 from apps.recruitments.models import (
     RecruitmentApplication,
     RecruitmentApplicationAnswer,
     RecruitmentApplicationStatusHistory,
 )
+from apps.sports.models import SportPosition, UserSportPosition
 
 
 # The birth year a filter or a sort reads, off the applicant's profile.
@@ -18,6 +25,9 @@ from apps.recruitments.models import (
 # (recruitment, status) index already narrows. Revisit past roughly 5,000
 # applications on a single recruitment.
 BIRTH_YEAR = ExtractYear("applicant__profile__birthdate")
+
+# The profile's own column width — a longer "city" cannot match anything.
+CITY_FILTER_MAX = 100
 
 _TRUE = {"true", "1", "yes"}
 _FALSE = {"false", "0", "no"}
@@ -52,10 +62,32 @@ def _as_year(value):
     return year if 1900 <= year <= 2100 else None
 
 
+def _as_uuid(value):
+    """A UUID, or None — junk must never reach the DB as a malformed id."""
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _as_date(value):
+    """A "YYYY-MM-DD" calendar day, or None for absent and for junk."""
+    if not value:
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value).strip())
+    except ValueError:
+        return None
+
+
 class ApplicationSelector:
 
     @staticmethod
-    def list_applications(
+    def filtered_applications(
         recruitment,
         status=None,
         search=None,
@@ -66,16 +98,25 @@ class ApplicationSelector:
         birth_year_max=None,
         age_mismatch=None,
         self_outcome=None,
-        sort=None,
-        limit=20,
-        offset=0
+        gender=None,
+        position=None,
+        city=None,
+        has_highlights=None,
+        applied_from=None,
+        applied_to=None,
     ):
         """
-        Org-side applicants listing for a single recruitment.
+        Every filter the org-side applicants list understands, and nothing
+        else: no count, no order, no slice. Returns
+        ``(queryset, no_birth_year_count)``.
 
-        Returns (page_queryset, total_count, no_birth_year_count).
+        THE ONE PIPELINE. The list and the Excel export both call this, so
+        "download this view" is exactly the rows the org is looking at — two
+        copies of these filters would agree until somebody edited one.
+
         Ownership is enforced by the caller — this only ever queries
-        applications of the given recruitment.
+        applications of the given recruitment. Every filter is LENIENT: junk
+        is no filter, never a 500 and never an unexpectedly empty list.
 
         Two different age questions live here and must not be confused:
         ``age_category`` is the group the applicant APPLIED UNDER, and
@@ -164,6 +205,65 @@ class ApplicationSelector:
         elif self_outcome == "not_attended":
             queryset = queryset.filter(attended_self_reported=False)
 
+        # GENDER — off the PROFILE, the only place it is recorded.
+        if gender in UserProfile.Gender.values:
+            queryset = queryset.filter(applicant__profile__gender=gender)
+
+        # POSITION — a position the player LISTS for this recruitment's sport,
+        # not the one they applied as. Only an id belonging to that sport is
+        # honoured, so another sport's id is ignored rather than emptying the
+        # list. Exists, not a join: a join would repeat rows.
+        position_id = _as_uuid(position)
+        if position_id and SportPosition.objects.filter(
+            id=position_id, sport_id=recruitment.sport_id
+        ).exists():
+            queryset = queryset.filter(
+                Exists(
+                    UserSportPosition.objects.filter(
+                        user_id=OuterRef("applicant_id"),
+                        sport_id=recruitment.sport_id,
+                        position_id=position_id,
+                    )
+                )
+            )
+
+        # CITY — the profile's own city, as a substring: "kochi" finds
+        # "Kochi, Kerala".
+        city = (city or "").strip()[:CITY_FILTER_MAX]
+        if city:
+            queryset = queryset.filter(applicant__profile__city__icontains=city)
+
+        # HAS HIGHLIGHTS — something a RECRUITER can watch, by the same rule
+        # the row's "▶ Highlights (n)" chip counts with (recruiter_visible_q).
+        # Narrows only, like age_mismatch.
+        if _as_bool(has_highlights) is True:
+            queryset = queryset.filter(
+                Exists(
+                    Highlight.objects.filter(
+                        recruiter_visible_q(), user_id=OuterRef("applicant_id")
+                    )
+                )
+            )
+
+        # APPLIED BETWEEN — whole calendar days IN THE RECRUITMENT'S ZONE,
+        # both ends inclusive: "the 12th" means the 12th at the ground, not on
+        # the server's UTC clock. A backwards range is junk, and ignored.
+        applied_from = _as_date(applied_from)
+        applied_to = _as_date(applied_to)
+        if applied_from and applied_to and applied_from > applied_to:
+            applied_from = applied_to = None
+        tz = recruitment.zoneinfo
+        if applied_from:
+            queryset = queryset.filter(
+                applied_at__gte=datetime.combine(applied_from, time.min, tzinfo=tz)
+            )
+        if applied_to:
+            queryset = queryset.filter(
+                applied_at__lt=datetime.combine(
+                    applied_to + timedelta(days=1), time.min, tzinfo=tz
+                )
+            )
+
         # SEARCH — applicant username or profile name (mirrors ListPostLikes).
         if search:
             queryset = queryset.filter(
@@ -195,6 +295,27 @@ class ApplicationSelector:
         if birth_year_max is not None:
             queryset = queryset.filter(birth_year__lte=birth_year_max)
 
+        return queryset, no_birth_year_count
+
+    @staticmethod
+    def list_applications(
+        recruitment,
+        sort=None,
+        limit=20,
+        offset=0,
+        **filters,
+    ):
+        """
+        Org-side applicants listing for a single recruitment.
+
+        Returns (page_queryset, total_count, no_birth_year_count). The
+        filtering is ``filtered_applications``; this only counts, orders and
+        slices, so the list and the export can never filter differently.
+        """
+        queryset, no_birth_year_count = (
+            ApplicationSelector.filtered_applications(recruitment, **filters)
+        )
+
         # COUNT on the filtered queryset, before slicing.
         total_count = queryset.count()
 
@@ -212,6 +333,59 @@ class ApplicationSelector:
         )[offset: offset + limit]
 
         return page, total_count, no_birth_year_count
+
+    @staticmethod
+    def export_queryset(recruitment, scope="filtered", filters=None):
+        """
+        Every row a download may draw from, in DOWNLOAD order. The caller
+        counts it and slices one batch of 100.
+
+        ``scope="filtered"`` is exactly the list the org is looking at — its
+        tab, search and every filter, through ``filtered_applications``.
+        ``scope="all"`` is everybody who has not withdrawn, whatever the
+        screen says.
+
+        ALWAYS ``applied_at, id`` ASCENDING, whatever the list is sorted by:
+        a new applicant then lands at the END, so rows 1–100 are still the
+        same 100 people when the org comes back for 101–200. Newest-first
+        would shift every batch by one per new application.
+        """
+        if scope == "all":
+            queryset = (
+                RecruitmentApplication.objects
+                .filter(recruitment=recruitment)
+                .exclude(status=RecruitmentApplication.Status.WITHDRAWN)
+                .annotate(birth_year=BIRTH_YEAR)
+            )
+        else:
+            queryset, _ = ApplicationSelector.filtered_applications(
+                recruitment, **(filters or {})
+            )
+
+        # One query for every answer on the batch, with the question and the
+        # chosen option on each — never one per cell.
+        answers_qs = (
+            RecruitmentApplicationAnswer.objects
+            .select_related("question", "selected_option")
+            .order_by(
+                "question__display_order",
+                "selected_option__display_order",
+                "id",
+            )
+        )
+
+        return (
+            queryset
+            .select_related(
+                "applicant__profile",
+                "age_category",
+                "session__location",
+                "recruitment",
+                "fee_marked_by__user__profile",
+            )
+            .prefetch_related(Prefetch("answers", queryset=answers_qs))
+            .order_by("applied_at", "id")
+        )
 
     # Sorts the applicants list understands. Anything else — including
     # junk — falls back to newest first, the order this list has always
@@ -246,7 +420,14 @@ class ApplicationSelector:
         a known status is passed — junk values are ignored (lenient, same spirit
         as the org-side list). The recruitment + its org/sport are select_related
         (org profile too, for the logo) so the serializer issues no extra query.
+        The recruitment's media is prefetched for the row's cover — one query
+        per page, and the default ordering is the same "first media" the list
+        card picks.
         """
+        # NO is_deleted FILTER, DELIBERATELY. A recruitment the club deleted
+        # stays on the player's Applied tab — it is their history, and the
+        # card shows it greyed with the club's note (is_removed /
+        # removed_note) instead of a link that would 404.
         queryset = RecruitmentApplication.objects.filter(
             applicant=user
         )
@@ -264,6 +445,8 @@ class ApplicationSelector:
             "recruitment__sport",
             "age_category",
             "session__location",
+        ).prefetch_related(
+            "recruitment__media",
         ).order_by("-applied_at")[offset: offset + limit]
 
         return page, total_count

@@ -20,6 +20,7 @@ from apps.recruitments.legacy_status import (
     map_legacy_status,
 )
 from apps.recruitments.trial_window import is_trial_over
+from apps.recruitments.removal import refuse_if_removed
 from apps.sports.models import SportPosition
 from apps.connections.services.follow_services import FollowService
 from core.constant import TYPE_ORGANIZATION
@@ -604,6 +605,10 @@ class ApplicationService:
         )
         if not application:
             raise ValidationError("Application not found.")
+
+        # The club deleted the posting: the row stays as history, but there
+        # is nothing left to withdraw from — and no counter worth moving.
+        refuse_if_removed(application.recruitment)
 
         if application.status == RecruitmentApplication.Status.WITHDRAWN:
             raise ValidationError("Application already withdrawn.")

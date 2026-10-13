@@ -423,6 +423,9 @@ APPLICATION_STATUS_TEMPLATE = "emails/application_status.html"
 NEW_APPLICANT_ALERT_TEMPLATE = "emails/new_applicant_alert.html"
 RECRUITMENT_ANNOUNCEMENT_TEMPLATE = "emails/recruitment_announcement.html"
 TRIAL_REMINDER_TEMPLATE = "emails/trial_reminder.html"
+RECRUITMENT_REMOVED_TEMPLATE = "emails/recruitment_removed.html"
+
+RECRUITMENT_REMOVED_SUBJECT = "{org} removed “{title}”"
 
 # Only these statuses are worth an email. `reviewing` and `shortlisted` are the
 # org's private working states, `withdrawn` is the player's own action, and a
@@ -697,6 +700,49 @@ def send_application_status_email(*, application, to_status) -> None:
             "badge_label": copy["badge_label"],
             # A literal from the table above, never a request value.
             "badge_style": mark_safe(copy["badge_style"]),
+        },
+        to_email=recipient,
+    )
+
+
+def send_recruitment_removed_email(*, application, note) -> None:
+    """Tell a still-in-play player the club deleted the recruitment.
+
+    Fire-and-forget, like the status email: its caller is the
+    ``recruitments.notify_removed`` task, which runs INLINE in the delete
+    request whenever Celery is off, and a blocking send per applicant would
+    hold that request for the whole list.
+
+    The button goes to the recruitments list, never the posting — it is
+    deleted and would 404.
+    """
+    recipient = application.applicant.email
+    if not recipient:
+        return
+
+    recruitment = application.recruitment
+    context = _recruitment_card_context(application)
+    player_name = _player_name(application)
+    base_url = shared_email_context()["frontend_base_url"]
+
+    _send(
+        subject=RECRUITMENT_REMOVED_SUBJECT.format(
+            org=context["org_name"], title=recruitment.title
+        ),
+        text_body=(
+            f"Hi {player_name},\n\n"
+            f"{context['org_name']} removed: {recruitment.title}\n\n"
+            f"“{note}”\n\n"
+            f"Your application is closed. You don't need to do anything.\n\n"
+            f"Find other trials: {base_url}/recruitments"
+        ),
+        html_template=RECRUITMENT_REMOVED_TEMPLATE,
+        context={
+            **context,
+            "player_name": player_name,
+            # Plain text, the club's own words — escaped by the template's
+            # |linebreaks, never marked safe.
+            "note": note,
         },
         to_email=recipient,
     )

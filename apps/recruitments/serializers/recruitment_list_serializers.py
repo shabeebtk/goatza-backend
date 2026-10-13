@@ -307,6 +307,28 @@ class TrialSessionsMixin(metaclass=serializers.SerializerMetaclass):
         return trial_sessions_payload(obj, self.context.get("center"))
 
 
+def cover_media_payload(recruitment):
+    """
+    The card's cover: the FIRST media item in the model's ordering
+    (``RecruitmentMedia.Meta.ordering = ["order"]``), or None.
+
+    One function so the list card and My applications can never pick two
+    different covers for one recruitment. Reads ``media.all()`` — the caller
+    must prefetch ``media`` (or ``recruitment__media``), or this is a query
+    per row.
+    """
+    first_media = next(iter(recruitment.media.all()), None)
+
+    if not first_media:
+        return None
+
+    return {
+        "media_type": first_media.media_type,
+        "file_url": first_media.file_url,
+        "thumbnail_url": first_media.thumbnail_url,
+    }
+
+
 class RecruitmentListSerializer(
     TrialSessionsMixin, serializers.ModelSerializer
 ):
@@ -463,17 +485,7 @@ class RecruitmentListSerializer(
         return bool(getattr(obj, "is_saved", False))
 
     def get_cover_media(self, obj):
-
-        first_media = next(iter(obj.media.all()), None)
-
-        if not first_media:
-            return None
-
-        return {
-            "media_type": first_media.media_type,
-            "file_url": first_media.file_url,
-            "thumbnail_url": first_media.thumbnail_url,
-        }
+        return cover_media_payload(obj)
 
     def get_media_count(self, obj):
         return len(obj.media.all())

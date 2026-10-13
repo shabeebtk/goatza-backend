@@ -271,6 +271,21 @@ class Recruitment(BaseUUIDModel):
     is_featured = models.BooleanField(default=False)
     is_deleted = models.BooleanField(default=False)
 
+    # WHO TOOK IT DOWN, AND WHAT THEY TOLD APPLICANTS. Written once, by
+    # RecruitmentService.delete_recruitment (owner/admin) or
+    # moderator_delete_recruitment (deleted_at only — a takedown has no club
+    # note and no member behind it). The note is what the player's Applied
+    # card shows in place of the dead link, so it outlives the listing.
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_note = models.TextField(blank=True, default="")
+    deleted_by = models.ForeignKey(
+        OrganizationMember,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="deleted_recruitments",
+    )
+
     published_at = models.DateTimeField(
         null=True,
         blank=True,

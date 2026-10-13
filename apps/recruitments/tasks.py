@@ -80,3 +80,103 @@ def send_trial_reminders():
     scheduled ahead with ``eta``.
     """
     call_command("send_trial_reminders")
+
+
+@shared_task(name="recruitments.notify_removed", acks_late=False)
+def notify_recruitment_removed(recruitment_id):
+    """
+    Tell everybody still in play on a deleted recruitment, with the club's
+    note: an in-app notification (+ push) and an email each.
+
+    AT MOST ONCE (``acks_late=False``), for the same reason as
+    ``emails.send``: sending is not idempotent and there is no "notified_at"
+    column to make it so. A worker dying mid-list loses the rest of the list;
+    a redelivery would message the first half twice, which is worse.
+
+    Enqueued by ``RecruitmentService.delete_recruitment`` on commit, so the
+    row is already deleted when this runs — it is loaded WITHOUT an
+    ``is_deleted`` filter on purpose. Gone entirely (hard-deleted since) →
+    nothing to say.
+
+    Blocks are honoured in both directions, as announcements honour them: a
+    player who blocked the club does not hear from it, even about this.
+    """
+    # Imported here: recruitment_service imports this module for the task
+    # handle, and these pull in the notifications and email layers.
+    from apps.notifications.services.notification_service import (
+        NotificationService,
+    )
+    from apps.recruitments.models import Recruitment, RecruitmentApplication
+    from apps.recruitments.removal import IN_PLAY_STATUSES
+    from apps.recruitments.services.announcement_service import (
+        AnnouncementService,
+    )
+    from utils.transactional_emails import send_recruitment_removed_email
+
+    recruitment = (
+        Recruitment.objects
+        .select_related("organization")
+        .filter(id=recruitment_id)
+        .first()
+    )
+    if recruitment is None:
+        logger.info(
+            f"recruitments.notify_removed | recruitment gone | "
+            f"recruitment={recruitment_id}"
+        )
+        return
+
+    organization = recruitment.organization
+    note = recruitment.deleted_note
+
+    applications = list(
+        RecruitmentApplication.objects
+        .filter(recruitment=recruitment, status__in=IN_PLAY_STATUSES)
+        .select_related(
+            "applicant__profile",
+            "applied_position",
+            "recruitment__organization",
+        )
+    )
+    blocked = AnnouncementService._blocked_user_ids(
+        organization, [application.applicant_id for application in applications]
+    )
+
+    notified = emailed = skipped = failed = 0
+    for application in applications:
+        if application.applicant_id in blocked:
+            skipped += 1
+            continue
+
+        # Two channels, two guards: a failed notification must not cost the
+        # email, and one bad row must never stop the rest of the list.
+        try:
+            NotificationService.recruitment_removed(
+                actor_org=organization,
+                recipient_user=application.applicant,
+                recruitment=recruitment,
+                note=note,
+            )
+            notified += 1
+        except Exception as exc:
+            failed += 1
+            logger.error(
+                f"recruitments.notify_removed | notification failed | "
+                f"application={application.id} | {exc}"
+            )
+
+        try:
+            send_recruitment_removed_email(application=application, note=note)
+            emailed += 1
+        except Exception as exc:
+            failed += 1
+            logger.error(
+                f"recruitments.notify_removed | email failed | "
+                f"application={application.id} | {exc}"
+            )
+
+    logger.info(
+        f"recruitments.notify_removed | recruitment={recruitment.id} | "
+        f"in_play={len(applications)} | notified={notified} | "
+        f"emails_queued={emailed} | blocked={skipped} | failures={failed}"
+    )

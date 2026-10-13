@@ -91,6 +91,20 @@ MODERATION_WARNING_BODY = (
     "Your content was found to violate Goatza's community guidelines."
 )
 
+# A removal push carries the club's note (up to 500 chars). Lock screens show
+# two or three lines, so the body is cut at a word boundary and the full note
+# waits on the Applied card.
+REMOVED_PUSH_BODY_MAX = 140
+
+
+def _truncate(text, limit):
+    """`text` cut to `limit` characters at a word boundary, with an ellipsis."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,.;:—-")
+    return f"{cut}…"
+
 
 def _reporting_line(application, session):
     """"Sat 11 Oct · 9:00 am · Corporation Stadium" — the push's whole point.
@@ -263,6 +277,20 @@ def build_notification_payload(notification: "Notification") -> dict:
             notification.recruitment, "title", "a recruitment"
         )
         body = f"{actor_name} · {recruitment_title}"
+
+    elif notification.type == Notification.Type.RECRUITMENT_REMOVED:
+        # The club's own reason is the push — "the ground isn't available"
+        # is the sentence the player needs. Read from `data`: the recruitment
+        # row is soft-deleted and nothing here should depend on it.
+        recruitment_title = notification.data.get(
+            "recruitment_title", "a recruitment"
+        )
+        note = notification.data.get("note", "")
+        title = f"{actor_name} removed a recruitment"
+        body = _truncate(
+            f"{recruitment_title}: {note}" if note else recruitment_title,
+            REMOVED_PUSH_BODY_MAX,
+        )
 
     elif notification.type == Notification.Type.TRIAL_REMINDER:
         recruitment_title = notification.data.get("recruitment_title", "")
@@ -790,6 +818,37 @@ class NotificationService:
         )
         if push:
             _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # RECRUITMENT REMOVED (org deleted a posting → people still waiting on it)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def recruitment_removed(actor_org, recipient_user, recruitment, note):
+        """
+        Tell one still-in-play applicant the club deleted the recruitment.
+
+        Called ONLY from the ``recruitments.notify_removed`` task, which runs
+        once per delete (``acks_late=False``) — so, like an announcement, no
+        dedup key here.
+
+        Title and note go into ``data``, not just the FK: the recruitment is
+        soft-deleted, and the in-app row and the push must still read right
+        without anything loading the dead listing.
+
+        Ungrouped: it is a one-off with the club's own reason in it.
+        """
+        notification = Notification.objects.create(
+            type=Notification.Type.RECRUITMENT_REMOVED,
+            recruitment=recruitment,
+            data={
+                "recruitment_id": str(recruitment.id),
+                "recruitment_title": recruitment.title,
+                "note": note,
+            },
+            **NotificationService._actor_kwargs(actor_org=actor_org),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        _dispatch(notification)
 
     # ──────────────────────────────────────────
     # CAREER ADD PROMPT (org selection → player)

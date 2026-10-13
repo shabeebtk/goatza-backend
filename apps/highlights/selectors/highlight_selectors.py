@@ -161,6 +161,25 @@ def followed_user_ids_among(owner_ids, viewer_actor) -> set:
     return set(queryset.values_list("following_user_id", flat=True))
 
 
+def recruiter_visible_q() -> Q:
+    """
+    The clips a RECRUITER may watch: every visibility level, live clips only.
+
+    The recruiter branch of the matrix as ONE ``Q`` on ``Highlight``, so the
+    applicant-list chip (``visible_highlight_counts_for``) and the applicants
+    list's "has highlights" filter (an ``Exists`` in ``ApplicationSelector``)
+    can never disagree about which players have something to watch.
+    """
+    return Q(
+        visibility__in=(
+            Highlight.Visibility.EVERYONE,
+            Highlight.Visibility.FOLLOWERS_AND_RECRUITERS,
+            Highlight.Visibility.RECRUITERS_ONLY,
+        ),
+        is_deleted=False,
+    )
+
+
 def visible_highlight_counts_for(owner_ids, viewer_actor) -> dict:
     """
     ``{user_id: visible_count}`` for a whole PAGE of players — what the
@@ -181,16 +200,10 @@ def visible_highlight_counts_for(owner_ids, viewer_actor) -> dict:
     if not ids:
         return {}
 
-    visible = Q(visibility=Highlight.Visibility.EVERYONE)
-
     if is_recruiter(viewer_actor):
-        visible |= Q(
-            visibility__in=(
-                Highlight.Visibility.FOLLOWERS_AND_RECRUITERS,
-                Highlight.Visibility.RECRUITERS_ONLY,
-            )
-        )
+        visible = recruiter_visible_q()
     else:
+        visible = Q(visibility=Highlight.Visibility.EVERYONE)
         followed = followed_user_ids_among(ids, viewer_actor)
         if followed:
             visible |= Q(

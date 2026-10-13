@@ -16,6 +16,7 @@ from apps.recruitments.legacy_status import LEGACY_STATUSES
 from apps.recruitments.serializers.recruitment_list_serializers import (
     ApplicationAgeCategorySerializer,
     application_session_payload,
+    cover_media_payload,
 )
 from apps.recruitments.feedback_window import (
     can_give_feedback,
@@ -307,6 +308,8 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
     # nothing reads it to decide whether somebody may be confirmed or
     # selected.
     fee_marked_by = serializers.SerializerMethodField()
+    # For the row's "Born 2009" chip.
+    birth_year = serializers.SerializerMethodField()
 
     class Meta:
         model = RecruitmentApplication
@@ -335,10 +338,19 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
             # Birth year outside the chosen group when they applied. A column,
             # computed server-side by ApplicationService.apply — no query.
             "age_mismatch_at_apply",
+            "birth_year",
         ]
 
     def get_session(self, obj):
         return application_session_payload(obj)
+
+    def get_birth_year(self, obj):
+        """
+        The list selector's BIRTH_YEAR annotation — already on the row, so no
+        query. Null off that queryset: the detail endpoint inherits this field
+        unannotated and carries the live ``applicant_birth_year`` instead.
+        """
+        return getattr(obj, "birth_year", None)
 
     def get_fee_marked_by(self, obj):
         """
@@ -524,6 +536,17 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
     # player who applied to a London trial must not read its time on their
     # own clock. See TrialSessionsMixin.
     timezone = serializers.CharField(read_only=True)
+    # The same cover the list card shows (cover_media_payload), so the row
+    # has a picture instead of the sport-icon fallback. Read off the page's
+    # recruitment__media prefetch — no query per row.
+    cover_media = serializers.SerializerMethodField()
+    # THE CLUB DELETED IT. My applications keeps the row on purpose (see
+    # list_my_applications), so the card can grey out, drop its dead link and
+    # show why. removed_note is blank for a moderator takedown and for a
+    # delete that needed no note.
+    is_removed = serializers.BooleanField(source="is_deleted", read_only=True)
+    removed_at = serializers.DateTimeField(source="deleted_at", read_only=True)
+    removed_note = serializers.CharField(source="deleted_note", read_only=True)
 
     class Meta:
         model = Recruitment
@@ -533,6 +556,10 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
             "recruitment_type",
             "status",
             "city",
+            "is_removed",
+            "removed_at",
+            "removed_note",
+            "cover_media",
             "event_date",
             "application_deadline",
             "is_trial_over",
@@ -548,6 +575,9 @@ class MyApplicationRecruitmentSerializer(serializers.ModelSerializer):
             "organization",
             "sport",
         ]
+
+    def get_cover_media(self, obj):
+        return cover_media_payload(obj)
 
 
 # LIST ITEM — one row in the authenticated player's own applications list.
@@ -594,10 +624,16 @@ class MyApplicationListSerializer(serializers.ModelSerializer):
     def get_session(self, obj):
         return application_session_payload(obj)
 
+    # A removed recruitment is never asked about: the feedback endpoint
+    # refuses it, and a prompt that 400s is exactly what these flags prevent.
     def get_can_give_feedback(self, obj):
+        if obj.recruitment.is_deleted:
+            return False
         return can_give_feedback(obj, obj.recruitment)
 
     def get_feedback_window_open(self, obj):
+        if obj.recruitment.is_deleted:
+            return False
         return prompt_window_open(obj.recruitment)
 
 
