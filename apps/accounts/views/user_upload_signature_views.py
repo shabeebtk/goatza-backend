@@ -3,6 +3,7 @@ from rest_framework.permissions import IsAuthenticated
 from utils.response import response_data
 from utils.errors import error_body
 from services.storage.factory import get_storage_service
+from services.storage.paths import TEMP_BATCH_TYPES, is_canonical_uuid
 from apps.organization.models import Organization
 from apps.organization.services.organization_member_service import OrganizationMemberService
 
@@ -152,6 +153,66 @@ USER_ONLY_TYPES = {"profile", "cover", "achievements", "matches", "highlights"}
 ORG_ONLY_TYPES = {"organization_logo", "organization_cover", "recruitments"}
 
 
+def upload_error(message, field="non_field_errors", status_code=400):
+    """The one refusal shape every upload endpoint answers with."""
+    return response_data(
+        success=False,
+        message=message,
+        error=message,
+        status_code=status_code,
+        data=error_body(message, field)
+    )
+
+
+def resolve_upload_actor(request, actor, upload_type, org_id):
+    """
+    Who an upload is signed for, or why it is refused.
+
+    Returns ``(actor, None)`` or ``(None, (message, field, status_code))`` —
+    the same "first violation" shape ``_validate_files`` returns, so a caller
+    answers with ``upload_error(*refusal)``.
+
+    Shared with the multipart endpoints on purpose: a multipart part URL
+    writes into the bucket exactly like a presigned PUT does, so the two must
+    never drift on who may write where.
+
+    ``org_id`` lets a user acting personally upload for an org they belong to
+    (it mirrors the old ``org_id`` query param); ``actor`` is ``request.actor``
+    and is switched to that org in place. ``upload_type=None`` — multipart
+    complete/abort, which name no type — skips the per-type actor rules.
+    """
+    if org_id:  # for user want to access org directly
+        try:
+            org = Organization.objects.select_related("profile").get(id=org_id)
+        except Organization.DoesNotExist:
+            return None, ("Organization not found", "org_id", 404)
+
+        if not OrganizationMemberService.is_organization_member(
+            org, request.user
+        ):
+            return None, (
+                "You are not a member of this organization", "org_id", 400
+            )
+
+        actor.organization = org
+        actor.actor_type = "organization"
+
+    # -----------------------------------
+    # Prevent wrong actor usage
+    # -----------------------------------
+    if upload_type in USER_ONLY_TYPES and not actor.is_user:
+        return None, (
+            "Switch to your personal account for this upload", "type", 403
+        )
+
+    if upload_type in ORG_ONLY_TYPES and not actor.is_org:
+        return None, (
+            "Switch to your organization account for this upload", "type", 403
+        )
+
+    return actor, None
+
+
 class GetUploadConfigAPIView(BaseAPIView):
     """
     Uses request.actor
@@ -169,6 +230,7 @@ class GetUploadConfigAPIView(BaseAPIView):
         {
             "type": "posts",
             "org_id": "<uuid>",              # only when acting for an org type
+            "temp_post_id": "<uuid>",        # optional, posts/recruitments only
             "files": [
                 {"content_type": "image/webp", "size_bytes": 812345, "kind": "image"}
             ]
@@ -177,6 +239,20 @@ class GetUploadConfigAPIView(BaseAPIView):
         Responds with one presigned PUT per file, IN REQUEST ORDER — the client
         pairs uploads back to its picked files (and a video to its thumb) by
         position.
+
+        `temp_post_id` exists for RE-SIGNING an in-flight batch: a client whose
+        URLs expired, or were answered 403, part-way through a post asks again
+        for the files it has not uploaded yet, naming the batch it already
+        has, and the new keys land in that same folder — so a video and its
+        poster, or an image and its thumb, still share a folder when the pair
+        straddles the two requests. Honoured for TEMP_BATCH_TYPES only and
+        ignored for every other type; it must be a canonical lowercase UUID.
+
+        It is safe to accept because the folder is always built under the
+        CALLER's own prefix (users/<their id>/… or an org they are a member
+        of): a client can only ever name one of its own batches. The worst a
+        made-up id does is add objects to one of the user's own earlier
+        batches, which they could already upload into with a fresh request.
         """
         try:
             body = request.data if isinstance(request.data, dict) else {}
@@ -184,88 +260,40 @@ class GetUploadConfigAPIView(BaseAPIView):
             upload_type = body.get("type")
             org_id = body.get("org_id")
             files = body.get("files")
+            temp_post_id = body.get("temp_post_id")
 
             if upload_type not in POLICY:
-                msg = "Invalid upload type"
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=400,
-                    data=error_body(msg, "type")
-                )
+                return upload_error("Invalid upload type", "type")
 
             # -----------------------------------
             # File policy (counts, kinds, sizes, pairing)
             # -----------------------------------
             error = self._validate_files(POLICY[upload_type], files)
             if error:
-                msg, field = error
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=400,
-                    data=error_body(msg, field)
-                )
-
-            actor = self.actor
-            user = request.user
-            if org_id: # for user want to access org directly
-                try:
-                    org = Organization.objects.select_related("profile").get(id=org_id)
-                    if not OrganizationMemberService.is_organization_member(org, user):
-                        msg = "You are not a member of this organization"
-                        return response_data(
-                            success=False,
-                            message=msg,
-                            error=msg,
-                            status_code=400,
-                            data=error_body(msg, "org_id")
-                        )
-
-                    actor.organization = org
-                    actor.actor_type = "organization"
-
-                except Organization.DoesNotExist:
-                    msg = "Organization not found"
-                    return response_data(
-                        success=False,
-                        message=msg,
-                        error=msg,
-                        status_code=404,
-                        data=error_body(msg, "org_id")
-                    )
+                return upload_error(*error)
 
             # -----------------------------------
-            # Prevent wrong actor usage
+            # Re-signing into an in-flight batch
             # -----------------------------------
-            if upload_type in USER_ONLY_TYPES and not actor.is_user:
-                msg = "Switch to your personal account for this upload"
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=403,
-                    data=error_body(msg, "type")
-                )
+            temp_id = None
+            if upload_type in TEMP_BATCH_TYPES and temp_post_id is not None:
+                if not is_canonical_uuid(temp_post_id):
+                    return upload_error("Invalid temp_post_id", "temp_post_id")
+                temp_id = temp_post_id
 
-            if upload_type in ORG_ONLY_TYPES and not actor.is_org:
-                msg = "Switch to your organization account for this upload"
-                return response_data(
-                    success=False,
-                    message=msg,
-                    error=msg,
-                    status_code=403,
-                    data=error_body(msg, "type")
-                )
+            actor, refusal = resolve_upload_actor(
+                request, self.actor, upload_type, org_id
+            )
+            if refusal:
+                return upload_error(*refusal)
 
             storage = get_storage_service()
 
             config = storage.get_upload_config(
                 actor=actor,
                 upload_type=upload_type,
-                files=files
+                files=files,
+                temp_id=temp_id
             )
 
             return response_data(

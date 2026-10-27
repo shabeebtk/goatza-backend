@@ -563,6 +563,14 @@ MEDIA_PUBLIC_BASE_URL = (
     os.getenv("MEDIA_PUBLIC_BASE_URL") or "https://media.goatza.com"
 ).rstrip("/")
 
+# Origins allowed to PUT straight into the bucket ON TOP OF
+# CORS_ALLOWED_ORIGINS, comma-separated. Read only by
+# `python manage.py r2_setup --apply`, which writes the bucket's CORS policy —
+# the API's own CORS settings above never reach R2 by themselves. The usual
+# entry is http://localhost:3000, for a local frontend uploading into a bucket
+# whose production origins come from CORS_ALLOWED_ORIGINS.
+R2_CORS_EXTRA_ORIGINS = env_list("R2_CORS_EXTRA_ORIGINS")
+
 
 
 # -------- EMAIL CONFIG ----------

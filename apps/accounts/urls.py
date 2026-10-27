@@ -29,6 +29,11 @@ from apps.accounts.views.email_change_views import (
 from apps.accounts.views.phone_change_views import PhoneChangeAPIView
 from apps.accounts.views.user_privacy_views import UserPublicProfilePrivacyAPIView
 from apps.accounts.views.user_upload_signature_views import GetUploadConfigAPIView
+from apps.accounts.views.user_upload_multipart_views import (
+    CreateMultipartUploadAPIView,
+    CompleteMultipartUploadAPIView,
+    AbortMultipartUploadAPIView,
+)
 # base url - /user/
 
 urlpatterns = [
@@ -80,4 +85,11 @@ urlpatterns = [
 
     # user upload media signature
     path('get/upload/signature', GetUploadConfigAPIView.as_view()),
+
+    # multipart uploads for large videos — beside the signature endpoint
+    # because they are the same write path: create takes the video key that
+    # endpoint issued, and the parts go straight to R2 like a presigned PUT.
+    path('upload/multipart/create', CreateMultipartUploadAPIView.as_view()),
+    path('upload/multipart/complete', CompleteMultipartUploadAPIView.as_view()),
+    path('upload/multipart/abort', AbortMultipartUploadAPIView.as_view()),
 ]
