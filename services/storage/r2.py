@@ -15,10 +15,15 @@ Large videos go up as an S3 multipart upload instead of one PUT (see the
 multipart section below): a dropped connection then costs one part, not the
 whole file — which on a phone is the difference between a retry and a failed
 post.
+
+In production the browser does not PUT to the S3 endpoint itself but to the
+upload gateway (settings.R2_UPLOAD_GATEWAY_URL; see browser_upload_url), which
+forwards the signed request unchanged.
 """
 
 import logging
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 import boto3
 from botocore.config import Config
@@ -78,6 +83,43 @@ def endpoint_url() -> str:
 def public_url_for(key: str) -> str:
     """Where an object is readable once uploaded — final, directly renderable."""
     return f"{settings.MEDIA_PUBLIC_BASE_URL}/{key}"
+
+
+def browser_upload_url(signed_url: str) -> str:
+    """
+    The URL a browser is handed for a signed upload: `signed_url` itself, or —
+    with settings.R2_UPLOAD_GATEWAY_URL set — the same URL on the upload
+    gateway's scheme and host.
+
+    WHY. Over some mobile carriers the S3 endpoint's hostname cannot carry an
+    upload body: the same PUT from the same phone succeeds on Wi-Fi and dies
+    on mobile data with a status-less network error, every time, while a GET
+    to that host answers. Retrying cannot fix a broken path. The gateway
+    (goatza-upload-gateway, a Cloudflare Worker on our own zone) takes the PUT
+    on a hostname the carrier reaches like any other Cloudflare site and
+    forwards it to the S3 endpoint over Cloudflare's network.
+
+    WHY THE SIGNATURE STAYS VALID. SigV4 signed the request as R2 will receive
+    it: method, path, query string, and the headers named in
+    X-Amz-SignedHeaders — `host`, plus `content-type` for a whole-object PUT.
+    The host the browser connects to is not among them; the `host` R2 sees is
+    whatever the gateway's forward sends, and the forward sends exactly the S3
+    host this URL was signed for, with the browser's Content-Type copied
+    verbatim. So the path and the query (whose X-Amz-* parameters ARE the
+    signature) are kept byte-for-byte here — split and re-joined, never
+    decoded or re-encoded — and the gateway can do nothing a valid signed URL
+    does not already allow.
+    """
+    gateway = settings.R2_UPLOAD_GATEWAY_URL
+    if not gateway:
+        return signed_url
+
+    target = urlsplit(gateway)
+    signed = urlsplit(signed_url)
+    return urlunsplit(
+        (target.scheme, target.netloc, signed.path, signed.query,
+         signed.fragment)
+    )
 
 
 def _error_code(error: ClientError) -> str:
@@ -192,7 +234,7 @@ class R2Service(BaseStorageService):
         """
         expires_at = int(time.time()) + UPLOAD_URL_EXPIRES_IN
 
-        upload_url = self.client.generate_presigned_url(
+        upload_url = browser_upload_url(self.client.generate_presigned_url(
             "put_object",
             Params={
                 "Bucket": settings.R2_BUCKET,
@@ -200,7 +242,7 @@ class R2Service(BaseStorageService):
                 "ContentType": content_type,
             },
             ExpiresIn=UPLOAD_URL_EXPIRES_IN,
-        )
+        ))
 
         return {
             "method": "PUT",
@@ -236,9 +278,10 @@ class R2Service(BaseStorageService):
         """
         A presigned PUT for one part. Only `host` is signed — the part number
         and upload id ride in the query string — which is why the browser must
-        send NO extra headers on a part.
+        send NO extra headers on a part. Goes through the upload gateway like
+        a whole-object PUT (browser_upload_url).
         """
-        return self.client.generate_presigned_url(
+        return browser_upload_url(self.client.generate_presigned_url(
             "upload_part",
             Params={
                 "Bucket": settings.R2_BUCKET,
@@ -247,7 +290,7 @@ class R2Service(BaseStorageService):
                 "PartNumber": part_number,
             },
             ExpiresIn=UPLOAD_URL_EXPIRES_IN,
-        )
+        ))
 
     def complete_multipart_upload(self, key: str, upload_id: str,
                                   parts: list):

@@ -33,6 +33,14 @@ there now and what --apply would put in its place. --apply replaces the WHOLE
 CORS policy, so an origin added by hand in the dashboard and missing from both
 settings disappears — add it to R2_CORS_EXTRA_ORIGINS instead.
 
+WITH AN UPLOAD GATEWAY (settings.R2_UPLOAD_GATEWAY_URL set), browsers never
+talk to the bucket: they PUT to the goatza-upload-gateway Worker, which answers
+CORS itself from its own ALLOWED_ORIGINS and forwards server-to-server, where
+CORS does not exist. The bucket's policy then only matters again if the
+gateway is switched off — which is exactly why it should stay applied: unsetting
+R2_UPLOAD_GATEWAY_URL is the rollback, and it sends browsers straight back
+here. --show prints which of the two paths uploads take.
+
 LIFECYCLE IS READ, NEVER WRITTEN. R2 gives every bucket a "Default Multipart
 Abort Rule" that clears an abandoned multipart upload after 7 days, and that is
 all the multipart flow needs. PutBucketLifecycleConfiguration replaces the
@@ -170,11 +178,28 @@ class Command(BaseCommand):
                 f"and R2_BUCKET."
             )
 
+        gateway = settings.R2_UPLOAD_GATEWAY_URL
+
         self.stdout.write(self.style.MIGRATE_HEADING("R2 bucket"))
         self.stdout.write(f"  endpoint      {host}")
+        self.stdout.write(
+            f"  uploads via   {gateway} (gateway)" if gateway
+            else "  uploads via   direct (browsers PUT to the endpoint above)"
+        )
         self.stdout.write(f"  bucket        {settings.R2_BUCKET}")
         self.stdout.write(f"  public URL    {settings.MEDIA_PUBLIC_BASE_URL}")
         self.stdout.write("")
+
+        if gateway:
+            self.stdout.write(self.style.WARNING(
+                "  Browsers upload through the gateway, which answers CORS "
+                "itself (ALLOWED_ORIGINS in goatza-upload-gateway's "
+                "wrangler.toml). The bucket's CORS policy below no longer "
+                "matters to them — keep it applied anyway: unsetting "
+                "R2_UPLOAD_GATEWAY_URL is the rollback, and it sends browsers "
+                "straight back to the bucket."
+            ))
+            self.stdout.write("")
 
         current = storage.get_bucket_cors()
 
