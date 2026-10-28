@@ -16,13 +16,20 @@ import io
 import time
 import uuid
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlsplit
 
 from botocore.exceptions import ClientError
+from django.core.exceptions import ImproperlyConfigured
 from django.core.management import CommandError, call_command
 from django.test import SimpleTestCase, override_settings
 
 from core.actor import Actor
-from services.storage.r2 import UPLOAD_URL_EXPIRES_IN, R2Service
+from core.settings import upload_gateway_url
+from services.storage.r2 import (
+    UPLOAD_URL_EXPIRES_IN,
+    R2Service,
+    browser_upload_url,
+)
 
 FAKE_R2 = {
     "R2_ACCOUNT_ID": "testaccount",
@@ -30,7 +37,12 @@ FAKE_R2 = {
     "R2_SECRET_ACCESS_KEY": "test-secret-key",
     "R2_BUCKET": "test-bucket",
     "MEDIA_PUBLIC_BASE_URL": "https://media.goatza.test",
+    # Direct unless a test says otherwise, whatever the local .env holds.
+    "R2_UPLOAD_GATEWAY_URL": "",
 }
+
+S3_ORIGIN = "https://testaccount.r2.cloudflarestorage.com"
+GATEWAY = "https://upload.goatza.test"
 
 BOTO_CLIENT = "services.storage.r2.boto3.client"
 COMMAND_STORAGE = "shared.management.commands.r2_setup.get_storage_service"
@@ -117,6 +129,128 @@ class PresignTests(SimpleTestCase):
         self.assertIn("uploadId=upload-123", url)
         self.assertIn("X-Amz-SignedHeaders=host", url)
         self.assertIn("X-Amz-Expires=3600", url)
+
+
+@override_settings(**FAKE_R2)
+class UploadGatewayTests(SimpleTestCase):
+    """
+    R2_UPLOAD_GATEWAY_URL moves the host a browser uploads to, and nothing
+    else. Each test signs for real and records the URL botocore produced, so
+    the comparison is against the actual signature, not a reconstruction —
+    the gateway forwards path + query unchanged, and R2 only accepts them if
+    they are exactly what was signed.
+    """
+
+    def _signed_and_handed_out(self, call):
+        """(the URL botocore signed, the URL the browser is handed)."""
+        service = R2Service()
+        sign = service.client.generate_presigned_url
+        signed = []
+
+        def record(*args, **kwargs):
+            url = sign(*args, **kwargs)
+            signed.append(url)
+            return url
+
+        with patch.object(
+            service.client, "generate_presigned_url", side_effect=record
+        ):
+            handed_out = call(service)
+
+        self.assertEqual(len(signed), 1)
+        return signed[0], handed_out
+
+    @staticmethod
+    def _put(service):
+        return service._build_presigned_put(
+            key="users/1/posts/x/y.webp", content_type="image/webp"
+        )["upload_url"]
+
+    @staticmethod
+    def _part(service):
+        return service.presign_upload_part(
+            "users/1/posts/x/y.mp4", "upload-123", 2
+        )
+
+    def _assert_only_the_host_moved(self, signed, handed_out):
+        # Path-style: the account is the host and the bucket is in the path.
+        # The gateway forwards to that one host and refuses any other bucket.
+        self.assertTrue(signed.startswith(f"{S3_ORIGIN}/test-bucket/"))
+
+        before, after = urlsplit(signed), urlsplit(handed_out)
+        self.assertEqual(after.scheme, "https")
+        self.assertEqual(after.netloc, "upload.goatza.test")
+        self.assertEqual(after.path, before.path)
+        # The signature, byte for byte.
+        self.assertEqual(after.query, before.query)
+        self.assertIn("X-Amz-Signature=", after.query)
+        self.assertEqual(handed_out, GATEWAY + signed[len(S3_ORIGIN):])
+
+    def test_without_a_gateway_the_signed_url_is_handed_out_unchanged(self):
+        for call in (self._put, self._part):
+            with self.subTest(call=call.__name__):
+                signed, handed_out = self._signed_and_handed_out(call)
+
+                self.assertEqual(handed_out, signed)
+                self.assertTrue(handed_out.startswith(f"{S3_ORIGIN}/test-bucket/"))
+
+    @override_settings(R2_UPLOAD_GATEWAY_URL=GATEWAY)
+    def test_a_whole_object_put_moves_to_the_gateway_host_only(self):
+        signed, handed_out = self._signed_and_handed_out(self._put)
+
+        self._assert_only_the_host_moved(signed, handed_out)
+        self.assertIn(
+            "X-Amz-SignedHeaders=content-type%3Bhost", urlsplit(handed_out).query
+        )
+
+    @override_settings(R2_UPLOAD_GATEWAY_URL=GATEWAY)
+    def test_a_part_moves_to_the_gateway_host_only(self):
+        signed, handed_out = self._signed_and_handed_out(self._part)
+
+        self._assert_only_the_host_moved(signed, handed_out)
+        query = urlsplit(handed_out).query
+        self.assertIn("partNumber=2", query)
+        self.assertIn("uploadId=upload-123", query)
+        self.assertIn("X-Amz-SignedHeaders=host", query)
+
+    @override_settings(R2_UPLOAD_GATEWAY_URL=GATEWAY)
+    def test_the_query_is_never_decoded_or_re_encoded(self):
+        signed = (
+            f"{S3_ORIGIN}/test-bucket/users/1/a%20b.webp"
+            "?uploadId=a~b%2Bc+d&partNumber=1"
+            "&X-Amz-Credential=k%2F20261028%2Fauto%2Fs3%2Faws4_request"
+            "&X-Amz-SignedHeaders=host&X-Amz-Signature=00ff"
+        )
+
+        self.assertEqual(
+            browser_upload_url(signed), GATEWAY + signed[len(S3_ORIGIN):]
+        )
+
+
+class UploadGatewaySettingTests(SimpleTestCase):
+    """settings.upload_gateway_url — what the app refuses to start with."""
+
+    def test_empty_means_direct(self):
+        self.assertEqual(upload_gateway_url(""), "")
+
+    def test_a_bare_https_origin_is_accepted(self):
+        for value in ("https://upload.goatza.com", "https://upload.goatza.com:8443"):
+            with self.subTest(value=value):
+                self.assertEqual(upload_gateway_url(value), value)
+
+    def test_anything_else_is_refused(self):
+        for value in (
+            "http://upload.goatza.com",       # the signed query in clear text
+            "https://upload.goatza.com/r2",   # a path would be silently dropped
+            "https://upload.goatza.com?x=1",
+            "https://upload.goatza.com#top",
+            "upload.goatza.com",
+            "https://user@upload.goatza.com",
+            "https://",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ImproperlyConfigured):
+                    upload_gateway_url(value)
 
 
 @override_settings(**FAKE_R2)
@@ -233,6 +367,19 @@ class R2SetupCommandTests(SimpleTestCase):
         self.assertIn("testaccount.r2.cloudflarestorage.com", output)
         self.assertIn("test-bucket", output)
         self.assertIn('"ETag"', output)  # the rules --apply would write
+
+    def test_show_says_uploads_go_direct_without_a_gateway(self):
+        output = self._run()
+
+        self.assertIn("uploads via   direct", output)
+        self.assertNotIn("answers CORS itself", output)
+
+    @override_settings(R2_UPLOAD_GATEWAY_URL=GATEWAY)
+    def test_show_names_the_gateway_and_says_bucket_cors_is_moot(self):
+        output = self._run()
+
+        self.assertIn(f"uploads via   {GATEWAY} (gateway)", output)
+        self.assertIn("answers CORS itself", output)
 
     def test_show_never_prints_a_secret(self):
         output = self._run("--show")
