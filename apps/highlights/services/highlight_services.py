@@ -33,6 +33,9 @@ from rest_framework.exceptions import (
 from apps.accounts.models import User
 from apps.highlights.models import Highlight, HighlightView
 from apps.highlights.selectors.highlight_selectors import is_recruiter
+from apps.media.constants import JOB_ALREADY_USED_MESSAGE
+from apps.media.models import MediaJob
+from apps.media.services.media_job_service import MediaJobService
 from apps.posts.models import Post, PostMedia
 from services.storage.metadata import MAX_HIGHLIGHT_DURATION, clamp_duration
 from services.storage.validators import (
@@ -284,19 +287,68 @@ class HighlightService:
         )
 
     @staticmethod
-    def create_highlight(actor, *, payload: dict) -> Highlight:
+    def _check_duration(duration):
         """
-        Add one clip to the player's rail.
+        The HARD 90s cap, for a duration WE measured — a promoted post video,
+        or a media job's output. Only the direct path's client-reported
+        duration is clamped instead (see _direct_fields).
+        """
+        if duration is not None and duration > HighlightService.MAX_DURATION_SECONDS:
+            raise ValidationError(
+                f"Highlights can be at most "
+                f"{HighlightService.MAX_DURATION_SECONDS} seconds long. This "
+                f"clip is {duration} seconds."
+            )
 
-        ``payload`` picks the mode:
+    @staticmethod
+    def _job_fields(actor, user, media_job_id, *, publication_id=None):
+        """
+        ``(job, media_fields)`` for an original the media worker converts —
+        ``media_fields`` None while the job is still converting.
 
-          * promote — ``{"source_media_id": ..., "title"?, "visibility"?}``
-            copies a video off one of the player's own posts.
-          * direct  — ``{"file_url", "public_id", "thumbnail_url"?, "duration"?,
-            "width"?, "height"?, "title"?, "visibility"?}`` from a client
-            direct upload.
+        A ready job's outputs go through _direct_fields unchanged, so they are
+        held to exactly the checks a direct upload is.
+        """
+        job = MediaJobService.resolve_for_attach(
+            actor, media_job_id, purpose="highlights"
+        )
+        # Not found and somebody else's read the same.
+        if job is None:
+            raise ValidationError("Invalid media.")
 
-        The new clip lands last in the rail (``max(order) + 1``).
+        if job.status == MediaJob.Status.FAILED:
+            raise ValidationError(MediaJobService.job_error_message(job))
+
+        # One job, one clip: a retry after a lost 202 must not add it twice.
+        if MediaJobService.in_use(job, publication_id=publication_id):
+            raise ValidationError(JOB_ALREADY_USED_MESSAGE)
+
+        if job.status != MediaJob.Status.READY:
+            return job, None
+
+        HighlightService._check_duration(job.duration)
+
+        return job, HighlightService._direct_fields(user, {
+            "file_url": job.output_url,
+            "public_id": job.output_key,
+            "thumbnail_url": job.thumbnail_url,
+            "duration": job.duration,
+            "width": job.width,
+            "height": job.height,
+        })
+
+    @staticmethod
+    def validate_create(actor, *, payload: dict, publication_id=None) -> dict:
+        """
+        Every check a create makes before it writes, in the order it has
+        always made them. Raises the usual DRF exceptions. ``publication_id``
+        is the held publication being published, if any (see _job_fields).
+
+        Returns ``{"user", "title", "visibility", "media_fields",
+        "source_post", "jobs", "pending_jobs", "payload"}``. ``pending_jobs``
+        is non-empty only for a media job still converting: the caller holds
+        the clip as a PendingPublication (apps/media) and ``payload`` is what
+        it stores to publish it later through create_highlight.
         """
         user = HighlightService.require_player(actor)
 
@@ -310,6 +362,8 @@ class HighlightService:
         )
 
         source_media_id = payload.get("source_media_id")
+        media_job_id = payload.get("media_job_id")
+        job = None
 
         if source_media_id:
             media_fields, source_post = HighlightService._promote_fields(
@@ -321,16 +375,79 @@ class HighlightService:
             # number the client just sent, so the cap stays a hard rule here:
             # a 4-minute post video must not become a highlight. The direct
             # path clamps instead — see _direct_fields.
-            duration = media_fields.get("duration")
-            if duration is not None and duration > HighlightService.MAX_DURATION_SECONDS:
-                raise ValidationError(
-                    f"Highlights can be at most "
-                    f"{HighlightService.MAX_DURATION_SECONDS} seconds long. This "
-                    f"clip is {duration} seconds."
-                )
+            HighlightService._check_duration(media_fields.get("duration"))
+        elif media_job_id:
+            job, media_fields = HighlightService._job_fields(
+                actor, user, media_job_id, publication_id=publication_id
+            )
+            source_post = None
         else:
             media_fields = HighlightService._direct_fields(user, payload)
             source_post = None
+
+        pending = job is not None and media_fields is None
+
+        if pending:
+            # This clip is created minutes from now; a rail that is already
+            # full is refused NOW, with the same words the create uses.
+            # (Re-checked under the lock at publish time, which is the one
+            # that holds.)
+            live = Highlight.objects.filter(user=user, is_deleted=False).count()
+            if live >= HighlightService.MAX_HIGHLIGHTS:
+                raise ValidationError(
+                    f"You already have {HighlightService.MAX_HIGHLIGHTS} "
+                    f"highlights. Delete one to add another."
+                )
+
+        return {
+            "user": user,
+            "title": title,
+            "visibility": visibility,
+            "media_fields": media_fields,
+            "source_post": source_post,
+            "jobs": [job] if job else [],
+            "pending_jobs": [job] if pending else [],
+            "payload": {
+                "media_job_id": str(job.id),
+                "title": title,
+                "visibility": visibility,
+            } if job else None,
+        }
+
+    @staticmethod
+    def create_highlight(actor, *, payload: dict,
+                         publication_id=None) -> Highlight:
+        """
+        Add one clip to the player's rail.
+
+        ``payload`` picks the mode:
+
+          * promote — ``{"source_media_id": ..., "title"?, "visibility"?}``
+            copies a video off one of the player's own posts.
+          * direct  — ``{"file_url", "public_id", "thumbnail_url"?, "duration"?,
+            "width"?, "height"?, "title"?, "visibility"?}`` from a client
+            direct upload.
+          * job     — ``{"media_job_id", "title"?, "visibility"?}``, a READY
+            media job's outputs (how a held clip is published, from
+            PublicationService.try_publish).
+
+        The new clip lands last in the rail (``max(order) + 1``).
+        """
+        cleaned = HighlightService.validate_create(
+            actor, payload=payload, publication_id=publication_id
+        )
+
+        # Only a caller that can hold the clip may meet a job still
+        # converting (CreateHighlightAPIView does); here it cannot be created.
+        if cleaned["pending_jobs"]:
+            raise ValidationError("This video is still processing.")
+
+        return HighlightService.insert_highlight(cleaned)
+
+    @staticmethod
+    def insert_highlight(cleaned: dict) -> Highlight:
+        """Write one clip from ``validate_create``'s result. Holds the cap."""
+        user = cleaned["user"]
 
         with transaction.atomic():
             # Serialize this player's concurrent creates. Locking only the
@@ -356,11 +473,11 @@ class HighlightService:
 
             highlight = Highlight.objects.create(
                 user=user,
-                title=title,
-                visibility=visibility,
+                title=cleaned["title"],
+                visibility=cleaned["visibility"],
                 order=(max(orders) + 1) if orders else 0,
-                source_post=source_post,
-                **media_fields,
+                source_post=cleaned["source_post"],
+                **cleaned["media_fields"],
             )
 
         # No derivative to pre-generate any more: the stored object IS the clip

@@ -32,6 +32,11 @@ from apps.highlights.serializers.highlight_serializers import (
     HighlightUpdateSerializer,
 )
 from apps.highlights.services.highlight_services import HighlightService
+from apps.media.models import PendingPublication
+from apps.media.serializers.publication_serializers import (
+    PendingPublicationSerializer,
+)
+from apps.media.services.publication_service import PublicationService
 from utils.errors import error_body, flatten_validation_error
 from utils.response import response_data
 from apps.moderation.selectors.profile_visibility import (
@@ -80,7 +85,15 @@ def _service_error(tag, exc):
 
 
 class CreateHighlightAPIView(BaseAPIView):
-    """POST /highlights/create — direct upload or promote from a post."""
+    """
+    POST /highlights/create — direct upload, promote from a post, or a media
+    job (an original the media worker converts).
+
+    201 with the highlight when its video is ready — every mode but a job
+    still converting. That one answers 202 {"pending_publication": {...}}:
+    the body has passed every check, and the server adds the clip itself when
+    the job finishes (apps/media, PublicationService).
+    """
 
     def post(self, request):
         TAG = "CreateHighlightAPIView"
@@ -92,10 +105,34 @@ class CreateHighlightAPIView(BaseAPIView):
             serializer = HighlightCreateSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
 
-            highlight = HighlightService.create_highlight(
+            cleaned = HighlightService.validate_create(
                 request.actor,
                 payload=serializer.validated_data
             )
+
+            if cleaned["pending_jobs"]:
+                publication = PublicationService.create(
+                    actor=request.actor,
+                    user=request.user,
+                    target=PendingPublication.Target.HIGHLIGHT,
+                    payload=cleaned["payload"],
+                    jobs=cleaned["jobs"],
+                )
+                logger.info(
+                    f"{TAG} | Highlight held for processing | "
+                    f"publication_id={publication.id}"
+                )
+                return response_data(
+                    success=True,
+                    message="Your highlight is processing",
+                    status_code=202,
+                    data={
+                        "pending_publication":
+                            PendingPublicationSerializer(publication).data
+                    },
+                )
+
+            highlight = HighlightService.insert_highlight(cleaned)
 
             logger.info(f"{TAG} | Highlight created | highlight_id={highlight.id}")
 

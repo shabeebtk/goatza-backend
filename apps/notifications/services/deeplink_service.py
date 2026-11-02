@@ -172,4 +172,15 @@ def build_notification_url(notification) -> str:
     ):
         return _owner_profile_url(data, "#achievements", fallback)
 
+    # ── HELD PUBLICATION FAILED (author side) ─────────────────────
+    # The author's own work, where they would post it again: their posts
+    # list, or the highlights screen. An org only ever posts — highlights are
+    # players-only — so its link is the org-admin posts page.
+    if ntype == Notification.Type.PUBLICATION_FAILED:
+        if base:
+            return f"{base}/posts"
+        if data.get("target") == "highlight":
+            return "/highlights/manage"
+        return _owner_profile_url(data, "/posts", fallback)
+
     return fallback

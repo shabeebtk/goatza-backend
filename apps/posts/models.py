@@ -107,10 +107,13 @@ class PostMedia(BaseUUIDModel):
         on_delete=models.CASCADE,
         related_name="media"
     )
-    file_url = models.URLField()
+    # 500, not URLField's default 200 — the same width Highlight and
+    # Recruitment media use. A key is ~140 chars and the base URL is a
+    # setting: production's leaves ~40 chars spare, an r2.dev one ~14.
+    file_url = models.URLField(max_length=500)
     public_id = models.CharField(max_length=255)
     media_type = models.CharField(max_length=10, choices=MediaType.choices)
-    thumbnail_url = models.URLField(blank=True)
+    thumbnail_url = models.URLField(max_length=500, blank=True)
     duration = models.PositiveIntegerField(null=True, blank=True)
     # Intrinsic media dimensions (px). Client-reported and range-checked on
     # attach — the stored object is now the exact bytes the browser uploaded, so

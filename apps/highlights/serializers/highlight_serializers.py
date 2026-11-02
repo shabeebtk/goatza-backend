@@ -46,16 +46,19 @@ class HighlightSerializer(serializers.ModelSerializer):
 
 class HighlightCreateSerializer(serializers.Serializer):
     """
-    Create input, in either mode:
+    Create input, in any of three modes:
 
       * promote — ``source_media_id`` (a PostMedia of the player's own video post)
       * direct  — ``file_url`` + ``public_id`` from the presigned direct upload
+      * job     — ``media_job_id``, an original the media worker converts
+                  (apps/media); its outputs stand in for file_url & co.
 
     Shape only. Ownership, the 10-clip cap, the 90s cap and the media checks
     all belong to HighlightService and run there.
     """
 
     source_media_id = serializers.UUIDField(required=False)
+    media_job_id = serializers.UUIDField(required=False)
 
     file_url = serializers.URLField(required=False)
     public_id = serializers.CharField(required=False, max_length=255)
@@ -75,6 +78,11 @@ class HighlightCreateSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs):
+        # A job carries its own file_url/public_id, so neither check below
+        # applies to it — and both keep their wording for everyone else.
+        if attrs.get("media_job_id") and not attrs.get("source_media_id"):
+            return attrs
+
         if not attrs.get("source_media_id") and not attrs.get("file_url"):
             raise serializers.ValidationError(
                 "Send either source_media_id to promote a post video, or "

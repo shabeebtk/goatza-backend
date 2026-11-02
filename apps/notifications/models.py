@@ -37,6 +37,11 @@ class Notification(BaseUUIDModel):
         # speaking, and naming the moderator who decided would hand the warned
         # account someone to retaliate against.
         MODERATION_WARNING = "moderation_warning", "Moderation Warning"
+        # PLATFORM notification, like the warning above: a post or highlight
+        # the server was holding while its media converted could not be
+        # published (apps/media PublicationService). The author has probably
+        # left the app, so this is the only way they find out.
+        PUBLICATION_FAILED = "publication_failed", "Publication Failed"
         # future:
         # TRIAL = "trial"
         

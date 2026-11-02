@@ -8,8 +8,10 @@ which is what keeps the ownership prefix checks in
 services/storage/validators.py meaningful.
 
 Delivery is a plain public CDN URL (settings.MEDIA_PUBLIC_BASE_URL + "/" + key),
-so there is no signing, no transformation pipeline and no derived assets — the
-client encodes and thumbnails before it uploads.
+so there is no signing and no transformation on delivery. The client encodes
+and thumbnails before it uploads — except a `source` original, which the media
+worker (apps/media) downloads, converts and writes back through the transfer
+methods at the bottom of this class.
 
 Large videos go up as an S3 multipart upload instead of one PUT (see the
 multipart section below): a dropped connection then costs one part, not the
@@ -30,9 +32,12 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from django.conf import settings
 
+from apps.media.constants import SOURCE_EXTENSIONS
+
 from .base import BaseStorageService
 from .paths import (
     FIXED_SLOT_TYPES,
+    SOURCE_INFIX,
     TEMP_BATCH_TYPES,
     build_folder,
     build_object_name,
@@ -126,6 +131,15 @@ def _error_code(error: ClientError) -> str:
     return error.response.get("Error", {}).get("Code", "")
 
 
+def is_not_found(error: ClientError) -> bool:
+    """
+    A missing object. A HEAD has no body to carry an error code, so botocore
+    reports the bare status ("404"); a GET says "NoSuchKey".
+    """
+    status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return status == 404 or _error_code(error) in {"404", "NoSuchKey", "NotFound"}
+
+
 class R2Service(BaseStorageService):
 
     def __init__(self):
@@ -161,7 +175,8 @@ class R2Service(BaseStorageService):
         upload back to the file it picked (and a video to its thumb).
 
         `files` entries are already validated by the view: content_type is in
-        CONTENT_TYPE_EXTENSIONS and the per-type counts/sizes hold.
+        CONTENT_TYPE_EXTENSIONS (SOURCE_EXTENSIONS for a `source` kind) and
+        the per-type counts/sizes hold.
 
         `temp_id` re-signs into an EXISTING batch folder (posts/recruitments
         only; ignored for every other type). A client whose URLs expired, or
@@ -186,6 +201,26 @@ class R2Service(BaseStorageService):
 
         for file in files:
             content_type = file.get("content_type")
+
+            if file.get("kind") == "source":
+                # An original for the worker: `<uuid>.src.<ext>`, signed like
+                # any other PUT. Never a fixed-slot type (the view refuses
+                # sources outside SOURCE_UPLOAD_TYPES).
+                extension = SOURCE_EXTENSIONS.get(content_type)
+                if not extension:
+                    raise ValueError("Invalid file type")
+                key = (
+                    f"{folder}/{build_object_name(upload_type)}"
+                    f"{SOURCE_INFIX}{extension}"
+                )
+                uploads.append(
+                    self._build_presigned_put(
+                        key=key,
+                        content_type=content_type,
+                    )
+                )
+                continue
+
             extension = CONTENT_TYPE_EXTENSIONS.get(content_type)
 
             if not extension:
@@ -454,6 +489,55 @@ class R2Service(BaseStorageService):
                 f"key={error.get('Key')} | code={error.get('Code')} | "
                 f"{error.get('Message')}"
             )
+
+    # -----------------------------------------
+    # object transfer (the media worker)
+    # -----------------------------------------
+    # Used by apps/media: POST /media/jobs heads a source, the worker downloads
+    # it and uploads what it made. These RAISE, unlike the delete_* methods
+    # below — a worker that could not fetch its input must know, so it can
+    # retry or fail the job rather than convert nothing.
+    def head_object(self, key: str):
+        """
+        ``{"size_bytes", "content_type"}`` for an object, or None when it does
+        not exist. Any other failure raises.
+        """
+        try:
+            response = self.client.head_object(
+                Bucket=settings.R2_BUCKET,
+                Key=key,
+            )
+        except ClientError as e:
+            if is_not_found(e):
+                return None
+            raise
+
+        return {
+            "size_bytes": response.get("ContentLength"),
+            "content_type": response.get("ContentType") or "",
+        }
+
+    def download_to_file(self, key: str, path: str):
+        """Stream an object to a local file. Raises (a ClientError 404 too)."""
+        self.client.download_file(settings.R2_BUCKET, key, path)
+
+    def upload_file(self, path: str, key: str, content_type: str,
+                    cache_control: str):
+        """
+        Upload a local file to `key`. Raises.
+
+        boto3 switches to a multipart upload above 8 MB on its own, with
+        uniform parts — which is what R2 requires.
+        """
+        self.client.upload_file(
+            path,
+            settings.R2_BUCKET,
+            key,
+            ExtraArgs={
+                "ContentType": content_type,
+                "CacheControl": cache_control,
+            },
+        )
 
     # -----------------------------------------
     # metadata / derivatives — not R2's job
