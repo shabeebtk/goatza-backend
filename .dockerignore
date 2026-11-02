@@ -1,0 +1,22 @@
+# Keeps local secrets and build junk out of the worker image (Dockerfile.worker).
+# Render builds from git, where these are already ignored; this matters for a
+# local `docker build`, which would otherwise copy .env into the image.
+.git
+.env
+.env.*
+*.json.key
+goatza-dev-firebase-adminsdk-*.json
+.vscode
+__pycache__/
+*.pyc
+*.log
+celerybeat-schedule
+celerybeat-schedule.*
+staticfiles/
+email_previews/
+db.sqlite3
+*.sqlite3
+venv/
+.venv/
+env/
+node_modules/

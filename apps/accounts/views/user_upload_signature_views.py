@@ -1,11 +1,22 @@
+from django.conf import settings
+
 from core.views.base_views import BaseAPIView
 from rest_framework.permissions import IsAuthenticated
 from utils.response import response_data
 from utils.errors import error_body
 from services.storage.factory import get_storage_service
 from services.storage.paths import TEMP_BATCH_TYPES, is_canonical_uuid
+from apps.media.constants import (
+    KIND_VIDEO,
+    SERVER_PROCESSING_UNAVAILABLE,
+    SERVER_PROCESSING_UNAVAILABLE_MESSAGE,
+    SOURCE_UPLOAD_TYPES,
+    source_kind,
+)
+from apps.media.selectors.capability_selectors import server_processing_available
 from apps.organization.models import Organization
 from apps.organization.services.organization_member_service import OrganizationMemberService
+from utils.validations import is_valid_uuid
 
 
 # ---------------------------------------------------------------
@@ -23,12 +34,18 @@ from apps.organization.services.organization_member_service import OrganizationM
 
 MB = 1024 * 1024
 
-# Everything is normalised client-side before upload, so the accepted set is
+# A READY file is normalised client-side before upload, so the accepted set is
 # narrow on purpose. No image/gif, no video/quicktime: the client emits webp/
-# jpeg/png and mp4/webm, and storage keeps exactly what it is handed — nothing
-# transcodes on the way in or out.
+# jpeg/png and mp4/webm, and storage keeps exactly what it is handed.
+#
+# The one exception is the `source` kind — the ORIGINAL, uploaded when the
+# browser could not convert it, for the media worker to convert instead
+# (apps/media). Its much wider type set and its own size caps live in
+# apps/media/constants.py and settings; see source_file_refusal below.
 IMAGE_CONTENT_TYPES = {"image/webp", "image/jpeg", "image/png"}
 VIDEO_CONTENT_TYPES = {"video/mp4", "video/webm"}
+
+FILE_KINDS = {"image", "video", "thumb", "source"}
 
 # A thumb is a poster frame / preview — an image, and a small one. Nothing
 # derives one server-side; the client captures it while encoding the video.
@@ -153,15 +170,79 @@ USER_ONLY_TYPES = {"profile", "cover", "achievements", "matches", "highlights"}
 ORG_ONLY_TYPES = {"organization_logo", "organization_cover", "recruitments"}
 
 
-def upload_error(message, field="non_field_errors", status_code=400):
-    """The one refusal shape every upload endpoint answers with."""
+def upload_error(message, field="non_field_errors", status_code=400,
+                 code=None):
+    """
+    The one refusal shape every upload endpoint answers with. `code`, when
+    given, rides beside `errors` for a client to branch on.
+    """
+    data = error_body(message, field)
+    if code:
+        data["code"] = code
+
     return response_data(
         success=False,
         message=message,
         error=message,
         status_code=status_code,
-        data=error_body(message, field)
+        data=data
     )
+
+
+def source_file_refusal(upload_type, content_type, size_bytes):
+    """
+    Why a `source` file is refused for `upload_type`, or None.
+
+    Shared by the signature endpoint and multipart create, so the two cannot
+    disagree about what an original may be. Returns ``(message, field)`` or,
+    when processing is off, ``(message, field, 400, code)`` — both shapes
+    ``upload_error(*refusal)`` takes.
+
+    The caps are the SOURCE caps (settings.MEDIA_SOURCE_MAX_*), not POLICY's
+    ready-file ones: a raw iPhone clip is several times its encoded size, and
+    the point of a source is that the browser could not shrink it.
+    """
+    # Signing an original nobody can convert would let the user spend a
+    # 300 MB upload on a file that is refused at POST /media/jobs.
+    if upload_type not in SOURCE_UPLOAD_TYPES \
+            or not server_processing_available():
+        return (
+            SERVER_PROCESSING_UNAVAILABLE_MESSAGE, "files", 400,
+            SERVER_PROCESSING_UNAVAILABLE,
+        )
+
+    kind = source_kind(content_type)
+    if kind is None:
+        return ("Invalid file type", "content_type")
+
+    # bool is an int subclass — True would otherwise sail through.
+    if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) \
+            or size_bytes <= 0:
+        return ("Invalid file size", "size_bytes")
+
+    policy = POLICY[upload_type]
+
+    if kind == KIND_VIDEO:
+        if policy["video"]["max"] == 0:
+            return ("Videos are not allowed for this upload type", "files")
+        if size_bytes > settings.MEDIA_SOURCE_MAX_VIDEO_BYTES:
+            return (
+                f"Video is larger than "
+                f"{settings.MEDIA_SOURCE_MAX_VIDEO_BYTES // MB}MB",
+                "size_bytes"
+            )
+    else:
+        # Highlights: video only, so a photo original is refused like a photo.
+        if policy["images"]["max"] == 0:
+            return ("Images are not allowed for this upload type", "files")
+        if size_bytes > settings.MEDIA_SOURCE_MAX_IMAGE_BYTES:
+            return (
+                f"Image is larger than "
+                f"{settings.MEDIA_SOURCE_MAX_IMAGE_BYTES // MB}MB",
+                "size_bytes"
+            )
+
+    return None
 
 
 def resolve_upload_actor(request, actor, upload_type, org_id):
@@ -182,6 +263,14 @@ def resolve_upload_actor(request, actor, upload_type, org_id):
     complete/abort, which name no type — skips the per-type actor rules.
     """
     if org_id:  # for user want to access org directly
+        # A malformed id would reach the lookup and raise Django's
+        # ValidationError — an HTML 500 where no try surrounds the call
+        # (GET /media/jobs/<id>?org_id=). Same answer as a non-member.
+        if not is_valid_uuid(org_id):
+            return None, (
+                "You are not a member of this organization", "org_id", 400
+            )
+
         try:
             org = Organization.objects.select_related("profile").get(id=org_id)
         except Organization.DoesNotExist:
@@ -240,6 +329,14 @@ class GetUploadConfigAPIView(BaseAPIView):
         pairs uploads back to its picked files (and a video to its thumb) by
         position.
 
+        `kind` is image | video | thumb | source. A `source` is an ORIGINAL the
+        browser could not convert, signed as `<uuid>.src.<ext>` for the media
+        worker (POST /media/jobs). It counts as the image or video it is, so
+        every count/exclusive/min rule holds unchanged, and it needs no thumb —
+        the worker makes one. posts/recruitments/chat/highlights only, and only
+        while server processing is available; otherwise 400 on `files` with
+        code `server_processing_unavailable`.
+
         `temp_post_id` exists for RE-SIGNING an in-flight batch: a client whose
         URLs expired, or were answered 403, part-way through a post asks again
         for the files it has not uploaded yet, naming the batch it already
@@ -268,7 +365,9 @@ class GetUploadConfigAPIView(BaseAPIView):
             # -----------------------------------
             # File policy (counts, kinds, sizes, pairing)
             # -----------------------------------
-            error = self._validate_files(POLICY[upload_type], files)
+            error = self._validate_files(
+                POLICY[upload_type], files, upload_type=upload_type
+            )
             if error:
                 return upload_error(*error)
 
@@ -322,12 +421,14 @@ class GetUploadConfigAPIView(BaseAPIView):
     # -----------------------------------------------------------
     # policy enforcement
     # -----------------------------------------------------------
-    def _validate_files(self, policy, files):
+    def _validate_files(self, policy, files, upload_type=None):
         """
         Walk `files` against one POLICY entry.
 
         Returns None when the request is legal, or (message, field) for the
-        first violation — the caller turns that into the standard error body.
+        first violation — (message, field, status, code) for a source refused
+        because processing is off — and the caller turns that into the
+        standard error body.
         """
         if not isinstance(files, list) or not files:
             return ("Provide at least one file", "files")
@@ -341,8 +442,13 @@ class GetUploadConfigAPIView(BaseAPIView):
         images = policy["images"]
         video = policy["video"]
 
+        # image/video counts include sources (a video source IS the post's
+        # one video); the ready_* counts do not, and only they pair with
+        # thumbs — a source's thumb is made by the worker.
         image_count = 0
         video_count = 0
+        ready_image_count = 0
+        ready_video_count = 0
         thumb_count = 0
 
         for file in files:
@@ -353,13 +459,25 @@ class GetUploadConfigAPIView(BaseAPIView):
             content_type = file.get("content_type")
             size_bytes = file.get("size_bytes")
 
-            if kind not in {"image", "video", "thumb"}:
+            if kind not in FILE_KINDS:
                 return ("Invalid file kind", "kind")
 
             # bool is an int subclass — True would otherwise sail through.
             if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) \
                     or size_bytes <= 0:
                 return ("Invalid file size", "size_bytes")
+
+            if kind == "source":
+                refusal = source_file_refusal(
+                    upload_type, content_type, size_bytes
+                )
+                if refusal:
+                    return refusal
+                if source_kind(content_type) == KIND_VIDEO:
+                    video_count += 1
+                else:
+                    image_count += 1
+                continue
 
             if kind == "video":
                 if content_type not in VIDEO_CONTENT_TYPES:
@@ -378,6 +496,7 @@ class GetUploadConfigAPIView(BaseAPIView):
                         "size_bytes"
                     )
                 video_count += 1
+                ready_video_count += 1
 
             else:  # image | thumb
                 if content_type not in IMAGE_CONTENT_TYPES:
@@ -406,6 +525,7 @@ class GetUploadConfigAPIView(BaseAPIView):
                             "size_bytes"
                         )
                     image_count += 1
+                    ready_image_count += 1
 
         # -----------------------------------
         # counts
@@ -435,17 +555,19 @@ class GetUploadConfigAPIView(BaseAPIView):
         # -----------------------------------
         # pairing
         # -----------------------------------
-        # A video always ships its poster frame — nothing generates one for us
-        # any more. A thumb with no parent in the same request is a stray:
-        # it would be signed into the folder and then never referenced.
-        if video_count:
+        # A ready video always ships its poster frame — the browser made the
+        # file, so nothing else will. A thumb with no parent in the same
+        # request is a stray: it would be signed into the folder and then
+        # never referenced. Sources are left out of both counts: the worker
+        # makes their thumbnails, so a thumb sent beside one is a stray too.
+        if ready_video_count:
             if thumb_count != 1:
                 return (
                     "A video upload requires exactly one thumbnail",
                     "files"
                 )
         elif thumb_count:
-            if not policy["image_thumbs"] or thumb_count > image_count:
+            if not policy["image_thumbs"] or thumb_count > ready_image_count:
                 return (
                     "A thumbnail must accompany the file it belongs to",
                     "files"

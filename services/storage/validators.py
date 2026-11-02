@@ -3,6 +3,9 @@ from urllib.parse import urlparse
 from django.conf import settings
 from typing import Iterable, Optional
 
+from apps.media.constants import SOURCE_NOT_PROCESSED_MESSAGE
+from services.storage.paths import is_source_key
+
 # 🔹 The accepted formats, everywhere.
 #
 # Images: what browsers render and what the client-side compressor emits.
@@ -147,6 +150,15 @@ def validate_public_id(
 
     if not public_id.startswith(expected_prefix):
         raise ValueError("Invalid public_id path")
+
+    # An ORIGINAL waiting for the media worker (`<uuid>.src.<ext>`) sits under
+    # the actor's own prefix, so the check above passes it. Attached as is it
+    # would skip the conversion and the ready-file caps (a 300 MB raw clip in
+    # the feed) and never be deleted. Only a job's outputs — plain
+    # `<uuid>.<ext>` keys — attach. Every validate_media / validate_thumbnail
+    # caller goes through here.
+    if is_source_key(public_id):
+        raise ValueError(SOURCE_NOT_PROCESSED_MESSAGE)
 
 
 def validate_media(

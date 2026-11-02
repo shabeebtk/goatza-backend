@@ -5,106 +5,35 @@ from rest_framework import status
 from rest_framework.exceptions import ValidationError
 
 from core.views.base_views import BaseAPIView
-from core.actor import Actor
 from apps.accounts.models import User
-from apps.posts.models import Post, PostMedia, Like, Comment
+from apps.posts.models import Post, Like, Comment
 from apps.sports.models import Sport
 from utils.response import response_data
 from apps.moderation.selectors.profile_visibility import hide_if_blocked_by_id
 from apps.moderation.selectors.blocked_filters import exclude_blocked
 from apps.connections.models import Follow
-from core.constant import TYPE_USER, TYPE_ORGANIZATION
-from apps.notifications.services.notification_service import NotificationService
+from core.constant import TYPE_USER
 from apps.posts.serializers.posts_serializers import (
     PostListSerializer, POST_MENTIONS_PREFETCH,
 )
-from services.storage.validators import (
-    allowed_image_extensions,
-    allowed_video_extensions,
-    validate_media,
-    validate_thumbnail,
-)
-from services.storage.metadata import (
-    MAX_IMAGE_BYTES,
-    MAX_POST_VIDEO_DURATION,
-    MAX_VIDEO_BYTES,
-    clamp_dimensions,
-    clamp_duration,
-    clamp_size_bytes,
-)
 from services.location.location_service import LocationService
 from apps.posts.selectors.post_visibility_selectors import profile_visibility_filter
-from apps.posts.services.post_service import PostService
+from apps.posts.services.post_service import (
+    PostCreateError,
+    PostService,
+    notify_new_mentions,
+)
 from apps.posts.services.post_content_service import sync_post_content
+from apps.media.models import PendingPublication
+from apps.media.serializers.publication_serializers import (
+    PendingPublicationSerializer,
+)
+from apps.media.services.publication_service import PublicationService
 from apps.posts.services.saved_post_service import annotate_is_saved
 from apps.organization.services.user_organization_services import UserOrganizationService
-from apps.connections.services.follow_services import FollowService
 
 
 logger = logging.getLogger(__name__)
-
-
-def notify_new_mentions(post, actor, added_mentions):
-    """
-    Fire MENTION notifications for the targets a content sync just added.
-
-    Mention ROWS are created regardless of who can see the post — only the
-    NOTIFICATION is gated. A FOLLOWERS-only post notifies a mentioned actor
-    only when that actor follows the author, otherwise the push would advertise
-    a post they cannot open.
-
-    Runs after commit, so a notification or FCM failure can never fail or roll
-    back the post itself (same pattern as ApplicationService.apply).
-    """
-    if not added_mentions:
-        return
-
-    actor_user = actor.user if actor.is_user else None
-    actor_org = actor.organization if actor.is_org else None
-
-    author_id = post.author_user_id or post.author_org_id
-    author_type = TYPE_USER if post.author_user_id else TYPE_ORGANIZATION
-
-    def _can_notify(kind, target) -> bool:
-        if post.visibility == Post.Visibility.PUBLIC:
-            return True
-
-        # MENTION_VISIBILITY: anything that is neither PUBLIC nor FOLLOWERS is
-        # treated as not-notifiable. A future, more private mode has to opt in
-        # here deliberately rather than inherit "notify" by falling through.
-        if post.visibility != Post.Visibility.FOLLOWERS:
-            return False
-
-        # FollowService.get_relationship covers all four user/org edges, so no
-        # actor-pair combination has to be excluded. `is_following` is read
-        # from the MENTIONED actor's side: do they follow the author?
-        viewer = Actor(
-            actor_type="user" if kind == "user" else "organization",
-            user=target if kind == "user" else None,
-            organization=target if kind == "org" else None,
-        )
-        relationship = FollowService.get_relationship(viewer, author_id, author_type)
-        return relationship["is_following"]
-
-    def _notify():
-        for kind, target in added_mentions:
-            try:
-                if not _can_notify(kind, target):
-                    continue
-                NotificationService.mention(
-                    actor_user=actor_user,
-                    actor_org=actor_org,
-                    post=post,
-                    mentioned_user=target if kind == "user" else None,
-                    mentioned_org=target if kind == "org" else None,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "notify_new_mentions | notification failed | "
-                    f"post_id={post.id} | target={kind}:{target.id} | {exc}"
-                )
-
-    transaction.on_commit(_notify)
 
 
 class CreatePostAPIView(BaseAPIView):
@@ -142,6 +71,13 @@ class CreatePostAPIView(BaseAPIView):
             "longitude": 75.355
         }
     }
+
+    A media item may instead be {"media_job_id": "<uuid>", "order": n} — an
+    original the media worker converted (apps/media). Every job ready → the
+    post is created now: 200 {"post_id"}, exactly as for browser-made files.
+    Any job still converting → 202 {"pending_publication": {...}}: the body
+    has passed every check, and the server publishes the post itself when the
+    jobs finish. Validation lives in PostService; this view only routes.
     '''
     def post(self, request):
         TAG = "CreatePostAPIView"
@@ -151,248 +87,43 @@ class CreatePostAPIView(BaseAPIView):
             user = request.user
             data = request.data
 
-            content = (data.get("content") or "").strip()
-            post_type = data.get("post_type", Post.PostType.NORMAL)
-            visibility = data.get("visibility", Post.Visibility.PUBLIC)
-            sport_id = data.get("sport_id")
-            media_list = data.get("media", [])
-            location_data = data.get("location", {})
+            try:
+                cleaned = PostService.validate_create_payload(actor, user, data)
 
-            # -------------------------
-            # BASIC VALIDATIONS
-            # -------------------------
+                # Media still converting on the media worker: hold the post
+                # and let the server publish it when the jobs finish
+                # (PublicationService.try_publish). Nothing is created now.
+                if cleaned["pending_jobs"]:
+                    publication = PublicationService.create(
+                        actor=actor,
+                        user=user,
+                        target=PendingPublication.Target.POST,
+                        payload=cleaned["payload"],
+                        jobs=cleaned["jobs"],
+                    )
+                    logger.info(
+                        f"{TAG} | Post held for processing | "
+                        f"publication_id={publication.id}"
+                    )
+                    return response_data(
+                        success=True,
+                        message="Your post is processing",
+                        status_code=status.HTTP_202_ACCEPTED,
+                        data={
+                            "pending_publication":
+                                PendingPublicationSerializer(publication).data
+                        },
+                    )
 
-            if not content and not media_list:
-                return response_data(False, message="Post cannot be empty", status_code=400)
+                post = PostService.create_post(actor, user, cleaned)
 
-            if post_type not in Post.PostType.values:
-                return response_data(False, message="Invalid post_type", status_code=400)
-
-            if visibility not in Post.Visibility.values:
-                return response_data(False, message="Invalid visibility", status_code=400)
-
-
-            # location validation
-            # A place is identified by its id, so a payload carrying one is
-            # valid with or without coordinates — LocationService resolves it
-            # against the row it already has. Coordinates are only REQUIRED for
-            # a place nothing has ever seen. Note the `is None` test: latitude 0
-            # is a real coordinate, and a falsy check rejected the equator.
-            if location_data:
-                if not isinstance(location_data, dict):
-                    return response_data(False, message="Invalid location format", status_code=400)
-
-                has_coords = (
-                    location_data.get("latitude") is not None
-                    and location_data.get("longitude") is not None
+            except PostCreateError as e:
+                return response_data(
+                    False,
+                    message=e.message,
+                    status_code=e.status_code,
+                    error=e.error,
                 )
-                if not has_coords and not location_data.get("external_id"):
-                    return response_data(False, message="Location must include latitude and longitude", status_code=400)
-
-            # Sport validation
-            sport = None
-            if sport_id:
-                sport = Sport.objects.filter(id=sport_id).only("id").first()
-                if not sport:
-                    return response_data(False, message="Invalid sport_id", status_code=400)
-
-
-            # -------------------------
-            # MEDIA VALIDATION
-            # -------------------------
-
-            if not isinstance(media_list, list):
-                return response_data(False, message="media must be a list", status_code=400)
-
-            if len(media_list) > 10:
-                return response_data(False, message="Maximum 10 media allowed", status_code=400)
-
-            image_count = 0
-            video_count = 0
-
-            for idx, media in enumerate(media_list):
-
-                if not isinstance(media, dict):
-                    return response_data(False, f"Invalid media at index {idx}", status_code=400)
-
-                file_url = media.get("file_url")
-                media_type = media.get("media_type")
-                public_id = media.get("public_id")
-
-                if not file_url or not media_type or not public_id:
-                    return response_data(False, f"Missing fields at index {idx}", status_code=400)
-
-                # -------------------------
-                # TYPE COUNT
-                # -------------------------
-                if media_type == PostMedia.MediaType.IMAGE:
-                    image_count += 1
-                elif media_type == PostMedia.MediaType.VIDEO:
-                    video_count += 1
-                else:
-                    return response_data(False, f"Invalid media_type at index {idx}", status_code=400)
-
-                # -------------------------
-                # MEDIA URL VALIDATION
-                # -------------------------
-                # Provider-aware (see services/storage/validators.py): the URL
-                # must come from our storage, carry an allowed extension, sit
-                # under this actor's own prefix, and its key must match the
-                # public_id sent alongside it.
-                thumbnail_url = (media.get("thumbnail_url") or "").strip()
-
-                try:
-                    org = actor.organization if actor.is_org else None
-
-                    if media_type == PostMedia.MediaType.IMAGE:
-                        validate_media(
-                            user,
-                            file_url,
-                            public_id,
-                            org=org,
-                            allowed_extensions=allowed_image_extensions()
-                        )
-
-                        # Optional for an image — a cheap preview for the feed.
-                        if thumbnail_url:
-                            validate_thumbnail(
-                                user,
-                                thumbnail_url,
-                                parent_key=public_id,
-                                org=org,
-                            )
-
-                    elif media_type == PostMedia.MediaType.VIDEO:
-                        validate_media(
-                            user,
-                            file_url,
-                            public_id,
-                            org=org,
-                            allowed_extensions=allowed_video_extensions()
-                        )
-
-                        # REQUIRED for a video. Nothing derives a poster frame
-                        # server-side any more, so without one the feed has a
-                        # black tile until the clip buffers.
-                        if not thumbnail_url:
-                            return response_data(
-                                False,
-                                f"thumbnail_url required at index {idx}",
-                                status_code=400
-                            )
-
-                        validate_thumbnail(
-                            user,
-                            thumbnail_url,
-                            parent_key=public_id,
-                            org=org,
-                        )
-
-                except ValueError as ve:
-                    return response_data(False, error=str(ve), status_code=400)
-
-                # Order validation
-                order = media.get("order", idx)
-                if order < 0:
-                    return response_data(False, "Invalid media order", status_code=400)
-
-                # -------------------------
-                # CLIENT-REPORTED METADATA
-                # -------------------------
-                # There is nobody left to ask: the object is the exact bytes the
-                # browser uploaded, so width/height/duration/size arrive with the
-                # attach request. They are cosmetic (layout and a duration
-                # badge), so anything out of range becomes NULL rather than a
-                # 400 — the client already renders older rows that have none.
-                media["width"], media["height"] = clamp_dimensions(
-                    media.get("width"), media.get("height")
-                )
-                media["thumbnail_url"] = thumbnail_url
-
-                if media_type == PostMedia.MediaType.VIDEO:
-                    media["duration"] = clamp_duration(
-                        media.get("duration"), MAX_POST_VIDEO_DURATION
-                    )
-                    media["size_bytes"] = clamp_size_bytes(
-                        media.get("size_bytes"), MAX_VIDEO_BYTES
-                    )
-                else:
-                    # An image has no duration; a client that sends one is
-                    # confused, and storing it would print a badge on a photo.
-                    media["duration"] = None
-                    media["size_bytes"] = clamp_size_bytes(
-                        media.get("size_bytes"), MAX_IMAGE_BYTES
-                    )
-
-            # -------------------------
-            # MEDIA RULES
-            # -------------------------
-
-            if image_count > 10:
-                return response_data(False, "Max 10 images allowed", status_code=400)
-
-            if video_count > 1:
-                return response_data(False, "Only one video allowed", status_code=400)
-
-            if video_count >= 1 and image_count >= 1:
-                return response_data(False, "Cannot mix images and video", status_code=400)
-
-            # -------------------------
-            # CREATE POST
-            # -------------------------
-
-            with transaction.atomic():
-                location = None
-                denorm = {}
-                if location_data:
-                    try:
-                        location = LocationService.get_or_create_location(location_data)
-                    except ValueError as ve:
-                        return response_data(False, error=str(ve), status_code=400)
-
-                    denorm = LocationService.build_denormalized(location)
-
-                post = Post.objects.create(
-                    author_user=actor.user if actor.is_user else None,
-                    author_org=actor.organization if actor.is_org else None,
-                    content=content,
-                    post_type=post_type,
-                    visibility=visibility,
-                    sport=sport,
-
-                    # LOCATION DATA - (for performance storing denormalized way)
-                    location=location,
-                    location_name=denorm.get("location_name", ""),
-                    city=denorm.get("city", ""),
-                    country_code=denorm.get("country_code", ""),
-                    latitude=denorm.get("latitude"),
-                    longitude=denorm.get("longitude"),
-                )
-
-                media_objs = []
-                for idx, media in enumerate(media_list):
-                    media_objs.append(
-                        PostMedia(
-                            post=post,
-                            file_url=media.get("file_url"),
-                            public_id=media.get("public_id"),
-                            media_type=media.get("media_type"),
-                            thumbnail_url=media.get("thumbnail_url", ""),
-                            duration=media.get("duration"),
-                            width=media.get("width"),
-                            height=media.get("height"),
-                            size_bytes=media.get("size_bytes"),
-                            order=media.get("order", idx),
-                        )
-                    )
-
-                if media_objs:
-                    PostMedia.objects.bulk_create(media_objs)
-
-                # Hashtag + mention rows are derived from the body — inside the
-                # same transaction, so a post is never visible without them.
-                added_mentions = sync_post_content(post)
-                notify_new_mentions(post, actor, added_mentions)
 
             # Safe actor logging
             actor_id = actor.user.id if actor.is_user else actor.organization.id

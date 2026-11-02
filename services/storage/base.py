@@ -40,6 +40,18 @@ class BaseStorageService:
         """[] when no rules are set. Read-only: nothing writes these."""
         raise NotImplementedError
 
+    # ---- object transfer (the media worker — these raise) ----
+    def head_object(self, key: str):
+        """{"size_bytes", "content_type"}, or None when the object is missing."""
+        raise NotImplementedError
+
+    def download_to_file(self, key: str, path: str):
+        raise NotImplementedError
+
+    def upload_file(self, path: str, key: str, content_type: str,
+                    cache_control: str):
+        raise NotImplementedError
+
     def get_media_metadata(self, public_id: str, media_type: str) -> dict:
         """
         Return trusted intrinsic media metadata (width/height, and duration for

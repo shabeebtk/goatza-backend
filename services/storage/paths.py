@@ -12,6 +12,8 @@ R2Service joins the folder and the object name into a single key.
 
 import uuid
 
+from apps.media.constants import SOURCE_UPLOAD_TYPES
+
 # Types that own exactly ONE slot per actor and replace themselves on re-upload
 # Their folder already ends with the slot name, so there is no random
 # component — re-uploading lands on the same path and overwrites in place.
@@ -29,6 +31,12 @@ TEMP_BATCH_TYPES = {
     "posts",
     "recruitments",
 }
+
+# Marks an ORIGINAL waiting for the worker: `<folder>/<uuid>.src.<ext>`. Every
+# later step — the multipart key check, POST /media/jobs, the worker — tells a
+# source from a ready file by this infix and nothing else. Nothing attaches a
+# source to a post; the worker's outputs are ordinary `<uuid>.<ext>` keys.
+SOURCE_INFIX = ".src."
 
 
 def new_temp_id() -> str:
@@ -138,6 +146,31 @@ def build_object_name(upload_type: str) -> str:
     return str(uuid.uuid4())
 
 
+def sibling_key(key: str, extension: str) -> str:
+    """
+    A fresh `<uuid><extension>` key in the SAME folder as `key` — where the
+    worker writes a source's outputs. The same folder is load-bearing: every
+    attach path's thumbnail check (validate_thumbnail, the chat validators)
+    wants the thumb beside its media, and the actor-prefix checks pass because
+    the folder is the uploader's own.
+    """
+    folder = key.rpartition("/")[0]
+    return f"{folder}/{uuid.uuid4()}{extension}"
+
+
+def is_source_key(key) -> bool:
+    """True for a key whose name is `<uuid>.src.<ext>` — see SOURCE_INFIX."""
+    if not isinstance(key, str):
+        return False
+    stem, infix, extension = key.rpartition("/")[2].partition(SOURCE_INFIX)
+    return (
+        bool(infix)
+        and is_canonical_uuid(stem)
+        and bool(extension)
+        and "." not in extension
+    )
+
+
 def is_canonical_uuid(value) -> bool:
     """
     True only for the exact spelling ``str(uuid.UUID(...))`` produces —
@@ -183,7 +216,8 @@ def is_upload_key_for(actor, upload_type: str, key) -> bool:
     posts folder — a highlights key would otherwise borrow the posts cap.
 
     So: the type's own folder for this actor, then — for batch types — one
-    canonical batch id, then a single ``<uuid>.<ext>`` file name. Fixed-slot
+    canonical batch id, then a single ``<uuid>.<ext>`` file name — or
+    ``<uuid>.src.<ext>`` for a source, on SOURCE_UPLOAD_TYPES only. Fixed-slot
     types never qualify; nothing uploads a profile picture in parts.
     """
     if not isinstance(key, str) or not key or upload_type in FIXED_SLOT_TYPES:
@@ -211,9 +245,14 @@ def is_upload_key_for(actor, upload_type: str, key) -> bool:
         return False
 
     stem, dot, extension = name.partition(".")
-    return (
-        bool(dot)
-        and bool(extension)
-        and "/" not in name
-        and is_canonical_uuid(stem)
-    )
+    if not dot or "/" in name or not is_canonical_uuid(stem):
+        return False
+
+    # One extension, no dots — so a `.src.` name can only pass through the
+    # branch below, on a type the worker serves.
+    if name.startswith(stem + SOURCE_INFIX):
+        if upload_type not in SOURCE_UPLOAD_TYPES:
+            return False
+        extension = extension[len(SOURCE_INFIX) - 1:]
+
+    return bool(extension) and "." not in extension

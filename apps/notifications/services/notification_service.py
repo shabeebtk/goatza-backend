@@ -91,6 +91,14 @@ MODERATION_WARNING_BODY = (
     "Your content was found to violate Goatza's community guidelines."
 )
 
+# Titles for a held post / highlight that could not be published, keyed by
+# PendingPublication.target. The body is the failure's own sentence. Shared
+# with grouping_service so in-app + push text can't drift.
+PUBLICATION_FAILED_TITLES = {
+    "post": "Your post couldn't be published",
+    "highlight": "Your highlight couldn't be added",
+}
+
 # A removal push carries the club's note (up to 500 chars). Lock screens show
 # two or three lines, so the body is cut at a word boundary and the full note
 # waits on the Applied card.
@@ -355,6 +363,15 @@ def build_notification_payload(notification: "Notification") -> dict:
         # warning into a lead for retaliation.
         title = "Community guidelines"
         body = MODERATION_WARNING_BODY
+
+    elif notification.type == Notification.Type.PUBLICATION_FAILED:
+        # The failure's own sentence ("This video is longer than 5 minutes —
+        # trim it and try again") is the body: it is the one line that tells
+        # the author what to do next.
+        title = PUBLICATION_FAILED_TITLES.get(
+            notification.data.get("target"), PUBLICATION_FAILED_TITLES["post"]
+        )
+        body = notification.data.get("error_message", "") or "Tap to view"
 
     return {
         "type": notification.type,
@@ -1148,6 +1165,47 @@ class NotificationService:
             comment=comment,
             recruitment=recruitment,
             data={"message": MODERATION_WARNING_BODY},
+            **NotificationService._recipient_kwargs(recipient_user, recipient_org),
+        )
+        _dispatch(notification)
+
+        return notification
+
+    # ──────────────────────────────────────────
+    # MEDIA (platform → author)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def publication_failed(recipient_user=None, recipient_org=None,
+                           publication=None):
+        """
+        Tell an author the post or highlight the server was holding for them
+        could not be published.
+
+        NO ACTOR, like moderation_warning: nobody did this to them — a file
+        would not convert, the rail filled up, they left the page. The client
+        renders "Goatza" as the sender.
+
+        In-app AND push, deliberately: the whole point of a held publication
+        is that the author could tap Post and leave, so a socket event alone
+        would reach nobody. A success sends no notification at all — that is
+        what they expected to happen.
+
+        NO DEDUP KEY: each failure is its own publication.
+
+        ``owner_username`` is for the deep link (deeplink_service): a person
+        is sent to their own posts list, which is addressed by username.
+        """
+        notification = Notification.objects.create(
+            type=Notification.Type.PUBLICATION_FAILED,
+            data={
+                "publication_id": str(publication.id),
+                "target": publication.target,
+                "error_code": publication.error_code,
+                "error_message": publication.error_message,
+                "owner_username": (
+                    recipient_user.username if recipient_user else ""
+                ),
+            },
             **NotificationService._recipient_kwargs(recipient_user, recipient_org),
         )
         _dispatch(notification)

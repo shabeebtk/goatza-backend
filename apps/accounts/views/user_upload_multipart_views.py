@@ -29,6 +29,12 @@ PART SIZE IS OURS. R2 requires every part except the last to be the SAME size,
 and at least 5 MiB, so the server picks it and the client slices to exactly
 what it is told.
 
+A SOURCE GOES UP THE SAME WAY. An original the browser could not convert
+(`<uuid>.src.<ext>`, see services/storage/paths.py) is the file most likely to
+be large, so create takes a source key too — with the source content types and
+caps from ``source_file_refusal``, not POLICY's ready-file ones. The key decides
+which rules apply: a `.src.` key is a source, anything else a ready video.
+
 Who may upload what is the signature endpoint's ``POLICY`` and
 ``resolve_upload_actor``, imported rather than restated.
 """
@@ -40,7 +46,12 @@ import time
 from core.views.base_views import BaseAPIView
 from utils.response import response_data
 from services.storage.factory import get_storage_service
-from services.storage.paths import actor_key_prefixes, is_upload_key_for
+from services.storage.paths import (
+    SOURCE_INFIX,
+    actor_key_prefixes,
+    is_source_key,
+    is_upload_key_for,
+)
 from services.storage.r2 import (
     CONTENT_TYPE_EXTENSIONS,
     UPLOAD_URL_EXPIRES_IN,
@@ -51,8 +62,10 @@ from apps.accounts.views.user_upload_signature_views import (
     POLICY,
     VIDEO_CONTENT_TYPES,
     resolve_upload_actor,
+    source_file_refusal,
     upload_error,
 )
+from apps.media.constants import SOURCE_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +75,9 @@ logger = logging.getLogger(__name__)
 MULTIPART_PART_SIZE = 8 * MB
 
 # A ceiling on the URLs one request can mint, independent of POLICY. The
-# largest video any type allows today is ten parts, so this only matters if a
-# cap is ever raised without anybody looking here.
+# largest ready video any type allows is ten parts and the largest source
+# (MEDIA_SOURCE_MAX_VIDEO_BYTES, 300 MB) is 38, so this only matters if a cap
+# is ever raised without anybody looking here.
 MULTIPART_MAX_PARTS = 50
 
 # Bounds on the opaque strings passed through to R2. Nothing legitimate comes
@@ -139,13 +153,13 @@ def _ordered_parts(parts):
 
 class CreateMultipartUploadAPIView(BaseAPIView):
     """
-    POST → start, or re-sign, a multipart upload for one video.
+    POST → start, or re-sign, a multipart upload for one video (or source).
 
     Body:
     {
         "type": "posts",
         "org_id": "<uuid>",          # only when acting for an org type
-        "key": "<the video key the signature endpoint issued>",
+        "key": "<the video or source key the signature endpoint issued>",
         "content_type": "video/mp4",
         "size_bytes": 41943040,
         "upload_id": "<optional>"    # fresh part URLs for THIS upload
@@ -182,22 +196,34 @@ class CreateMultipartUploadAPIView(BaseAPIView):
                     or POLICY[upload_type]["video"]["max"] < 1:
                 return upload_error("Invalid upload type", "type")
 
-            video = POLICY[upload_type]["video"]
-
-            if not isinstance(content_type, str) \
-                    or content_type not in VIDEO_CONTENT_TYPES:
-                return upload_error("Invalid file type", "content_type")
-
-            # bool is an int subclass — True would otherwise sail through.
-            if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) \
-                    or size_bytes <= 0:
-                return upload_error("Invalid file size", "size_bytes")
-
-            if size_bytes > video["max_bytes"]:
-                return upload_error(
-                    f"Video is larger than {video['max_bytes'] // MB}MB",
-                    "size_bytes"
+            if is_source_key(key):
+                # An original for the media worker: source types and caps,
+                # and the extension it was signed under after `.src.`.
+                refusal = source_file_refusal(
+                    upload_type, content_type, size_bytes
                 )
+                if refusal:
+                    return upload_error(*refusal)
+                extension = SOURCE_INFIX + SOURCE_EXTENSIONS[content_type]
+            else:
+                video = POLICY[upload_type]["video"]
+
+                if not isinstance(content_type, str) \
+                        or content_type not in VIDEO_CONTENT_TYPES:
+                    return upload_error("Invalid file type", "content_type")
+
+                # bool is an int subclass — True would otherwise sail through.
+                if isinstance(size_bytes, bool) \
+                        or not isinstance(size_bytes, int) or size_bytes <= 0:
+                    return upload_error("Invalid file size", "size_bytes")
+
+                if size_bytes > video["max_bytes"]:
+                    return upload_error(
+                        f"Video is larger than {video['max_bytes'] // MB}MB",
+                        "size_bytes"
+                    )
+
+                extension = CONTENT_TYPE_EXTENSIONS[content_type]
 
             if upload_id is not None and not _valid_upload_id(upload_id):
                 return upload_error("Invalid upload_id", "upload_id")
@@ -211,7 +237,7 @@ class CreateMultipartUploadAPIView(BaseAPIView):
             # A key the signature endpoint could have issued to THIS actor for
             # THIS type, with the extension THIS content type is stored under.
             if not is_upload_key_for(actor, upload_type, key) \
-                    or not key.endswith(CONTENT_TYPE_EXTENSIONS[content_type]):
+                    or not key.endswith(extension):
                 return upload_error("Invalid key", "key")
 
             part_count = math.ceil(size_bytes / MULTIPART_PART_SIZE)

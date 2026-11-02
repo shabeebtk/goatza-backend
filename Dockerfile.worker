@@ -1,0 +1,48 @@
+# The Celery worker, with ffmpeg — the only process that converts media.
+#
+# Render: a Background Worker on this repo, runtime Docker, Dockerfile path
+# `Dockerfile.worker`, the web service's Environment Group. Full steps in
+# CLAUDE.md, "Server-side media processing".
+#
+# The web service does NOT use this image and has no ffmpeg; that is why a
+# media job is never run inline (media.process_job, fallback="skip").
+#
+# The container runs TWO worker processes — the default queues (with beat) and
+# the media queue, one conversion at a time — see scripts/worker-entrypoint.sh.
+
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Debian's ffmpeg is built with libx264 and zscale (libzimg), which is the
+# whole target: H.264 out, HDR tone-mapped to SDR.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Requirements first, so a code-only change reuses the installed layer.
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+
+# CR stripped and the bit set here, so a Windows checkout (CRLF, no exec bit)
+# cannot leave the container with an entrypoint that will not start.
+RUN sed -i 's/\r$//' scripts/worker-entrypoint.sh \
+    && chmod +x scripts/worker-entrypoint.sh
+
+# Non-root. /app stays writable for beat's schedule file
+# (CELERY_BEAT_SCHEDULE_FILENAME); jobs work in /tmp (MEDIA_WORK_DIR).
+RUN useradd --create-home --uid 10001 worker \
+    && chown -R worker:worker /app
+USER worker
+
+# Two processes, one container: `-Q celery -B --concurrency=2` and `-Q media
+# --concurrency=1`. Beat is embedded in the first only — correct for exactly
+# ONE process (see CLAUDE.md, "Background jobs" → Deployment).
+CMD ["/app/scripts/worker-entrypoint.sh"]

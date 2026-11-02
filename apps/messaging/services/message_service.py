@@ -35,8 +35,10 @@ from apps.messaging.services.exceptions import (
     NotParticipantError,
 )
 from apps.feed.services.affinity_services import AffinityService
+from apps.media.constants import SOURCE_NOT_PROCESSED_MESSAGE
 from apps.moderation.services.block_guard import require_not_blocked
 from services.storage.metadata import MAX_DIMENSION, clamp_int
+from services.storage.paths import is_source_key
 from services.storage.validators import (
     extract_storage_key,
     get_file_extension,
@@ -340,6 +342,13 @@ class MessageService:
         """
         if not media_url or not is_valid_media_source(media_url):
             raise InvalidMediaError("Invalid media source")
+
+        # An original waiting for the media worker is the sender's own file,
+        # so the prefix check below would pass it — and a 300 MB raw clip
+        # would go to the recipient as is (see validate_public_id). Only a
+        # job's outputs attach. This also covers the thumbnail.
+        if is_source_key(media_public_id):
+            raise InvalidMediaError(SOURCE_NOT_PROCESSED_MESSAGE)
 
         if get_file_extension(media_url) not in allowed_extensions:
             raise InvalidMediaError("Unsupported media format")
