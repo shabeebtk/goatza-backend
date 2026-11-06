@@ -20,8 +20,8 @@ opened — and it plays by the same two rules.
 
 Visibility itself is NOT decided here. ``RecruitmentSelector
 .get_recruitment_detail`` is the single home for that rule and it already
-answers None for an anonymous caller unless the recruitment is ACTIVE and
-public; ActorMixin hands it ``request.actor = None`` when there is no token,
+answers None for an anonymous caller unless the recruitment is public, and
+active or closed; ActorMixin hands it ``request.actor = None`` when there is no token,
 and resolves a signed-in caller normally, so a follower opening this URL gets
 the followers-only posting they are entitled to.
 """

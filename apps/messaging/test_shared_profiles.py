@@ -185,10 +185,13 @@ class ShareProfileTests(MessagingShareTestCase):
         ShareViewer._follows fires a query on first access. Profiles have no
         followers-only tier, so this path must never reach it — otherwise a
         10-target fan-out pays for an answer that cannot change the outcome.
+
+        The one query is the block list, which a profile does answer to: once
+        for both checks, however many there are.
         """
         viewer = ShareViewer(user=self.sender)
 
-        with self.assertNumQueries(0):
+        with self.assertNumQueries(1):
             self.assertTrue(is_user_profile_shareable(self.author, viewer))
             self.assertTrue(is_org_profile_shareable(self.other_org, viewer))
 
@@ -453,7 +456,8 @@ class SharedProfileQueryCountTests(MessagingShareTestCase):
     #   6. shared_profile_user primary sport
     #   7. shared_profile_user primary position
     #   8. shared_profile_org locations
-    EXPECTED_QUERIES = 8
+    #   9. the viewer's block list (once for the page, and cached after that)
+    EXPECTED_QUERIES = 9
 
     def _seed(self, sets, conversation):
         """`sets` × one message of each of the four shared types."""

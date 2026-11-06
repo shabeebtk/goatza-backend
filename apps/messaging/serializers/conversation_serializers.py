@@ -2,54 +2,45 @@
 from rest_framework import serializers
 from apps.messaging.models import Conversation, ConversationParticipant
 from apps.accounts.serializers.user_serializers import UserMiniSerializer
-from shared.serializers.actor_serializers import ActorMiniSerializer
+from apps.messaging.selectors.share_selectors import counterpart_unavailable_reason
+from apps.messaging.serializers.message_serializers import actor_payload
 from apps.moderation.services.block_guard import is_blocked as _is_blocked_between
 
-class ConversationListSerializer(serializers.ModelSerializer):
 
-    other_participant = serializers.SerializerMethodField()
-    last_message = serializers.SerializerMethodField()
-    unread_count = serializers.SerializerMethodField()
-    is_blocked = serializers.SerializerMethodField()
+class CounterpartFieldsMixin:
+    """
+    The other side of the thread, read once per conversation however many fields
+    ask. It may be a deleted or suspended account, or gone altogether: history stays
+    readable, and these fields are how the client knows to disable the composer.
+    The send is refused by MessageService whatever the client does.
+    """
 
-    class Meta:
-        model = Conversation
-        fields = [
-            "id",
-            "type",
-            "status",
-            "last_message",
-            "last_message_at",
-            "other_participant",
-            "unread_count",
-            "is_blocked",
-        ]
+    def _counterpart(self, obj):
+        """The other participant's User or Organization, or None if the row is gone."""
+        cache = self.__dict__.setdefault("_counterpart_cache", {})
 
-    # ----------------------------------------
-    # OTHER PARTICIPANT (USER OR ORG)
-    # ----------------------------------------
+        if obj.id not in cache:
+            actor = self.context["request"].actor
+            participant = obj.participants.exclude(
+                user=actor.user if actor.is_user else None,
+                org=actor.organization if actor.is_org else None
+            ).select_related("user__profile", "org__profile").first()
+
+            cache[obj.id] = (
+                (participant.user or participant.org) if participant else None
+            )
+
+        return cache[obj.id]
+
     def get_other_participant(self, obj):
-        actor = self.context["request"].actor
+        return actor_payload(self._counterpart(obj))
 
-        participant = obj.participants.exclude(
-            user=actor.user if actor.is_user else None,
-            org=actor.organization if actor.is_org else None
-        ).select_related("user__profile", "org__profile").first()
+    def get_counterpart_unavailable(self, obj):
+        return counterpart_unavailable_reason(self._counterpart(obj)) is not None
 
-        if not participant:
-            return None
+    def get_counterpart_unavailable_reason(self, obj):
+        return counterpart_unavailable_reason(self._counterpart(obj)) or ""
 
-        if participant.user:
-            return ActorMiniSerializer(participant.user).data
-
-        if participant.org:
-            return ActorMiniSerializer(participant.org).data
-
-        return None
-
-    # ----------------------------------------
-    # BLOCK STATE (§1.5)
-    # ----------------------------------------
     def get_is_blocked(self, obj):
         """
         True when the two participants are blocked in EITHER direction.
@@ -64,19 +55,37 @@ class ConversationListSerializer(serializers.ModelSerializer):
         side blocked, and a thread that silently swallowed their messages would
         be worse than one that plainly cannot be replied to.
         """
-        actor = self.context["request"].actor
+        other = self._counterpart(obj)
 
-        participant = obj.participants.exclude(
-            user=actor.user if actor.is_user else None,
-            org=actor.organization if actor.is_org else None
-        ).select_related("user", "org").first()
-
-        if not participant:
+        if other is None:
             return False
 
-        other = participant.user or participant.org
+        return _is_blocked_between(self.context["request"].actor, other)
 
-        return _is_blocked_between(actor, other)
+
+class ConversationListSerializer(CounterpartFieldsMixin, serializers.ModelSerializer):
+
+    other_participant = serializers.SerializerMethodField()
+    last_message = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
+    is_blocked = serializers.SerializerMethodField()
+    counterpart_unavailable = serializers.SerializerMethodField()
+    counterpart_unavailable_reason = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Conversation
+        fields = [
+            "id",
+            "type",
+            "status",
+            "last_message",
+            "last_message_at",
+            "other_participant",
+            "unread_count",
+            "is_blocked",
+            "counterpart_unavailable",
+            "counterpart_unavailable_reason",
+        ]
 
     # ----------------------------------------
     # LAST MESSAGE
@@ -121,7 +130,7 @@ class ConversationListSerializer(serializers.ModelSerializer):
 
 
 
-class ConversationDetailSerializer(serializers.ModelSerializer):
+class ConversationDetailSerializer(CounterpartFieldsMixin, serializers.ModelSerializer):
 
     other_participant = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
@@ -133,6 +142,8 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
     other_last_read_at = serializers.SerializerMethodField()
     is_last_message_seen = serializers.SerializerMethodField()
     is_blocked = serializers.SerializerMethodField()
+    counterpart_unavailable = serializers.SerializerMethodField()
+    counterpart_unavailable_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
@@ -155,58 +166,9 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
             "other_last_read_at",
             "is_last_message_seen",
             "is_blocked",
+            "counterpart_unavailable",
+            "counterpart_unavailable_reason",
         ]
-
-    # OTHER PARTICIPANT
-    def get_other_participant(self, obj):
-        actor = self.context["request"].actor
-
-        participant = obj.participants.exclude(
-            user=actor.user if actor.is_user else None,
-            org=actor.organization if actor.is_org else None
-        ).select_related("user__profile", "org__profile").first()
-
-        if not participant:
-            return None
-
-        if participant.user:
-            return ActorMiniSerializer(participant.user).data
-
-        if participant.org:
-            return ActorMiniSerializer(participant.org).data
-
-        return None
-
-    # ----------------------------------------
-    # BLOCK STATE (§1.5)
-    # ----------------------------------------
-    def get_is_blocked(self, obj):
-        """
-        True when the two participants are blocked in EITHER direction.
-
-        HISTORY STAYS READABLE — this does not hide the thread or its
-        messages, it only tells the client to disable the composer ("You can't
-        reply to this conversation."). The send itself is already refused
-        server-side by MessageService, so this flag is presentation, never
-        enforcement.
-
-        Symmetric on purpose: the blocked party must not be able to tell which
-        side blocked, and a thread that silently swallowed their messages would
-        be worse than one that plainly cannot be replied to.
-        """
-        actor = self.context["request"].actor
-
-        participant = obj.participants.exclude(
-            user=actor.user if actor.is_user else None,
-            org=actor.organization if actor.is_org else None
-        ).select_related("user", "org").first()
-
-        if not participant:
-            return False
-
-        other = participant.user or participant.org
-
-        return _is_blocked_between(actor, other)
 
     # LAST MESSAGE
     def get_last_message(self, obj):

@@ -769,23 +769,22 @@ class RecruitmentSelector:
         if is_owner:
             return recruitment
 
-        # PUBLIC ACCESS
-        if (
-            recruitment.status
-            == Recruitment.Status.ACTIVE
-            and recruitment.visibility
-            == Recruitment.Visibility.PUBLIC
+        # Closed still opens: a shared card, a notification or a bookmark outlives
+        # the close, and the page says it has closed. Opening is all this decides.
+        # Applying and sharing each check the status for themselves.
+        if recruitment.status not in (
+            Recruitment.Status.ACTIVE,
+            Recruitment.Status.CLOSED,
         ):
+            return None
+
+        # PUBLIC ACCESS
+        if recruitment.visibility == Recruitment.Visibility.PUBLIC:
 
             return recruitment
 
         # FOLLOWERS ONLY
-        if (
-            recruitment.status
-            == Recruitment.Status.ACTIVE
-            and recruitment.visibility
-            == Recruitment.Visibility.FOLLOWERS_ONLY
-        ):
+        if recruitment.visibility == Recruitment.Visibility.FOLLOWERS_ONLY:
 
             if not actor:
                 return None

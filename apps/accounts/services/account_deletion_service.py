@@ -85,7 +85,8 @@ def sole_owned_organizations(user):
 
     Co-owned orgs are fine (the other owner carries on) and so is an org this
     user is only a COACH or STAFF of — that is somebody else's org. A member who
-    was removed or left owns nothing, on either side of this check.
+    was removed or left owns nothing, on either side of this check, and a co-owner
+    who is deactivated or waiting to be deleted is not going to carry anything on.
 
     Three queries regardless of how many orgs are involved: the user's owner
     memberships, one pass over every OWNER row for those orgs, then the names.
@@ -110,6 +111,8 @@ def sole_owned_organizations(user):
             organization_id__in=owned_org_ids,
             role=OrganizationMember.Role.OWNER,
             status=OrganizationMember.Status.ACTIVE,
+            user__is_active=True,
+            user__deletion_requested_at__isnull=True,
         )
         .exclude(user=user)
         .values_list("organization_id", flat=True)
@@ -128,6 +131,31 @@ def sole_owned_organizations(user):
         .only("id", "name", "username")
         .order_by("name")
     )
+
+
+def _lock_owned_organizations(user):
+    """
+    Queue behind every member write on the orgs this user owns, in one fixed
+    order so two owners deleting at once cannot deadlock. A co-owner leaving or
+    deleting in the same moment then runs before or after the check, never beside
+    it, so the two of them cannot each count on the other and leave zero owners.
+
+    Imported here because the member service imports ``mask_email`` from this
+    module.
+    """
+    from apps.organization.services.organization_member_service import _lock_members
+
+    owned_orgs = (
+        Organization.objects
+        .filter(
+            members__user=user,
+            members__role=OrganizationMember.Role.OWNER,
+            members__status=OrganizationMember.Status.ACTIVE,
+        )
+        .order_by("id")
+    )
+    for organization in owned_orgs:
+        _lock_members(organization)
 
 
 def _assert_no_orphaned_organizations(user):
@@ -227,7 +255,9 @@ def confirm_account_deletion(user, *, password=None, otp=None):
     Order matters and is the order below:
 
       1. The sole-owner guard, BEFORE anything is verified or written — an org
-         must never be orphaned, and refusing costs nothing at this point.
+         must never be orphaned, and refusing costs nothing at this point. Under
+         the lock on those orgs' member rows, held until this commits, and read
+         after taking it: a waiter must see what it waited for.
       2. The credential. Everything after this is destructive to the caller's
          session, so it happens only once we know who is asking.
       3. Blacklist every outstanding refresh token (the same block
@@ -241,6 +271,7 @@ def confirm_account_deletion(user, *, password=None, otp=None):
 
     Raises ValidationError (400) for the orphaned-org and bad-credential cases.
     """
+    _lock_owned_organizations(user)
     _assert_no_orphaned_organizations(user)
 
     _verify_credential(user, password, otp)

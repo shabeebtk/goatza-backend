@@ -1,17 +1,14 @@
 from rest_framework import serializers
 from django.utils import timezone
 from apps.accounts.models import UserProfile
+from apps.accounts.services.age_service import birthdate_editable
 from shared.models import Location
 from apps.usernames.services.username_service import UsernameService
 from utils.validations import validate_username_format
 
-# How many times a user may change their own date of birth through the app.
-# One, and the reason is in validate_birthdate below. Counted against
-# User.birthdate_corrections, which the profile-update view increments when a
-# change actually lands.
-MAX_SELF_SERVE_BIRTHDATE_CHANGES = 1
-
-BIRTHDATE_SUPPORT_MESSAGE = "Contact support to change your date of birth."
+BIRTHDATE_LOCKED_MESSAGE = (
+    "Your date of birth can't be changed. If it's wrong, contact support."
+)
 
 
 class UpdateUserProfileSerializer(serializers.Serializer):
@@ -90,30 +87,21 @@ class UpdateUserProfileSerializer(serializers.Serializer):
 
     def validate_birthdate(self, value):
         """
-        One self-serve correction, then the support route.
+        Set at signup and onboarding, then locked: ``birthdate_editable``.
 
-        WHY THE LIMIT EXISTS
+        WHY THE LOCK EXISTS
 
-        The birthdate is collected at signup and decides, through
-        ``User.is_minor``, which country's child-protection rules the account
-        is held to. A freely editable birthdate makes that decision a
-        preference: refused at 12, come back tomorrow as 20. Capping the
-        self-serve path at one change is what turns the signup answer into an
-        answer rather than a first guess.
+        The birthdate decides, through ``User.is_minor``, which country's
+        child-protection rules the account is held to. A freely editable birthdate
+        makes that decision a preference: refused at 12, come back tomorrow as 20.
 
-        WHY THERE IS A SUPPORT ROUTE AT ALL, RATHER THAN A HARD LOCK
+        WHY THERE IS A SUPPORT ROUTE AT ALL
 
-        Because people have a legal right to have inaccurate personal data
-        about them corrected — GDPR Art. 16, and the DPDP Act's correction
-        right for Indian users — and a birthdate is personal data like any
-        other. A permanent lock would not be a strict version of this policy;
-        it would remove a right the platform is obliged to provide, on the
-        strength of a fat-fingered year. So the route stays open, it just
-        stops being one click.
-
-        Locking the SELF-SERVE path is what stops age-gaming. It is not meant
-        to stop corrections, and it should not be tightened into something
-        that does.
+        Because people have a legal right to have inaccurate personal data about
+        them corrected — GDPR Art. 16, and the DPDP Act's correction right for
+        Indian users. Locking the SELF-SERVE path is what stops age-gaming. It is
+        not meant to stop corrections: staff make those in the Django admin, which
+        runs the same minor rule.
         """
         if value is None:
             # Clearing it is not a correction, it is a deletion — and it would
@@ -121,7 +109,7 @@ class UpdateUserProfileSerializer(serializers.Serializer):
             # refuses to create. Nothing offers this in the UI; refuse it here
             # so nothing can.
             raise serializers.ValidationError(
-                "Date of birth can't be removed. " + BIRTHDATE_SUPPORT_MESSAGE
+                "Date of birth can't be removed. If it's wrong, contact support."
             )
 
         if value > timezone.now().date():
@@ -131,15 +119,14 @@ class UpdateUserProfileSerializer(serializers.Serializer):
         profile = getattr(user, "profile", None)
         current = getattr(profile, "birthdate", None)
 
-        # Re-submitting the same date is not a change and must not spend the
-        # one correction. The profile editor PATCHes whatever fields the form
-        # holds, so an unrelated edit — a new headline, a new city — routinely
-        # carries the unchanged birthdate along with it.
+        # Re-submitting the same date is not a change. The profile editor PATCHes
+        # whatever fields the form holds, so an unrelated edit — a new headline, a
+        # new city — routinely carries the unchanged birthdate along with it.
         if current == value:
             return value
 
-        if user.birthdate_corrections >= MAX_SELF_SERVE_BIRTHDATE_CHANGES:
-            raise serializers.ValidationError(BIRTHDATE_SUPPORT_MESSAGE)
+        if not birthdate_editable(user):
+            raise serializers.ValidationError(BIRTHDATE_LOCKED_MESSAGE)
 
         return value
 

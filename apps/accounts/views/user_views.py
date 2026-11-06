@@ -35,6 +35,7 @@ from apps.accounts.serializers.user_update_serilizer import UpdateUserProfileSer
 from apps.accounts.constants import normalize_country
 from apps.accounts.services.age_service import (
     AgeGateError,
+    birthdate_editable,
     parse_birthdate,
     resolve_country,
     validate_signup_age,
@@ -152,6 +153,8 @@ class GetUserDetailsByID(APIView):
             # behind a second request. Free for everybody else — guardian_status
             # only queries when the status is `pending` (see the selector).
             data["guardian"] = guardian_status(user)
+
+            data["can_edit_birthdate"] = birthdate_editable(user)
 
             return response_data(success=True, data=data)
         
@@ -445,9 +448,11 @@ class UpdateUserProfileAPIView(APIView):
                 "weight_kg",
             ]
 
-            # Read BEFORE the loop below overwrites it — the counter increment
-            # underneath depends on knowing what was there.
-            birthdate_before = profile.birthdate
+            # Read BEFORE the loop below overwrites it. A re-save of the same date
+            # is not a change, and must not run the minor rule.
+            birthdate_changed = (
+                "birthdate" in data and data["birthdate"] != profile.birthdate
+            )
 
             for field in profile_mapping:
                 if field in data:
@@ -461,26 +466,7 @@ class UpdateUserProfileAPIView(APIView):
                         f"{TAG} {field}: {old_value} → {new_value}"
                     )
 
-            # A birthdate that ACTUALLY CHANGED spends the single self-serve
-            # correction (see UpdateUserProfileSerializer.validate_birthdate,
-            # which reads this counter and refuses the next one). Counted here
-            # rather than in the serializer because a serializer that validates
-            # must not have side effects: is_valid() runs before anything is
-            # saved and can be followed by a rollback, and a counter
-            # incremented by a change that never landed would lock the user out
-            # of a correction they never made.
-            #
-            # The equality check is not redundant with the serializer's — that
-            # one decides whether to ALLOW, this one decides whether to CHARGE,
-            # and a re-save of the same date must do neither.
-            if "birthdate" in data and data["birthdate"] != birthdate_before:
-                user.birthdate_corrections += 1
-                user_fields.append("birthdate_corrections")
-
-                logger.info(
-                    f"{TAG} Birthdate corrected user={user.id}, "
-                    f"corrections={user.birthdate_corrections}"
-                )
+            guardian_required = False
 
             # ATOMIC SAVE
             with transaction.atomic():
@@ -495,6 +481,20 @@ class UpdateUserProfileAPIView(APIView):
 
                 if profile_fields:
                     profile.save(update_fields=profile_fields + ["updated_at"])
+
+                # THE MINOR RULE, on every date this route accepts: during
+                # onboarding, or a legacy account's first one. In the same
+                # transaction, so a minor's date is never on file without the
+                # lock. It only moves `not_needed`, so an adult date clears
+                # nothing, and `profile` is user.profile, already carrying the
+                # new date.
+                if birthdate_changed:
+                    guardian_required = ensure_pending_for_minor(user)
+
+                    logger.info(
+                        f"{TAG} Birthdate set user={user.id}, "
+                        f"guardian_required={guardian_required}"
+                    )
 
             updated_fields = (
                 (["username"] if claims_username else []) + user_fields + profile_fields
@@ -523,7 +523,14 @@ class UpdateUserProfileAPIView(APIView):
             return response_data(
                 success=True,
                 message="Profile updated successfully",
-                data=response_serializer.data
+                data={
+                    **response_serializer.data,
+                    # Beside the user rather than inside it, the same key and
+                    # shape as POST /user/role and POST /user/verify/otp.
+                    "guardian_required": guardian_required,
+                    # This response seeds the client's copy of /user/details.
+                    "can_edit_birthdate": birthdate_editable(user_fresh),
+                },
             )
 
         except UsernameTaken:

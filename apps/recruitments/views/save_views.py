@@ -54,7 +54,9 @@ class ToggleSaveRecruitmentAPIView(BaseAPIView):
                 # Resolved through the DETAIL selector, not a bare pk lookup:
                 # saving must not become a way to probe for deleted, draft,
                 # private or followers-only postings the caller could not open.
-                # Same rules, same 404, one implementation.
+                # Same rules, same 404, one implementation. A closed one opens, so
+                # it can be saved, and a player can take one off their shortlist
+                # after it closes.
                 recruitment = (
                     RecruitmentSelector.get_recruitment_detail(
                         recruitment_id=recruitment_id,
@@ -177,7 +179,8 @@ class SavedRecruitmentsListAPIView(BaseAPIView):
 
             serializer = SavedRecruitmentListSerializer(
                 results,
-                many=True
+                many=True,
+                context={"actor": actor},
             )
 
             logger.info(

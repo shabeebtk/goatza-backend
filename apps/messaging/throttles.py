@@ -1,4 +1,19 @@
+import uuid
+
 from rest_framework.throttling import SimpleRateThrottle
+
+
+def canonical_actor_id(raw):
+    """
+    One spelling per org. resolve_actor hands the header to a UUID field, which
+    takes upper case, no hyphens, braces and urn:uuid:, so keying on the raw string
+    would give a caller a fresh bucket per spelling. Something that is not a UUID
+    stays as it is: resolve_actor refuses that request anyway.
+    """
+    try:
+        return str(uuid.UUID(raw))
+    except (AttributeError, TypeError, ValueError):
+        return raw
 
 
 class ActorScopedThrottle(SimpleRateThrottle):
@@ -22,6 +37,9 @@ class ActorScopedThrottle(SimpleRateThrottle):
     Subclasses set `scope`.
     """
 
+    def org_ident(self, user, org_id):
+        return f"{user.pk}:org:{org_id}"
+
     def get_cache_key(self, request, view):
         user = request.user
 
@@ -40,10 +58,10 @@ class ActorScopedThrottle(SimpleRateThrottle):
             }
 
         actor_type = request.headers.get("X-Actor-Type", "user")
-        actor_id = request.headers.get("X-Actor-Id", "")
+        actor_id = canonical_actor_id(request.headers.get("X-Actor-Id", ""))
 
         if actor_type == "organization" and actor_id:
-            ident = f"{user.pk}:org:{actor_id}"
+            ident = self.org_ident(user, actor_id)
         else:
             ident = f"{user.pk}:user"
 

@@ -16,6 +16,30 @@ from apps.recruitments.feedback_window import (
     can_give_feedback,
     prompt_window_open,
 )
+from apps.messaging.selectors.share_selectors import (
+    ShareViewer,
+    can_share_recruitment,
+)
+
+
+def can_share_for_requester(serializer, recruitment):
+    """
+    Whether the person asking may share this, so the client never guesses. Somebody
+    logged out counts: the public page's Copy link needs no account, so they get
+    the answer for a viewer who only sees public listings.
+
+    ``actor`` for a list, where passing ``request`` would also switch on what
+    nested serializers read from it. One viewer per response, or a page of
+    followers-only cards would re-read the follow graph per row.
+    """
+    context = serializer.context
+    actor = context.get("actor") or getattr(context.get("request"), "actor", None)
+
+    viewer = context.get("share_viewer")
+    if viewer is None:
+        viewer = context["share_viewer"] = ShareViewer.from_actor(actor)
+
+    return can_share_recruitment(recruitment, viewer)
 
 
 class RecruitmentPositionMiniSerializer(serializers.ModelSerializer):
@@ -353,6 +377,7 @@ class RecruitmentListSerializer(
     # surfaces that KEEP ended trials (the owner's list, the shortlist, a
     # direct link) so the card can wear a "Trial over" badge.
     is_trial_over = serializers.BooleanField(read_only=True)
+    can_share = serializers.SerializerMethodField()
 
     class Meta:
 
@@ -393,12 +418,16 @@ class RecruitmentListSerializer(
             # The bookmark. Always present so the card never has to guess.
             "is_saved",
             "is_trial_over",
+            "can_share",
             # WHERE THIS TRIAL IS FOR THIS VIEWER. On the parent, not the
             # discover subclass: the org public profile renders the same card
             # off this serializer, and it used to show no distance at all.
             "distance_km",
             "nearest_session",
         ] + TrialSessionsMixin.SESSION_FIELDS
+
+    def get_can_share(self, obj):
+        return can_share_for_requester(self, obj)
 
     def get_distance_km(self, obj):
         """
@@ -720,6 +749,7 @@ class RecruitmentDetailSerializer(
         many=True, read_only=True
     )
     is_saved = serializers.SerializerMethodField()
+    can_share = serializers.SerializerMethodField()
 
     class Meta:
         model = Recruitment
@@ -778,6 +808,7 @@ class RecruitmentDetailSerializer(
             # Same bookmark the card carries, so the detail page's toggle has
             # its initial state without a second request.
             "is_saved",
+            "can_share",
 
             "created_at",
         ] + TrialSessionsMixin.SESSION_FIELDS
@@ -786,6 +817,9 @@ class RecruitmentDetailSerializer(
     # the detail selector's queryset; see RecruitmentListSerializer.get_is_saved.
     def get_is_saved(self, obj):
         return bool(getattr(obj, "is_saved", False))
+
+    def get_can_share(self, obj):
+        return can_share_for_requester(self, obj)
 
     # PLAYER APPLICATION
     def get_my_application(self, obj):

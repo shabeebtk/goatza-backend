@@ -1,6 +1,8 @@
 import json
+from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 
+from apps.organization.models import OrganizationMember
 from utils.realtime import WS_CLOSE_ORG_ACCESS_REVOKED, org_actor_sockets_group
 
 
@@ -34,7 +36,21 @@ class UserNotificationsConsumer(AsyncWebsocketConsumer):
                 self.channel_name
             )
 
+            # Looked at again now the socket can hear about it. A removal that
+            # committed after the auth middleware's check, and before the join
+            # above, was announced to a group this socket was not in yet.
+            if await self._lost_org_access():
+                await self.close(code=WS_CLOSE_ORG_ACCESS_REVOKED)
+                return
+
         await self.accept(subprotocol="access_token")
+
+    @database_sync_to_async
+    def _lost_org_access(self):
+        return not OrganizationMember.objects.filter(
+            organization=self.actor.organization,
+            user=self.user,
+        ).exists()
 
     async def disconnect(self, close_code):
         if hasattr(self, "room_group_name"):

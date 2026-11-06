@@ -23,7 +23,21 @@ Two Render services on this repo, plus Postgres and Redis.
 
 ### Web service
 
-Unchanged. Set the Health Check Path to `/healthz` in the service's settings —
+**The start command must run Daphne with `-v 0`:**
+
+```
+daphne -v 0 -b 0.0.0.0 -p $PORT core.asgi:application
+```
+
+At its default verbosity Daphne writes an access log straight to `sys.stdout`,
+not through Python logging, so `core/log_redaction.py` never sees it and every
+organization invite and guardian consent token in a URL is printed raw. Those
+tokens are credentials: anyone reading the line can use them. No code change can
+fix this, because it is the start command. `-v 0` turns off Daphne's own access
+log only. App logs still go through Django's `LOGGING`, and Render's HTTP request
+logs still show requests.
+
+Set the Health Check Path to `/healthz` in the service's settings —
 there is no way to declare it from code, and until it is set Render falls back
 to "the port is open", which a process with a dead database still satisfies.
 

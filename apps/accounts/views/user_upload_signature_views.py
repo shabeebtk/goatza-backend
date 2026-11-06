@@ -1,6 +1,7 @@
 from django.conf import settings
 
 from core.views.base_views import BaseAPIView
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from utils.response import response_data
 from utils.errors import error_body
@@ -14,6 +15,7 @@ from apps.media.constants import (
     source_kind,
 )
 from apps.media.selectors.capability_selectors import server_processing_available
+from apps.matches.services.match_services import MatchService
 from apps.organization.models import Organization
 from apps.organization.services.organization_member_service import OrganizationMemberService
 from utils.validations import is_valid_uuid
@@ -293,6 +295,14 @@ def resolve_upload_actor(request, actor, upload_type, org_id):
         return None, (
             "Switch to your personal account for this upload", "type", 403
         )
+
+    # The match photo slot is part of the diary, so it has the diary's gate. The
+    # check above only knows person from org, and a coach is a person too.
+    if upload_type == "matches":
+        try:
+            MatchService.require_player(actor)
+        except PermissionDenied as exc:
+            return None, (str(exc.detail), "type", 403)
 
     if upload_type in ORG_ONLY_TYPES and not actor.is_org:
         return None, (

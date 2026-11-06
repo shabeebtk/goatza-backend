@@ -540,9 +540,9 @@ class SendInviteTests(MembersTestBase):
         self.assertFalse(Notification.objects.filter(type=Notification.Type.ORG_INVITE).exists())
         self.assertEqual(self.mail.call_args.kwargs["to_email"], "nobody@else.example")
 
-    def test_refuses_an_active_member(self):
+    def test_refuses_an_active_member_named_by_id(self):
+        # By email it answers like any other address: test_member_fixes.NoAccountOracleTests.
         self._assert_error(self._invite(user_id=str(self.coach.id)), "already_member")
-        self._assert_error(self._invite(email=self.coach.email), "already_member")
 
     def test_refuses_a_second_pending_invite(self):
         self._invite(user_id=str(self.outsider.id))
@@ -954,17 +954,18 @@ class TokenInviteTests(MembersTestBase):
         self._assert_error(used, "not_found", 404)
         self.assertEqual(used.data, unknown.data)
 
-    def test_decline_needs_only_the_link(self):
+    def test_decline_is_for_the_invitee_and_works_once(self):
         token = self._email_invite()
+        invitee = make_user("invitee", email=OrganizationInvite.objects.get().email)
 
-        response = self._user_post(self.outsider, f"invites/token/{token}/decline")
+        response = self._user_post(invitee, f"invites/token/{token}/decline")
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(
             OrganizationInvite.objects.get().status, OrganizationInvite.Status.DECLINED
         )
         self._assert_error(
-            self._user_post(self.outsider, f"invites/token/{token}/decline"),
+            self._user_post(invitee, f"invites/token/{token}/decline"),
             "not_found",
             404,
         )
@@ -1164,9 +1165,16 @@ class ChangeRoleTests(MembersTestBase):
             404,
         )
 
-    def test_the_last_owner_cant_stop_being_one(self):
+    def test_the_last_working_owner_cant_stop_being_one(self):
+        # Nobody changes their own role now, so this is the case that is left: the
+        # only other owner is on their way out, and does not count.
+        departing = make_user("departing")
+        self._member(departing, OrganizationMember.Role.OWNER)
+        departing.deletion_requested_at = timezone.now()
+        departing.save(update_fields=["deletion_requested_at"])
+
         response = self._org_post(
-            self.owner, f"members/{self.owner_member.id}/role", {"role": "coach"}
+            departing, f"members/{self.owner_member.id}/role", {"role": "coach"}
         )
 
         self._assert_error(response, "last_owner")
@@ -1248,12 +1256,13 @@ class RemoveMemberTests(MembersTestBase):
             403,
         )
 
-    def test_never_the_last_owner(self):
-        OrganizationMember.objects.filter(id=self.coach_member.id).update(
-            permission_overrides={"grant": ["members.manage"]}
-        )
+    def test_never_the_last_working_owner(self):
+        departing = make_user("departing")
+        self._member(departing, OrganizationMember.Role.OWNER)
+        departing.deletion_requested_at = timezone.now()
+        departing.save(update_fields=["deletion_requested_at"])
 
-        response = self._org_post(self.coach, f"members/{self.owner_member.id}/remove")
+        response = self._org_post(departing, f"members/{self.owner_member.id}/remove")
 
         self._assert_error(response, "last_owner")
 

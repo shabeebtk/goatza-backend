@@ -1,11 +1,13 @@
 from rest_framework import serializers
 
 from apps.messaging.models import Message
+from apps.accounts.models import User
 from apps.messaging.selectors.share_selectors import (
     ShareViewer,
+    can_view_shared_recruitment,
+    is_deleted_account,
     is_org_profile_shareable,
     is_post_shareable,
-    is_recruitment_shareable,
     is_user_profile_shareable,
 )
 from shared.serializers.actor_serializers import ActorMiniSerializer
@@ -17,9 +19,37 @@ POST_SNIPPET_LENGTH = 120
 # this and nothing else — no id, no author, no text.
 UNAVAILABLE = {"unavailable": True}
 
+DELETED_ACCOUNT_NAME = "Deleted account"
+
+MEDIA_TYPES = (Message.Type.IMAGE, Message.Type.VIDEO)
+
+# Blanked together, so a client never holds half a media message to try and load.
+MEDIA_URL_FIELDS = ("media_url", "media_public_id", "media_thumbnail_url")
+
+
+def actor_payload(identity):
+    """
+    A person or org in a chat, as ActorMiniSerializer shapes them, or the
+    placeholder when the account was deleted. The id stays when there is one,
+    because it is how a client tells its own bubbles from the other side's.
+    """
+    if identity is None or (
+        isinstance(identity, User) and is_deleted_account(identity)
+    ):
+        return {
+            "id": str(identity.id) if identity else None,
+            "username": "",
+            "name": DELETED_ACCOUNT_NAME,
+            "avatar": "",
+            "type": "user",
+        }
+
+    return ActorMiniSerializer(identity).data
+
 
 class MessageSerializer(serializers.ModelSerializer):
     sender = serializers.SerializerMethodField()
+    media_unavailable = serializers.SerializerMethodField()
     shared_post_preview = serializers.SerializerMethodField()
     shared_recruitment_preview = serializers.SerializerMethodField()
     shared_user_profile_preview = serializers.SerializerMethodField()
@@ -37,6 +67,7 @@ class MessageSerializer(serializers.ModelSerializer):
             "is_read",
 
             # media
+            "media_unavailable",
             "media_url",
             "media_public_id",
             "media_thumbnail_url",
@@ -84,13 +115,29 @@ class MessageSerializer(serializers.ModelSerializer):
         return self._viewer_cache
 
     def get_sender(self, obj):
-        if obj.sender_user:
-            return ActorMiniSerializer(obj.sender_user).data
+        return actor_payload(obj.sender_user or obj.sender_org)
 
-        if obj.sender_org:
-            return ActorMiniSerializer(obj.sender_org).data
+    # ----------------------------------------
+    # MEDIA
+    # ----------------------------------------
+    def get_media_unavailable(self, obj):
+        """
+        A photo or video with nothing to load. Media lives in columns on the
+        message rather than a row of its own, so this is the file's address being
+        blank, or the message having been taken down.
+        """
+        return obj.message_type in MEDIA_TYPES and (
+            obj.is_deleted or not obj.media_url
+        )
 
-        return None
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+
+        if data["media_unavailable"]:
+            for field in MEDIA_URL_FIELDS:
+                data[field] = ""
+
+        return data
 
     # ----------------------------------------
     # READ RECEIPT
@@ -161,7 +208,7 @@ class MessageSerializer(serializers.ModelSerializer):
 
         recruitment = obj.shared_recruitment
 
-        if not is_recruitment_shareable(recruitment, self._viewer):
+        if not can_view_shared_recruitment(recruitment, self._viewer):
             return UNAVAILABLE
 
         media = list(recruitment.media.all())   # prefetched + ordered
@@ -175,6 +222,10 @@ class MessageSerializer(serializers.ModelSerializer):
             "sport": recruitment.sport.name if recruitment.sport else "",
             "type": recruitment.recruitment_type,
             "status": recruitment.status,
+            # So a card sent while it was open can say "Trial ended" or "Closed"
+            # and drop Apply. Both read columns, so a page of cards stays flat.
+            "is_trial_over": recruitment.is_trial_over,
+            "is_accepting_applications": recruitment.is_accepting_applications,
             # isoformat, not the raw datetime: this dict is built by hand rather
             # than by a DRF field, and the same payload is msgpack'd onto the
             # channel layer, which can only carry primitives.
