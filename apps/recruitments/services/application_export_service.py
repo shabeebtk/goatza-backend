@@ -2,7 +2,7 @@
 """
 The applicants spreadsheet an org downloads — one .xlsx, at most 100 rows.
 
-THIS FILE HOLDS MINORS' CONTACT DETAILS. Who may build one (owner/admin) is
+THIS FILE HOLDS MINORS' CONTACT DETAILS. Who may build one (recruitments.speak) is
 the view's job, and the audit line it writes is the only trail; this module
 only turns rows the caller already chose into bytes, and logs nothing.
 

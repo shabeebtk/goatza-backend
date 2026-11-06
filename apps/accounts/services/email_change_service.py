@@ -245,6 +245,15 @@ def confirm_email_change(user, *, otp):
     # pending change — two dead ends instead of one retryable step.
     cache_delete(CacheKeys.email_change_pending(user.id))
 
+    # The new address is proved, so invites sent to it can find their person.
+    # Imported here because the organization services import this app's models
+    # and the notification path. Never raises.
+    from apps.organization.services.organization_member_service import (
+        OrganizationMemberService,
+    )
+
+    OrganizationMemberService.claim_email_invites(user)
+
     # To the address being LEFT, and masked. If this change was not the
     # owner's, that inbox is the only place they will ever hear about it.
     if old_email:

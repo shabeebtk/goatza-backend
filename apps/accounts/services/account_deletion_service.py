@@ -84,14 +84,19 @@ def sole_owned_organizations(user):
     than cleaned up afterwards.
 
     Co-owned orgs are fine (the other owner carries on) and so is an org this
-    user is only an ADMIN or COACH of — that is somebody else's org.
+    user is only a COACH or STAFF of — that is somebody else's org. A member who
+    was removed or left owns nothing, on either side of this check.
 
     Three queries regardless of how many orgs are involved: the user's owner
     memberships, one pass over every OWNER row for those orgs, then the names.
     """
     owned_org_ids = list(
         OrganizationMember.objects
-        .filter(user=user, role=OrganizationMember.Role.OWNER)
+        .filter(
+            user=user,
+            role=OrganizationMember.Role.OWNER,
+            status=OrganizationMember.Status.ACTIVE,
+        )
         .values_list("organization_id", flat=True)
     )
 
@@ -104,6 +109,7 @@ def sole_owned_organizations(user):
         .filter(
             organization_id__in=owned_org_ids,
             role=OrganizationMember.Role.OWNER,
+            status=OrganizationMember.Status.ACTIVE,
         )
         .exclude(user=user)
         .values_list("organization_id", flat=True)

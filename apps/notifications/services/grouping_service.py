@@ -5,9 +5,11 @@ from apps.notifications.services.notification_service import (
     ACHIEVEMENT_DECISION_COPY,
     CAREER_DECISION_COPY,
     MESSAGE_SHARE_NOUN,
+    ORG_MEMBER_TYPES,
     PUBLICATION_FAILED_TITLES,
     RECRUITMENT_STATUS_COPY,
     RECRUITMENT_STATUS_COPY_DEFAULT,
+    org_member_copy,
 )
 
 
@@ -132,6 +134,7 @@ class NotificationGroupingService:
             entry_title=primary.data.get("entry_title"),
             total_count=total_count,
             publication_target=primary.data.get("target"),
+            data=primary.data,
         )
 
         # ----------------------------------------
@@ -202,9 +205,15 @@ class NotificationGroupingService:
     def _build_text(
         notification_type, actors, others_count,
         recruitment_title=None, to_status=None, shared_kind=None,
-        entry_title=None, total_count=1, publication_target=None
+        entry_title=None, total_count=1, publication_target=None, data=None
     ):
         names = [a["name"] for a in actors if a]
+
+        if notification_type in ORG_MEMBER_TYPES:
+            title, body = org_member_copy(notification_type, data or {})
+            # The card has no second line, and the role is part of the question
+            # an invite asks: "... invited you to join X as Coach".
+            return f"{title} {body}" if notification_type == "org_invite" else title
 
         if notification_type == "publication_failed":
             # Platform-voiced: no actor, so no names. The reason is in

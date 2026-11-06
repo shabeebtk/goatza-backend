@@ -18,7 +18,7 @@ from apps.notifications.services.deeplink_service import build_conversation_url
 from apps.notifications.services.fcm_service import FCMService
 from apps.notifications.services.notification_service import (
     NotificationService,
-    get_org_admin_users,
+    get_org_alert_recipients,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,13 +117,13 @@ def push_message(message_id):
         # notification row is written for ordinary chat.
         #
         # An org has no device of its own, so its push fans out to the
-        # OWNER/ADMIN members the same way a notification row does. Without
+        # members with org.receive_alerts, the same way a notification row does. Without
         # this branch an org participant got no push at all for ordinary
         # chat — only for shares, which go through NotificationService above.
         if participant.user:
             targets = [participant.user]
         elif participant.org:
-            targets = get_org_admin_users(participant.org)
+            targets = get_org_alert_recipients(participant.org)
         else:
             continue
 
@@ -160,7 +160,7 @@ def push_message(message_id):
                 sent += 1
             except Exception:
                 # PER RECIPIENT: an org conversation fans out to every
-                # OWNER/ADMIN, and one unreachable device must not stop the
+                # owner, and one unreachable device must not stop the
                 # others being told. FCMService deactivates dead tokens itself;
                 # an exception out of it is the transport or Firebase init.
                 failed += 1

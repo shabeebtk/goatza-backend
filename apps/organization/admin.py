@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import (
     Organization,
+    OrganizationInvite,
     OrganizationProfile,
     OrganizationMember,
     OrganizationSport,
@@ -31,8 +32,12 @@ class OrganizationMemberInline(admin.TabularInline):
     model = OrganizationMember
     extra = 0
     autocomplete_fields = ("user",)
-    fields = ("user", "role", "created_at")
-    readonly_fields = ("created_at",)
+    fields = ("user", "role", "status", "joined_at", "removed_at")
+    readonly_fields = ("joined_at", "removed_at")
+
+    def get_queryset(self, request):
+        # History too. The default manager only returns active members.
+        return OrganizationMember.all_objects.select_related("user")
 
 
 class OrganizationSportInline(admin.TabularInline):
@@ -142,11 +147,15 @@ class OrganizationMemberAdmin(admin.ModelAdmin):
         "organization",
         "user",
         "role",
+        "status",
+        "removed_by",
+        "joined_at",
         "created_at",
     )
 
     list_filter = (
         "role",
+        "status",
         "created_at",
     )
 
@@ -158,11 +167,72 @@ class OrganizationMemberAdmin(admin.ModelAdmin):
 
     autocomplete_fields = ("organization", "user")
 
-    readonly_fields = ("created_at",)
+    readonly_fields = ("created_at", "added_by", "removed_at", "removed_by")
 
-    list_select_related = ("organization", "user")
+    list_select_related = ("organization", "user", "removed_by__user")
 
     ordering = ("-created_at",)
+
+    def get_queryset(self, request):
+        # History too. The default manager only returns active members, and a
+        # removed member is exactly who somebody opens this page to look up.
+        return OrganizationMember.all_objects.all()
+
+
+@admin.register(OrganizationInvite)
+class OrganizationInviteAdmin(admin.ModelAdmin):
+    """Read-mostly. token_hash is never shown, and a row without a raw token is useless."""
+
+    list_display = (
+        "id",
+        "organization",
+        "role",
+        "invited_user",
+        "email",
+        "status",
+        "expires_at",
+        "created_at",
+    )
+
+    list_filter = ("status", "role", "created_at")
+
+    search_fields = (
+        "organization__name",
+        "invited_user__username",
+        "email",
+    )
+
+    fields = (
+        "organization",
+        "role",
+        "invited_by",
+        "invited_user",
+        "email",
+        "status",
+        "expires_at",
+        "responded_at",
+        "accepted_member",
+        "created_at",
+    )
+
+    readonly_fields = (
+        "organization",
+        "role",
+        "invited_by",
+        "invited_user",
+        "email",
+        "expires_at",
+        "responded_at",
+        "accepted_member",
+        "created_at",
+    )
+
+    list_select_related = ("organization", "invited_user")
+
+    ordering = ("-created_at",)
+
+    def has_add_permission(self, request):
+        return False
 
 
 

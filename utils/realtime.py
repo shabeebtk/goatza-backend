@@ -27,6 +27,21 @@ from channels.layers import get_channel_layer
 
 logger = logging.getLogger(__name__)
 
+# Application close code for "you no longer have access to the organization this
+# socket acts as". Beside the chat socket's 4403 (terms): reads as a 404, because
+# the org is no longer one this socket may address.
+WS_CLOSE_ORG_ACCESS_REVOKED = 4404
+
+
+def org_actor_sockets_group(organization_id) -> str:
+    """
+    Every open socket acting AS this organization, notification and chat alike.
+
+    Chat sockets otherwise only sit in per-conversation groups, so without this
+    a member's removal would have no way of finding the threads they have open.
+    """
+    return f"org_actor_sockets_{organization_id}"
+
 
 def safe_group_send(group, message, *, tag) -> bool:
     """

@@ -354,8 +354,8 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
 
     def get_fee_marked_by(self, obj):
         """
-        The member who marked it, for the tooltip. SET_NULL, so an
-        member who has since left reads as null rather than taking the
+        The member who marked it, for the tooltip. Removal keeps the row, so a
+        member who has since left stays named, with is_former, rather than taking the
         fee record with them. select_related by the list selector.
         """
         member = obj.fee_marked_by
@@ -366,6 +366,7 @@ class ApplicantListItemSerializer(serializers.ModelSerializer):
         return {
             "id": str(member.id),
             "name": getattr(profile, "name", "") or member.user.username or "",
+            "is_former": member.is_former,
         }
 
     def get_highlights_count(self, obj):
@@ -413,6 +414,7 @@ class ApplicationStatusHistorySerializer(serializers.ModelSerializer):
         return {
             "id": str(member.id),
             "name": getattr(profile, "name", "") or member.user.username or "",
+            "is_former": member.is_former,
         }
 
 

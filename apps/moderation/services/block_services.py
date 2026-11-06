@@ -25,12 +25,11 @@ import logging
 
 from django.db import transaction
 from django.db.models import Q
-from rest_framework.exceptions import PermissionDenied
 
 from apps.accounts.models import User
 from core.actor import Actor
 from apps.moderation.models import Block
-from apps.organization.models import OrganizationMember
+from apps.organization.permissions import OrgPermission, require_org_permission
 from utils.cache import cache_delete, cache_get, cache_set
 from utils.cache_keys import CacheKeys
 
@@ -38,15 +37,6 @@ logger = logging.getLogger(__name__)
 
 
 class BlockService:
-
-    # Blocking on behalf of a club is a public act by the club — it severs the
-    # club's follow graph and hides it from an account for good. Same pair that
-    # gates privacy and verification: COACH and STAFF run the day-to-day, they
-    # do not decide who the organization refuses to deal with.
-    BLOCK_ROLES = (
-        OrganizationMember.Role.OWNER,
-        OrganizationMember.Role.ADMIN,
-    )
 
     # Short by design — see CacheKeys.blocked_ids. The explicit invalidation on
     # every write is the real mechanism; this only bounds the damage if one of
@@ -60,23 +50,23 @@ class BlockService:
     @staticmethod
     def require_block_permission(actor):
         """
-        The org-side role gate. No-op for a user actor (you always speak for
-        yourself); raises PermissionDenied (-> 403) for an org actor whose
-        membership role is not OWNER/ADMIN.
+        The org-side gate. No-op for a user actor (you always speak for
+        yourself); raises PermissionDenied (-> 403) for an org actor without
+        org.block.
+
+        Blocking on behalf of a club is a public act by the club — it severs the
+        club's follow graph and hides it from an account for good. Coaches and
+        staff run the day-to-day, they do not decide who the organization
+        refuses to deal with.
 
         ``resolve_actor`` has already proved the logged-in user is a member of
-        the org they claim to act as; this only adds the role rule on top —
+        the org they claim to act as; this only adds the permission on top —
         same split as CareerVerificationService.require_reviewer.
         """
         if actor is None or not actor.is_org:
             return
 
-        member = actor.organization_member
-
-        if member is None or member.role not in BlockService.BLOCK_ROLES:
-            raise PermissionDenied(
-                "Only the organization's owner or an admin can block accounts"
-            )
+        require_org_permission(actor, OrgPermission.ORG_BLOCK)
 
     @staticmethod
     def _validate_target(actor, target_user=None, target_org=None):

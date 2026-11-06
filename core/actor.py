@@ -38,7 +38,8 @@ def resolve_actor(request):
 
         membership = OrganizationMember.objects.filter(
             user=user,
-            organization_id=org_id
+            organization_id=org_id,
+            status=OrganizationMember.Status.ACTIVE,
         ).select_related("organization").first()
 
         if not membership:

@@ -460,7 +460,7 @@ class Command(BaseCommand):
                     organization=org,
                     user=member,
                     role=random.choice(
-                        [OrganizationMember.Role.ADMIN, OrganizationMember.Role.COACH]
+                        [OrganizationMember.Role.COACH, OrganizationMember.Role.STAFF]
                     ),
                 )
 

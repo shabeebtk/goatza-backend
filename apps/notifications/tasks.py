@@ -47,7 +47,7 @@ def push_notification(notification_id):
         # Everything build_notification_payload and _get_recipient_users touch:
         # the actor's display name and avatar come off its profile, the body
         # quotes the post/comment, the deep link reads the recruitment, and the
-        # recipient is either the user row or the org whose admins get it.
+        # recipient is either the user row or the org whose alert audience gets it.
         .select_related(
             "recipient_user",
             "recipient_org",
@@ -85,7 +85,7 @@ def push_notification(notification_id):
         except Exception:
             # PER RECIPIENT, so one unreachable device cannot cost the other
             # recipients their push. An org notification fans out to every
-            # OWNER/ADMIN, and a single stale token taking the whole task down
+            # owner, and a single stale token taking the whole task down
             # would silently stop the rest of the club being told anything.
             # FCMService already handles dead tokens itself; an exception out
             # of it is the transport or Firebase init, not a token.

@@ -54,7 +54,8 @@ class JWTProtocolAuthMiddleware:
                         membership = await database_sync_to_async(
                             OrganizationMember.objects.select_related("organization").filter(
                                 user=user,
-                                organization_id=org_id
+                                organization_id=org_id,
+                                status=OrganizationMember.Status.ACTIVE,
                             ).first
                         )()
 
@@ -64,7 +65,8 @@ class JWTProtocolAuthMiddleware:
                         if membership and not membership.organization.is_suspended:
                             scope["actor"] = Actor(
                                 actor_type="organization",
-                                organization=membership.organization
+                                organization=membership.organization,
+                                organization_member=membership,
                             )
                         else:
                             scope["actor"] = None

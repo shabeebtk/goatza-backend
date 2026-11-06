@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 DELETE_NOTE_MIN = 10
 DELETE_NOTE_MAX = 500
 
-DELETE_FORBIDDEN_MESSAGE = "Only owners and admins can delete a recruitment."
+DELETE_FORBIDDEN_MESSAGE = "Only owners can delete a recruitment."
 
 
 class SessionSync(NamedTuple):
@@ -530,7 +530,7 @@ class RecruitmentService:
         """
         The OrganizationMember allowed to delete, or PermissionDenied (→ 403).
 
-        The announcement gate's role rule (owner/admin) under this action's
+        The announcement gate (recruitments.speak) under this action's
         own words — that gate's message is about posting announcements.
         """
         try:
@@ -542,7 +542,7 @@ class RecruitmentService:
     @transaction.atomic
     def delete_recruitment(actor, recruitment, note=""):
         """
-        An owner or admin deletes their own recruitment. Soft, like the
+        A member with recruitments.speak deletes a recruitment. Soft, like the
         moderator path: ``is_deleted`` is the flag every read already honours.
 
         Status is left alone and media stays in R2 — the player's Applied
@@ -555,7 +555,7 @@ class RecruitmentService:
         """
         member = RecruitmentService.require_deleter(actor)
 
-        # Locked, so two admins pressing Delete at once produce one delete
+        # Locked, so two owners pressing Delete at once produce one delete
         # and one "already deleted" — and one fan-out, not two.
         recruitment = (
             Recruitment.objects

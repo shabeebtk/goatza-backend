@@ -4,6 +4,7 @@ from apps.organization.models import (
     Organization, OrganizationProfile, OrganizationLocation, OrganizationSport,
     OrganizationMember
 )
+from apps.organization.permissions import member_permissions
 
 class OrganizationLocationInputSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255, required=False, allow_blank=True)
@@ -105,8 +106,68 @@ class OrganizationMiniSerializer(serializers.ModelSerializer):
         if hasattr(obj, "profile") and obj.profile.headline:
             return obj.profile.headline
         return ""
-    
 
+
+class MyMembershipSerializer(serializers.Serializer):
+    """
+    my_role + my_permissions: the REQUESTING user in this org, null and [] if
+    they aren't a member.
+
+    A hint for the UI and nothing more — the real gates are server-side in
+    apps/organization/permissions.py.
+
+    Fed in one of two ways. A list passes ``memberships_by_org`` from the context
+    (OrganizationService.get_user_memberships), so a page of orgs costs one query
+    and not one per row. A single org passes ``request`` and costs one lookup,
+    shared by both fields.
+    """
+
+    my_role = serializers.SerializerMethodField()
+    my_permissions = serializers.SerializerMethodField()
+
+    def _my_membership(self, obj):
+        memberships = self.context.get("memberships_by_org")
+        if memberships is not None:
+            return memberships.get(obj.id)
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return None
+
+        if getattr(self, "_my_membership_org_id", None) != obj.id:
+            self._my_membership_org_id = obj.id
+            self._my_membership_row = OrganizationMember.objects.filter(
+                organization=obj,
+                user=user,
+                status=OrganizationMember.Status.ACTIVE,
+            ).first()
+
+        return self._my_membership_row
+
+    def get_my_role(self, obj):
+        member = self._my_membership(obj)
+        return member.role if member else None
+
+    def get_my_permissions(self, obj):
+        return sorted(member_permissions(self._my_membership(obj)))
+
+
+class MyOrganizationSerializer(MyMembershipSerializer, OrganizationMiniSerializer):
+    """
+    An org the way /organizations/list shows it to one of its own members.
+
+    A subclass, not two more fields on OrganizationMiniSerializer: that one is
+    nested in post, comment and recruitment payloads, which inherit the request
+    from their parent, so fields on it would mean one membership query per row of
+    every feed.
+    """
+
+    class Meta(OrganizationMiniSerializer.Meta):
+        fields = OrganizationMiniSerializer.Meta.fields + (
+            "my_role",
+            "my_permissions",
+        )
 
 
 
@@ -149,7 +210,7 @@ class OrganizationSportSerializer(serializers.ModelSerializer):
 # -----------------------------------
 # FULL
 # -----------------------------------
-class OrganizationFullSerializer(serializers.ModelSerializer):
+class OrganizationFullSerializer(MyMembershipSerializer, serializers.ModelSerializer):
     logo = serializers.SerializerMethodField()
     cover_image = serializers.SerializerMethodField()
     headline = serializers.SerializerMethodField()
@@ -162,7 +223,6 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
     posts_count = serializers.SerializerMethodField()
 
     is_public_profile = serializers.SerializerMethodField()
-    my_role = serializers.SerializerMethodField()
 
     locations = OrganizationLocationSerializer(
         many=True,
@@ -201,6 +261,7 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
 
             "is_public_profile",
             "my_role",
+            "my_permissions",
 
             "locations",
             "sports",
@@ -256,31 +317,6 @@ class OrganizationFullSerializer(serializers.ModelSerializer):
         """
         profile = self._profile(obj)
         return profile.is_public_profile if profile else True
-
-    def get_my_role(self, obj):
-        """
-        The REQUESTING user's role in this org, or null if they aren't a member.
-
-        Drives the disabled state on owner/admin-only settings rows. It is a
-        hint for the UI and nothing more — the real gate is server-side in
-        OrganizationPrivacyService, which re-reads the membership.
-
-        Costs one query, and only when the caller puts a request in the
-        serializer context. List callers leave it out so a page of orgs never
-        fans out into one membership lookup per row.
-        """
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-
-        if not user or not user.is_authenticated:
-            return None
-
-        return (
-            OrganizationMember.objects
-            .filter(organization=obj, user=user)
-            .values_list("role", flat=True)
-            .first()
-        )
 
 
 

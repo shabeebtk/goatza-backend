@@ -7,7 +7,7 @@ from django.db import transaction
 from apps.organization.models import Organization
 from apps.organization.services.organization_service import OrganizationService
 from apps.organization.serializers.organization_serializers import (
-    OrganizationCreateSerializer, OrganizationMiniSerializer, OrganizationFullSerializer, 
+    MyOrganizationSerializer, OrganizationCreateSerializer, OrganizationFullSerializer,
     UpdateOrganizationMediaSerializer
 )
 from apps.organization.serializers.update_organization_serializer import UpdateOrganizationSerializer
@@ -93,9 +93,14 @@ class ListUserOrganizationsAPIView(APIView):
                 request.user
             )
 
-            serializer = OrganizationMiniSerializer(
+            serializer = MyOrganizationSerializer(
                 organizations,
-                many=True
+                many=True,
+                context={
+                    "memberships_by_org": OrganizationService.get_user_memberships(
+                        request.user
+                    )
+                },
             )
 
             return response_data(
@@ -178,13 +183,15 @@ class OrganizationsDetailsAPIView(BaseAPIView):
             # SERIALIZE
             # -------------------------
             if view_type == "all":
-                # request in the context → `my_role`, which the settings screen
-                # uses to disable owner/admin-only rows.
+                # request in the context → `my_role` + `my_permissions`, which
+                # the settings screen uses to disable rows the member can't use.
                 serializer = OrganizationFullSerializer(
                     organization, context={"request": request}
                 )
             else:
-                serializer = OrganizationMiniSerializer(organization)
+                serializer = MyOrganizationSerializer(
+                    organization, context={"request": request}
+                )
 
             relation = FollowService.get_relationship(
                 actor=actor,
@@ -489,7 +496,9 @@ class UpdateOrganizationAPIView(BaseAPIView):
 
             # Return full updated org
             org_fresh = OrganizationService.get_organization(id=org.id)
-            response_serializer = OrganizationFullSerializer(org_fresh)
+            response_serializer = OrganizationFullSerializer(
+                org_fresh, context={"request": request}
+            )
 
             return response_data(
                 success=True,

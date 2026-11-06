@@ -696,7 +696,7 @@ class OrgPrivacyToggleTests(PublicProfileTestCase):
 
         self.owner = self._user("clubowner", "Club Owner",
                                 role=User.Role.ORG_USER)
-        self.admin = self._user("clubadmin", "Club Admin",
+        self.co_owner = self._user("clubcoowner", "Club Co-Owner",
                                 role=User.Role.ORG_USER)
         self.coach = self._user("clubcoach", "Club Coach",
                                 role=User.Role.COACH)
@@ -706,7 +706,7 @@ class OrgPrivacyToggleTests(PublicProfileTestCase):
 
         for user, role in (
             (self.owner, OrganizationMember.Role.OWNER),
-            (self.admin, OrganizationMember.Role.ADMIN),
+            (self.co_owner, OrganizationMember.Role.OWNER),
             (self.coach, OrganizationMember.Role.COACH),
             (self.staff, OrganizationMember.Role.STAFF),
         ):
@@ -729,8 +729,8 @@ class OrgPrivacyToggleTests(PublicProfileTestCase):
         self.org.profile.refresh_from_db()
         self.assertFalse(self.org.profile.is_public_profile)
 
-    def test_admin_may_toggle(self):
-        self.assertEqual(self._patch(self.admin).status_code, status.HTTP_200_OK)
+    def test_a_second_owner_may_toggle(self):
+        self.assertEqual(self._patch(self.co_owner).status_code, status.HTTP_200_OK)
 
     def test_coach_is_rejected(self):
         response = self._patch(self.coach)

@@ -190,11 +190,16 @@ class OrganizationService:
     @staticmethod
     def get_user_organizations(user):
         """
-        List organizations where user is owner/member.
+        List organizations where user is an active member.
+
+        ``members__status`` must sit in the SAME filter() as ``members__user``:
+        this join does not go through the active manager, and a second filter()
+        would be allowed to match a different member's row.
         """
         queryset = (
             Organization.objects.filter(
                 members__user=user,
+                members__status=OrganizationMember.Status.ACTIVE,
                 is_active=True
             )
             .select_related("profile")
@@ -205,7 +210,22 @@ class OrganizationService:
         logger.info(f"Fetched organizations for user={user.id}")
 
         return queryset
-    
+
+    @staticmethod
+    def get_user_memberships(user):
+        """
+        ``{organization_id: member}`` for this user's active memberships. One
+        query, so a list of their orgs can show my_role / my_permissions per row
+        without a lookup per row.
+        """
+        return {
+            member.organization_id: member
+            for member in OrganizationMember.objects.filter(
+                user=user,
+                status=OrganizationMember.Status.ACTIVE,
+            )
+        }
+
 
     @staticmethod
     def get_organization(id=None, username=None):

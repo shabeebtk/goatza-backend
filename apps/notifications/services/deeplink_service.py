@@ -183,4 +183,28 @@ def build_notification_url(notification) -> str:
             return "/highlights/manage"
         return _owner_profile_url(data, "/posts", fallback)
 
+    # ── ORGANIZATION MEMBERS ──────────────────────────────────────
+    # Every one goes to a PERSON, so there is no recipient org to build a base
+    # from. The org in `data` is the one these are about.
+    if ntype == Notification.Type.ORG_INVITE:
+        # An action, not a destination: the in-app card has Accept / Decline.
+        return fallback
+
+    if ntype == Notification.Type.ORG_MEMBER_REMOVED:
+        # Their access is gone, so the org's own pages are not somewhere to send
+        # them. The app itself is.
+        return "/home"
+
+    if ntype in (
+        Notification.Type.ORG_INVITE_ACCEPTED,
+        Notification.Type.ORG_INVITE_DECLINED,
+        Notification.Type.ORG_ROLE_CHANGED,
+        Notification.Type.ORG_OWNER_CHANGED,
+    ):
+        organization_id = (data.get("organization") or {}).get("id", "")
+        return (
+            f"{_admin_base(organization_id)}/members"
+            if organization_id else fallback
+        )
+
     return fallback

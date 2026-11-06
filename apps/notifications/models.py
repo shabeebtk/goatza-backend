@@ -42,6 +42,15 @@ class Notification(BaseUUIDModel):
         # published (apps/media PublicationService). The author has probably
         # left the app, so this is the only way they find out.
         PUBLICATION_FAILED = "publication_failed", "Publication Failed"
+        # Organization members. Every one goes to a person (recipient_user), not
+        # to the org: the audience is one member or the managers, and an org's
+        # own inbox is read by everyone acting as it.
+        ORG_INVITE = "org_invite", "Organization Invite"
+        ORG_INVITE_ACCEPTED = "org_invite_accepted", "Organization Invite Accepted"
+        ORG_INVITE_DECLINED = "org_invite_declined", "Organization Invite Declined"
+        ORG_MEMBER_REMOVED = "org_member_removed", "Organization Member Removed"
+        ORG_ROLE_CHANGED = "org_role_changed", "Organization Role Changed"
+        ORG_OWNER_CHANGED = "org_owner_changed", "Organization Owner Changed"
         # future:
         # TRIAL = "trial"
         

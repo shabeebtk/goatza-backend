@@ -1168,14 +1168,14 @@ class AchievementVerificationPermissionTests(AchievementVerificationTestCase):
         with self.assertRaises(PermissionDenied):
             AchievementVerificationService.verify(self.actor, achievement.id)
 
-    def test_admin_member_is_allowed(self):
+    def test_a_second_owner_is_allowed(self):
         achievement = self._pending_achievement()
-        admin = self._user("clubadmin", User.Role.ORG_USER)
-        admin_actor = self._org_actor(
-            admin, self.club, OrganizationMember.Role.ADMIN
+        co_owner = self._user("clubcoowner", User.Role.ORG_USER)
+        co_owner_actor = self._org_actor(
+            co_owner, self.club, OrganizationMember.Role.OWNER
         )
 
-        updated = AchievementVerificationService.verify(admin_actor, achievement.id)
+        updated = AchievementVerificationService.verify(co_owner_actor, achievement.id)
 
         self.assertEqual(
             updated.verification_status,

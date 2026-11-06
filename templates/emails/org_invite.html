@@ -1,0 +1,18 @@
+{% extends "emails/base.html" %}
+{% comment %}
+An invitation to help run an organization on Goatza. It goes to an address the
+inviter typed or to an account's address, and it reads the same for both: this
+mail must not say whether the address has an account.
+
+utils/transactional_emails.send_org_invite_email owns the plain-text twin; the
+two have to be edited together.
+
+`inviter_name`, `org_name` and `invite_url` stay autoescaped. Never mark them
+safe: a name is whatever somebody typed.
+{% endcomment %}
+{% block preheader %}{{ inviter_name }} invited you to join {{ org_name }} on Goatza.{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">You&rsquo;re invited to {{ org_name }}</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;"><b style="color:#111111;">{{ inviter_name }}</b> invited you to join <b style="color:#111111;">{{ org_name }}</b> on Goatza as <b style="color:#111111;">{{ role_label }}</b>.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#00B562;border-radius:10px;">
+    <a href="{{ invite_url }}" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#ffffff;text-decoration:none;letter-spacing:0.4px;">View invite</a>
+  </td></tr></table><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">This invite expires in {{ expiry_days }} days.</p><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#999999;line-height:1.65;">Not interested? You can ignore this email &mdash; nothing happens unless you accept.</p>{% endblock %}
+{% block footer_reason %}You&rsquo;re receiving this because someone at {{ org_name }} invited this address to join them on Goatza.{% endblock %}

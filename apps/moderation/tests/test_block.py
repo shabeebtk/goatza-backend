@@ -105,7 +105,7 @@ class BlockTestBase(APITestCase):
         self.c = self._user("charlie")
 
         self.owner = self._user("clubowner", User.Role.ORG_USER)
-        self.admin = self._user("clubadmin", User.Role.ORG_USER)
+        self.co_owner = self._user("clubcoowner", User.Role.ORG_USER)
         self.coach = self._user("clubcoach", User.Role.COACH)
 
         self.org = self._org("dreamfc", "Dream FC")
@@ -115,9 +115,9 @@ class BlockTestBase(APITestCase):
             organization=self.org, user=self.owner,
             role=OrganizationMember.Role.OWNER,
         )
-        self.admin_member = OrganizationMember.objects.create(
-            organization=self.org, user=self.admin,
-            role=OrganizationMember.Role.ADMIN,
+        self.co_owner_member = OrganizationMember.objects.create(
+            organization=self.org, user=self.co_owner,
+            role=OrganizationMember.Role.OWNER,
         )
         self.coach_member = OrganizationMember.objects.create(
             organization=self.org, user=self.coach,
@@ -379,8 +379,8 @@ class BlockServiceTests(BlockTestBase):
         ok, _ = self._block(self._org_actor(self.owner_member), target_user=self.b)
         self.assertTrue(ok)
 
-    def test_org_admin_may_block(self):
-        ok, _ = self._block(self._org_actor(self.admin_member), target_user=self.b)
+    def test_a_second_owner_may_block(self):
+        ok, _ = self._block(self._org_actor(self.co_owner_member), target_user=self.b)
         self.assertTrue(ok)
 
     def test_org_coach_may_not_block(self):
