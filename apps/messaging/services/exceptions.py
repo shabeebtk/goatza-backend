@@ -30,6 +30,19 @@ class ContentUnavailableError(MessageError):
     reason = "content_unavailable"
 
 
+class NotShareableError(MessageError):
+    """The sender can see this recruitment, but it is no longer open to share."""
+    reason = "not_shareable"
+
+
+class CounterpartUnavailableError(MessageError):
+    """
+    The other side of the thread was deleted, deactivated or suspended. The
+    message says which sentence to show.
+    """
+    reason = "counterpart_unavailable"
+
+
 class InvalidMediaError(MessageError):
     """The media URL/public_id is not a trusted chat upload from our cloud."""
     reason = "invalid_media"

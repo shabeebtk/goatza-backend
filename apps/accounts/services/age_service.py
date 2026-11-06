@@ -67,6 +67,22 @@ UNDER_AGE_MESSAGE = "You can't create an account right now."
 INVALID_BIRTHDATE_MESSAGE = "Enter a valid date of birth."
 
 
+def birthdate_editable(user):
+    """
+    Whether this person may set their own date of birth right now.
+
+    During signup and onboarding, and once more for a legacy account with none on
+    file. After that it decides which country's child-protection rules hold them,
+    so it stops being theirs to change; a wrong date goes to support, who correct
+    it in the Django admin.
+    """
+    if not user.is_onboarding_completed:
+        return True
+
+    profile = getattr(user, "profile", None)
+    return getattr(profile, "birthdate", None) is None
+
+
 class AgeGateError(ValidationError):
     """
     A ValidationError carrying a stable machine code — see PhoneChangeError.

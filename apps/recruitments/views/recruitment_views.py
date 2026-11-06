@@ -554,7 +554,8 @@ class ListRecruitmentsAPIView(BaseAPIView):
 
                 serializer = RecruitmentDiscoverItemSerializer(
                     results,
-                    many=True
+                    many=True,
+                    context={"actor": actor},
                 )
             else:
                 # WHERE THE VIEWER IS, so the card can say how far away the
@@ -577,7 +578,8 @@ class ListRecruitmentsAPIView(BaseAPIView):
                 )
                 serializer = RecruitmentListSerializer(
                     queryset,
-                    many=True
+                    many=True,
+                    context={"actor": actor},
                 )
 
             logger.info(
@@ -656,13 +658,17 @@ class DiscoverRecruitmentsAPIView(BaseAPIView):
             )
 
             data = {"max_distance_km": payload.max_distance_km}
+            # One dict across the sections, so they share one viewer. Cached per
+            # actor below, so a stale can_share is only ever this actor's own,
+            # and a share is checked again when it is sent.
+            serializer_context = {"actor": actor}
             for section in SECTION_ORDER:
                 items = []
                 for recruitment, match in payload.sections[section]:
                     recruitment.match = match
                     items.append(recruitment)
                 data[section] = RecruitmentDiscoverItemSerializer(
-                    items, many=True
+                    items, many=True, context=serializer_context
                 ).data
 
             # Why the payload says so rather than the client inferring it: the

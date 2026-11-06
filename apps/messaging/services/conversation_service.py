@@ -457,6 +457,10 @@ class ConversationService:
                 return
             if org.id in blocked_org_ids:
                 return
+            # The org twin of the deactivated check in add_user: this closure is
+            # also where existing threads pass through.
+            if not org.is_active or org.is_suspended:
+                return
             seen_orgs.add(org.id)
             results.append(
                 ConversationService._target_item_org(org, conversation_id, source)

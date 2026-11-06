@@ -511,8 +511,9 @@ def ensure_pending_for_minor(user) -> bool:
     Called from the two places a signup can COMPLETE — OTP verification on the
     email path, the role step on the Google path — because those are the two
     moments an account first has both halves of ``is_minor`` on file and a
-    session in the user's hands. Returns True when the client should show the
-    parent screen.
+    session in the user's hands, and again whenever a date of birth changes after
+    that (the profile update, and support's correction in the admin). Returns True
+    when the client should show the parent screen.
 
     ONLY ``not_needed`` MOVES. An approved or withdrawn account passing through
     again keeps what it has: this function's job is to set the opening state,
@@ -533,6 +534,34 @@ def ensure_pending_for_minor(user) -> bool:
         logger.info(f"ensure_pending_for_minor | locked pending | user={user.pk}")
 
     return user.guardian_consent_status != User.GuardianConsentStatus.APPROVED
+
+
+def clear_pending_for_adult(user, *, staff_id) -> bool:
+    """
+    Lift a lock that only existed because a child's date was entered by mistake.
+    Support's correction only: left pending, ``purge_unconsented`` would delete an
+    adult's account once the request went stale. Returns whether it moved.
+
+    ONLY ``pending`` MOVES. Approved has nothing to undo, and withdrawn is a
+    parent's decision rather than a data entry mistake, so a person looks at that.
+
+    No event row: those record what passed between us and a guardian, and nothing
+    did. The log line is the record of this one, and it never carries the date.
+    """
+    if (
+        user.is_minor
+        or user.guardian_consent_status != User.GuardianConsentStatus.PENDING
+    ):
+        return False
+
+    _set_status(user, User.GuardianConsentStatus.NOT_NEEDED)
+
+    logger.info(
+        "clear_pending_for_adult | user=%s | staff=%s | pending -> not_needed",
+        user.pk, staff_id,
+    )
+
+    return True
 
 
 # ---------------------------------------------------------------------

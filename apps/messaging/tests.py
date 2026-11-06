@@ -560,9 +560,15 @@ class ShareVisibilityTests(MessagingShareTestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["data"]["failed"],
+            [{"id": str(conversation.id), "reason": "not_shareable"}],
+        )
 
-    def test_can_share_closed_recruitment(self):
+    def test_cannot_share_closed_recruitment(self):
+        # A card already sent still renders (test_share_rules), but a closed trial
+        # is no longer forwarded: it only sends the next person to a dead end.
         self.recruitment.status = Recruitment.Status.CLOSED
         self.recruitment.save(update_fields=["status"])
         conversation = self._mutual_conversation()
@@ -578,6 +584,10 @@ class ShareVisibilityTests(MessagingShareTestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["data"]["failed"],
+            [{"id": str(conversation.id), "reason": "not_shareable"}],
+        )
 
     def test_cannot_share_followers_only_recruitment_you_do_not_follow(self):
         self.recruitment.visibility = Recruitment.Visibility.FOLLOWERS_ONLY
@@ -1279,9 +1289,10 @@ class MessageListQueryCountTests(MessagingShareTestCase):
     #      this one query)
     #   4. the shared_post media prefetch
     #   5. the shared_recruitment media prefetch
+    #   6. the viewer's block list (once for the page, and cached after that)
     # …and nothing per message. The viewer's follow graph is NOT loaded here:
     # public content answers "can you see it?" without consulting it.
-    EXPECTED_QUERIES = 5
+    EXPECTED_QUERIES = 6
 
     def _seed(self, pairs, conversation):
         """`pairs` shared-recruitment + shared-post messages, own post each."""
@@ -1355,10 +1366,10 @@ class MessageListQueryCountTests(MessagingShareTestCase):
 
         self.client.force_authenticate(user=self.receiver)
 
-        # Same 5: permission check, read watermark, page, shared_post media —
-        # and this time the follow graph (loaded once), but no
+        # Same 6: permission check, read watermark, page, shared_post media, the
+        # block list — and this time the follow graph (loaded once), but no
         # recruitment-media prefetch, since no message on this page shares one.
-        with self.assertNumQueries(5):
+        with self.assertNumQueries(6):
             response = self.client.get(
                 MESSAGES_URL, {"conversation_id": str(conversation.id)}
             )

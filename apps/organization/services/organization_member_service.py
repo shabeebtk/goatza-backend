@@ -14,12 +14,20 @@ deadlock on each other.
 SIDE EFFECTS HAPPEN AFTER COMMIT. A notification, an email or a socket event
 for something that rolled back would tell somebody a lie, so all of them run in
 ``transaction.on_commit(..., robust=True)`` — robust because the membership has
-already changed by then, and a failed push must not answer 500 for it.
+already changed by then, and a failed push must not answer 500 for it. The
+membership announcement is its OWN callback, registered first: telling someone's
+devices they lost access must not depend on a notification row inserting.
+
+AN ACTOR IS AS OLD AS ITS REQUEST. ``require_org_permission`` reads a member loaded
+before the lock, and that request may have waited behind the one that demoted or
+removed them. Every manager path looks itself up again in the locked rows
+(``_require_manager_after_lock``), and an invite only lasts as long as the power
+of whoever sent it (``_inviter_still_stands``).
 
 THE INVITE TOKEN IS A CREDENTIAL, like a guardian consent token: generated here,
 hashed, the hash stored, the raw value handed to one email and never logged.
 Log the invite id. Every failure to resolve one is the same 404, and an address
-typed by an inviter is treated the same whether or not it has an account.
+typed by an inviter gets the same answer whether or not it has an account.
 """
 
 import hashlib
@@ -38,6 +46,7 @@ from apps.notifications.services.notification_service import NotificationService
 from apps.organization.models import OrganizationInvite, OrganizationMember
 from apps.organization.permissions import (
     OrgPermission,
+    has_org_permission,
     members_with_permission,
     require_org_permission,
 )
@@ -61,6 +70,9 @@ INVITE_GONE_MESSAGE = "This invite isn't available any more."
 INVITE_CLOSED_MESSAGE = "This invite is no longer available."
 MEMBER_NOT_FOUND_MESSAGE = "This member wasn't found."
 SWITCH_TO_PERSONAL_MESSAGE = "Switch to your personal account to do this."
+MANAGER_LOST_MESSAGE = "You can no longer manage members of this organization."
+OWNERS_ONLY_MESSAGE = "Only an owner can make or remove owners."
+ALREADY_INVITED_MESSAGE = "This person already has a pending invite."
 
 
 class OrgMemberError(Exception):
@@ -117,11 +129,67 @@ def _lock_members(organization):
     )
 
 
+def _require_manager_after_lock(locked_members, manager):
+    """
+    The acting manager's row as it is NOW, or 403.
+
+    ``_lock_members`` re-reads a row it had to wait for and leaves out one that
+    stopped being active, so a manager demoted or removed while this request sat
+    on the lock is found here, before they can finish (say) promoting somebody.
+    """
+    for member in locked_members:
+        if member.id == manager.id and has_org_permission(
+            member, OrgPermission.MEMBERS_MANAGE
+        ):
+            return member
+
+    raise PermissionDenied(MANAGER_LOST_MESSAGE)
+
+
+def _require_owner_for_ownership(manager):
+    """Ownership is held by role: a ``members.manage`` grant does not reach it."""
+    if manager.role != OrganizationMember.Role.OWNER:
+        raise PermissionDenied(OWNERS_ONLY_MESSAGE)
+
+
+def _inviter_still_stands(invite, locked_members) -> bool:
+    """
+    An invite carries its sender's authority, so it ends when that does.
+
+    Without this a rogue owner invites an accomplice as owner, is removed, and
+    the accomplice accepts and removes everybody else. Taken from the locked rows,
+    so a removal racing the accept is settled one way or the other.
+    """
+    inviter = next(
+        (member for member in locked_members if member.id == invite.invited_by_id),
+        None,
+    )
+
+    if (
+        inviter is None
+        or not inviter.user.is_active
+        or not has_org_permission(inviter, OrgPermission.MEMBERS_MANAGE)
+    ):
+        return False
+
+    return (
+        invite.role != OrganizationMember.Role.OWNER
+        or inviter.role == OrganizationMember.Role.OWNER
+    )
+
+
+def _cancel_invites_sent_by(member, now):
+    OrganizationInvite.objects.filter(
+        invited_by=member,
+        status=OrganizationInvite.Status.PENDING,
+    ).update(status=OrganizationInvite.Status.CANCELLED, responded_at=now)
+
+
 def _has_another_owner(organization, member) -> bool:
     """
     An owner besides ``member`` who could actually run the org. A deactivated
-    account does not count: leaving it as the only owner orphans the org the
-    moment that account is purged.
+    account, or one waiting to be deleted, does not count: leaving it as the only
+    owner orphans the org the moment that account is purged.
     """
     return (
         OrganizationMember.objects
@@ -130,6 +198,7 @@ def _has_another_owner(organization, member) -> bool:
             role=OrganizationMember.Role.OWNER,
             status=OrganizationMember.Status.ACTIVE,
             user__is_active=True,
+            user__deletion_requested_at__isnull=True,
         )
         .exclude(id=member.id)
         .exists()
@@ -315,11 +384,21 @@ class OrganizationMemberService:
 
         try:
             with transaction.atomic():
-                _lock_members(organization)
-
-                OrganizationMemberService._refuse_duplicate_invite(
-                    organization, target, email
+                inviter = _require_manager_after_lock(
+                    _lock_members(organization), inviter
                 )
+
+                if role == OrganizationMember.Role.OWNER:
+                    _require_owner_for_ownership(inviter)
+
+                if email:
+                    target, deliver = OrganizationMemberService._settle_typed_address(
+                        organization, target, deliver, email
+                    )
+                else:
+                    OrganizationMemberService._refuse_duplicate_by_id(
+                        organization, target
+                    )
 
                 if (
                     OrganizationMember.objects
@@ -366,9 +445,7 @@ class OrganizationMemberService:
         except IntegrityError:
             # A signup claiming an email invite can land between the check and
             # the insert. The constraint had the final say, and this is it.
-            raise OrgMemberError(
-                "already_invited", "This person already has a pending invite."
-            )
+            raise OrgMemberError("already_invited", ALREADY_INVITED_MESSAGE)
 
         logger.info(
             "[ORG INVITE] sent | invite=%s | org=%s", invite.id, organization.id
@@ -392,6 +469,9 @@ class OrganizationMemberService:
             inviter still sees a normal pending invite that simply expires. A
             refusal here would confirm the account exists; a delivery would
             contact somebody who asked not to hear from this org.
+
+        The rest of the by-email answer needs the lock, so it is in
+        ``_settle_typed_address``.
         """
         if email:
             account = User.objects.filter(email__iexact=email).first()
@@ -427,10 +507,58 @@ class OrganizationMemberService:
         return account, True
 
     @staticmethod
-    def _refuse_duplicate_invite(organization, target, email):
+    def _live_pending(organization, **target):
+        """
+        This org's pending invites for one target. A row past its date IS expired,
+        but the unique constraints only know its status, so it is stamped here or
+        it would block a fresh invite.
+        """
+        pending = OrganizationInvite.objects.filter(
+            organization=organization,
+            status=OrganizationInvite.Status.PENDING,
+            **target,
+        )
+        pending.filter(expires_at__lte=timezone.now()).update(
+            status=OrganizationInvite.Status.EXPIRED
+        )
+        return pending
+
+    @staticmethod
+    def _settle_typed_address(organization, target, deliver, email):
+        """
+        ``(target, deliver)`` for an invite by email, under the lock.
+
+        The inviter may hear about the ADDRESS: one already on the org's own
+        pending list is ``already_invited``, whoever it belongs to. They may not
+        hear about an ACCOUNT. If the address belongs to somebody already in the org
+        or invited some other way, the answer is the same 201 as a new invite: a
+        plain row that shows in the pending list and expires, with nothing sent.
+        """
+        if OrganizationMemberService._live_pending(
+            organization, email=email
+        ).exists():
+            raise OrgMemberError("already_invited", ALREADY_INVITED_MESSAGE)
+
+        if target is None:
+            return None, deliver
+
+        already_involved = (
+            OrganizationMember.objects
+            .filter(organization=organization, user=target)
+            .exists()
+            or OrganizationMemberService._live_pending(
+                organization, invited_user=target
+            ).exists()
+        )
+        if already_involved:
+            return None, False
+
+        return target, deliver
+
+    @staticmethod
+    def _refuse_duplicate_by_id(organization, target):
         if (
-            target is not None
-            and OrganizationMember.objects
+            OrganizationMember.objects
             .filter(organization=organization, user=target)
             .exists()
         ):
@@ -438,29 +566,18 @@ class OrganizationMemberService:
                 "already_member", "This person is already a member."
             )
 
-        same_person = Q()
-        if target is not None:
-            same_person |= Q(invited_user=target)
-        if email:
-            same_person |= Q(email=email)
-
-        pending = OrganizationInvite.objects.filter(
-            same_person,
-            organization=organization,
-            status=OrganizationInvite.Status.PENDING,
+        pending = OrganizationMemberService._live_pending(
+            organization, invited_user=target
         )
 
-        # A pending row past its date IS expired, but the unique constraints
-        # only know its status. Stamp it now or it blocks a fresh invite.
-        now = timezone.now()
-        pending.filter(expires_at__lte=now).update(
-            status=OrganizationInvite.Status.EXPIRED
-        )
+        if pending.filter(email="").exists():
+            raise OrgMemberError("already_invited", ALREADY_INVITED_MESSAGE)
 
-        if pending.exists():
-            raise OrgMemberError(
-                "already_invited", "This person already has a pending invite."
-            )
+        # What is left was typed as an address and claimed when that address was
+        # verified. Refusing would tell the inviter whose address it was, so it
+        # goes back to being a plain address (its link still works) and the new
+        # invite can exist alongside it, as it would for anybody else.
+        pending.update(invited_user=None)
 
     @staticmethod
     def _deliver_invite(invite, raw_token):
@@ -471,9 +588,11 @@ class OrganizationMemberService:
 
     @staticmethod
     def cancel_invite(actor, invite_id):
-        require_org_permission(actor, OrgPermission.MEMBERS_MANAGE)
+        manager = require_org_permission(actor, OrgPermission.MEMBERS_MANAGE)
 
         with transaction.atomic():
+            _require_manager_after_lock(_lock_members(actor.organization), manager)
+
             invite = (
                 OrganizationInvite.objects
                 .select_for_update()
@@ -519,7 +638,7 @@ class OrganizationMemberService:
     @staticmethod
     def decline_invite(user, invite_id):
         invite = OrganizationMemberService._own_invite(user, invite_id)
-        OrganizationMemberService._decline(invite, user, _invite_closed())
+        OrganizationMemberService._decline(invite, _invite_closed())
 
     # -----------------------------------------------------------------
     # ANSWERING AN INVITE, BY TOKEN (the email link)
@@ -549,33 +668,38 @@ class OrganizationMemberService:
         return invite
 
     @staticmethod
-    def accept_invite_by_token(user, raw_token):
+    def _require_invitee(invite, user):
         """
-        The address has to be proved, not just the link: a forwarded invite must
-        not make the wrong person a member. Holding the link is enough to DECLINE
-        below, since the worst that does is send the inviter back to try again.
+        The address has to be proved, not just the link, for either answer: a
+        forwarded invite must not make the wrong person a member, or let them turn
+        it down for the person it was meant for.
         """
-        invite = OrganizationMemberService._open_invite_by_token(raw_token)
-
         account_email = (user.email or "").lower()
-        may_accept = invite.invited_user_id == user.id or (
+        is_invitee = invite.invited_user_id == user.id or (
             invite.email
             and user.is_email_verified
             and account_email == invite.email
         )
-        if not may_accept:
+        if not is_invitee:
             raise OrgMemberError(
                 "email_mismatch",
                 f"This invite was sent to {mask_email(_invite_address(invite))}.",
                 status_code=403,
             )
 
+    @staticmethod
+    def accept_invite_by_token(user, raw_token):
+        invite = OrganizationMemberService._open_invite_by_token(raw_token)
+        OrganizationMemberService._require_invitee(invite, user)
+
         return OrganizationMemberService._accept(invite, user, _invite_gone())
 
     @staticmethod
     def decline_invite_by_token(user, raw_token):
         invite = OrganizationMemberService._open_invite_by_token(raw_token)
-        OrganizationMemberService._decline(invite, user, _invite_gone())
+        OrganizationMemberService._require_invitee(invite, user)
+
+        OrganizationMemberService._decline(invite, _invite_gone())
 
     # -----------------------------------------------------------------
     # THE TWO ANSWERS (one path each, whichever door they came through)
@@ -586,7 +710,7 @@ class OrganizationMemberService:
         organization = invite.organization
 
         with transaction.atomic():
-            _lock_members(organization)
+            locked_members = _lock_members(organization)
 
             invite = (
                 OrganizationInvite.objects
@@ -597,6 +721,7 @@ class OrganizationMemberService:
                 not invite.is_open
                 or not _org_is_usable(organization)
                 or is_blocked(user, organization)
+                or not _inviter_still_stands(invite, locked_members)
             ):
                 raise unavailable
 
@@ -674,6 +799,15 @@ class OrganizationMemberService:
             )
 
             transaction.on_commit(
+                lambda: _announce_membership(
+                    user.id,
+                    organization.id,
+                    OrganizationMember.Status.ACTIVE.value,
+                    member.role,
+                ),
+                robust=True,
+            )
+            transaction.on_commit(
                 lambda: OrganizationMemberService._after_accept(
                     organization, user, member
                 ),
@@ -702,15 +836,8 @@ class OrganizationMemberService:
                 role=member.role,
             )
 
-        _announce_membership(
-            user.id,
-            organization.id,
-            OrganizationMember.Status.ACTIVE.value,
-            member.role,
-        )
-
     @staticmethod
-    def _decline(invite, user, unavailable):
+    def _decline(invite, unavailable):
         organization = invite.organization
 
         with transaction.atomic():
@@ -728,7 +855,7 @@ class OrganizationMemberService:
 
             transaction.on_commit(
                 lambda: OrganizationMemberService._after_decline(
-                    invite, organization, user
+                    invite, organization
                 ),
                 robust=True,
             )
@@ -736,11 +863,12 @@ class OrganizationMemberService:
         logger.info("[ORG INVITE] declined | invite=%s", invite.id)
 
     @staticmethod
-    def _after_decline(invite, organization, user):
+    def _after_decline(invite, organization):
         """
-        To the inviter only, in-app only. An invite made by email keeps its
-        masked address here, because naming the account that declined would
-        answer the question the pending list is careful not to.
+        To the inviter only, in-app only, and always naming the invitee as the
+        invite does. An invite made by email keeps its masked address, because
+        naming the account that declined would answer the question the pending
+        list is careful not to.
         """
         inviter = invite.invited_by
         if inviter is None or inviter.is_former:
@@ -750,7 +878,9 @@ class OrganizationMemberService:
             organization=organization,
             recipient_user=inviter.user,
             member_name=(
-                mask_email(invite.email) if invite.email else _person_name(user)
+                mask_email(invite.email)
+                if invite.email
+                else _person_name(invite.invited_user)
             ),
         )
 
@@ -796,32 +926,18 @@ class OrganizationMemberService:
 
         claimed = 0
         for invite in invites:
-            organization = invite.organization
-
-            if (
-                not _org_is_usable(organization)
-                or is_blocked(user, organization)
-                or OrganizationMember.objects
-                .filter(organization=organization, user=user)
-                .exists()
-            ):
-                continue
-
+            # One bad invite must not cost this person the others. The atomic
+            # block is for a caller already in a transaction: a failed write here
+            # would otherwise poison its session too.
             try:
                 with transaction.atomic():
-                    updated = (
-                        OrganizationInvite.objects
-                        .filter(id=invite.id, invited_user__isnull=True)
-                        .update(invited_user=user)
-                    )
-            except IntegrityError:
-                # They already hold a pending invite from this org by account.
-                continue
-
-            if updated:
-                invite.invited_user = user
-                NotificationService.org_invite(invite, user)
-                claimed += 1
+                    if OrganizationMemberService._claim_one(invite, user):
+                        claimed += 1
+            except Exception:
+                logger.exception(
+                    "[ORG INVITE] claim failed | invite=%s | user=%s",
+                    invite.id, user.id,
+                )
 
         if claimed:
             logger.info(
@@ -829,6 +945,43 @@ class OrganizationMemberService:
             )
 
         return claimed
+
+    @staticmethod
+    def _claim_one(invite, user):
+        organization = invite.organization
+
+        if (
+            not _org_is_usable(organization)
+            or is_blocked(user, organization)
+            or OrganizationMember.objects
+            .filter(organization=organization, user=user)
+            .exists()
+        ):
+            return False
+
+        try:
+            with transaction.atomic():
+                # Pending again: the list above was read before this, and a cancel
+                # landing in between must not reach them as a notification.
+                updated = (
+                    OrganizationInvite.objects
+                    .filter(
+                        id=invite.id,
+                        invited_user__isnull=True,
+                        status=OrganizationInvite.Status.PENDING,
+                    )
+                    .update(invited_user=user)
+                )
+        except IntegrityError:
+            # They already hold a pending invite from this org by account.
+            return False
+
+        if not updated:
+            return False
+
+        invite.invited_user = user
+        NotificationService.org_invite(invite, user)
+        return True
 
     # -----------------------------------------------------------------
     # CHANGING A MEMBER
@@ -850,15 +1003,25 @@ class OrganizationMemberService:
         _require_valid_role(role)
 
         with transaction.atomic():
+            locked_members = _lock_members(organization)
+            manager = _require_manager_after_lock(locked_members, manager)
             member = OrganizationMemberService._locked_member(
-                _lock_members(organization), member_id
+                locked_members, member_id
             )
+
+            if member.id == manager.id:
+                raise OrgMemberError(
+                    "cannot_change_own_role", "You can't change your own role."
+                )
 
             previous_role = member.role
             if previous_role == role:
                 return OrganizationMemberService._member_for_response(member.id)
 
             was_owner = previous_role == OrganizationMember.Role.OWNER
+            if was_owner or role == OrganizationMember.Role.OWNER:
+                _require_owner_for_ownership(manager)
+
             if (
                 was_owner
                 and not _has_another_owner(organization, member)
@@ -870,6 +1033,17 @@ class OrganizationMemberService:
             member.role = role
             member.save(update_fields=["role"])
 
+            if was_owner:
+                _cancel_invites_sent_by(member, timezone.now())
+
+            # No socket close: a socket carries no role, and nothing it may do
+            # has changed. The frame is what makes the client's buttons update.
+            transaction.on_commit(
+                lambda: _announce_membership(
+                    member.user_id, organization.id, "role_changed", member.role
+                ),
+                robust=True,
+            )
             transaction.on_commit(
                 lambda: OrganizationMemberService._after_role_change(
                     organization, manager, member, was_owner
@@ -886,21 +1060,14 @@ class OrganizationMemberService:
 
     @staticmethod
     def _after_role_change(organization, manager, member, was_owner):
-        if member.id != manager.id:
-            NotificationService.org_role_changed(
-                organization=organization,
-                recipient_user=member.user,
-                role=member.role,
-            )
+        NotificationService.org_role_changed(
+            organization=organization,
+            recipient_user=member.user,
+            role=member.role,
+        )
 
         if was_owner:
             _notify_remaining_owners(organization, manager, member)
-
-        # No socket close: a socket carries no role, and nothing it may do has
-        # changed. The frame is what makes the client's buttons update.
-        _announce_membership(
-            member.user_id, organization.id, "role_changed", member.role
-        )
 
     @staticmethod
     def _member_for_response(member_id):
@@ -921,8 +1088,10 @@ class OrganizationMemberService:
         organization = actor.organization
 
         with transaction.atomic():
+            locked_members = _lock_members(organization)
+            manager = _require_manager_after_lock(locked_members, manager)
             member = OrganizationMemberService._locked_member(
-                _lock_members(organization), member_id
+                locked_members, member_id
             )
 
             if member.id == manager.id:
@@ -932,16 +1101,33 @@ class OrganizationMemberService:
                 )
 
             was_owner = member.role == OrganizationMember.Role.OWNER
+            if was_owner:
+                _require_owner_for_ownership(manager)
+
             if was_owner and not _has_another_owner(organization, member):
                 raise OrgMemberError(
                     "last_owner", f"{organization.name} needs at least one owner."
                 )
 
+            now = timezone.now()
+
             member.status = OrganizationMember.Status.REMOVED
-            member.removed_at = timezone.now()
+            member.removed_at = now
             member.removed_by = manager
             member.save(update_fields=["status", "removed_at", "removed_by"])
 
+            _cancel_invites_sent_by(member, now)
+
+            transaction.on_commit(
+                lambda: _announce_membership(
+                    member.user_id,
+                    organization.id,
+                    OrganizationMember.Status.REMOVED.value,
+                    member.role,
+                    close=True,
+                ),
+                robust=True,
+            )
             transaction.on_commit(
                 lambda: OrganizationMemberService._after_remove(
                     organization, manager, member, was_owner
@@ -961,14 +1147,6 @@ class OrganizationMemberService:
 
         if was_owner:
             _notify_remaining_owners(organization, manager, member)
-
-        _announce_membership(
-            member.user_id,
-            organization.id,
-            OrganizationMember.Status.REMOVED.value,
-            member.role,
-            close=True,
-        )
 
     @staticmethod
     def leave(actor):
@@ -992,9 +1170,13 @@ class OrganizationMemberService:
                     "last_owner", "Make someone else an owner first."
                 )
 
+            now = timezone.now()
+
             member.status = OrganizationMember.Status.LEFT
-            member.removed_at = timezone.now()
+            member.removed_at = now
             member.save(update_fields=["status", "removed_at"])
+
+            _cancel_invites_sent_by(member, now)
 
             transaction.on_commit(
                 lambda: _announce_membership(

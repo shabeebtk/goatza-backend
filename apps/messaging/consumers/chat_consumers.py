@@ -1,11 +1,15 @@
 import json
+from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from asgiref.sync import sync_to_async
 
 from apps.legal.permissions import TERMS_REQUIRED_CODE, TERMS_REQUIRED_MESSAGE
 from apps.legal.selectors.acceptance_selectors import get_pending_documents
-from apps.messaging.models import Conversation, ConversationParticipant
-from apps.messaging.services.exceptions import BlockedParticipantError
+from apps.messaging.models import Conversation, ConversationParticipant, Message
+from apps.messaging.services.exceptions import (
+    BlockedParticipantError,
+    CounterpartUnavailableError,
+)
 from apps.messaging.services.message_service import MessageService
 from apps.moderation.services.block_guard import BLOCKED_MESSAGE
 from apps.organization.models import OrganizationMember
@@ -64,6 +68,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 self.org_actor_group,
                 self.channel_name
             )
+
+            # Looked at again now the socket can hear about it. A removal that
+            # committed after the auth middleware's check, and before the join
+            # above, was announced to a group this socket was not in yet.
+            if await self._lost_org_access():
+                await self.close(code=WS_CLOSE_ORG_ACCESS_REVOKED)
+                return
 
         await self.accept(subprotocol="access_token")
 
@@ -136,6 +147,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 "message": BLOCKED_MESSAGE,
             }))
 
+        except CounterpartUnavailableError as exc:
+            # The sentence says why, and the code is what lets the client disable
+            # the composer. The socket stays open: the thread is still readable.
+            await self.send(json.dumps({
+                "type": "error",
+                "code": CounterpartUnavailableError.reason,
+                "message": str(exc),
+            }))
+
         except Exception as e:
             await self.send(json.dumps({
                 "type": "error",
@@ -158,11 +178,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """
         message = event["message"]
 
-        # The payload was rendered without a viewer, so any followers-only share
-        # came back "unavailable". This socket knows who it belongs to — if the
-        # share is one THIS actor may see, re-render it for them. Costs a query,
-        # but only for shares that were hidden, never for ordinary chat.
-        if self._has_hidden_share(message):
+        # The payload was rendered without a viewer, and a share's card depends on
+        # who is looking both ways: a followers-only one came back "unavailable",
+        # and one by somebody on the other side of THIS actor's block came back
+        # filled in. This socket knows who it belongs to, so it re-renders every
+        # share for them. Costs a query, but only for shares, never ordinary chat.
+        if message.get("message_type") in Message.SHARED_TYPES:
             message = await self._serialize_for_me(message["id"]) or message
 
         await self.send(text_data=json.dumps({
@@ -208,13 +229,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "last_read_at": event["last_read_at"],
         }))
 
-    @staticmethod
-    def _has_hidden_share(message):
-        return any(
-            (message.get(key) or {}).get("unavailable")
-            for key in ("shared_post_preview", "shared_recruitment_preview")
-        )
-
     @sync_to_async
     def _serialize_for_me(self, message_id):
         from apps.messaging.selectors.message_selectors import MessageSelector
@@ -242,7 +256,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             org=self.actor.organization if self.actor.is_org else None
         ).exists()
 
-    @sync_to_async
+    @database_sync_to_async
     def _lost_org_access(self):
         if not self.actor.is_org:
             return False

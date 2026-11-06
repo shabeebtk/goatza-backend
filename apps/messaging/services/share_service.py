@@ -14,9 +14,10 @@ from apps.accounts.models import User
 from apps.messaging.models import Conversation
 from apps.messaging.selectors.share_selectors import (
     ShareViewer,
+    can_share_recruitment,
     is_org_profile_shareable,
     is_post_shareable,
-    is_recruitment_shareable,
+    is_recruitment_visible_to,
     is_user_profile_shareable,
 )
 from apps.messaging.services.conversation_service import ConversationService
@@ -24,6 +25,7 @@ from apps.messaging.services.exceptions import (
     BlockedParticipantError,
     ContentUnavailableError,
     MessageError,
+    NotShareableError,
     RecipientNotFoundError,
     SelfShareError,
 )
@@ -116,7 +118,10 @@ class ShareService:
             .filter(id=target_id)
             .first()
         )
-        if not is_recruitment_shareable(recruitment, viewer):
+        # Whether the sender may know of it, not whether it may be sent: one that
+        # is draft, closed, over or deleted is answered per target by share() below.
+        # Only one they cannot see gets this 404, the same as no such id.
+        if recruitment is None or not is_recruitment_visible_to(recruitment, viewer):
             raise ContentUnavailableError(
                 "Recruitment not found or not available"
             )
@@ -135,6 +140,15 @@ class ShareService:
         note="",
     ):
         kind, obj = ShareService.resolve_target(target_type, target_id, actor)
+
+        # Before anything below can open a new thread with a recipient for a
+        # message that is never going to be sent.
+        if kind == TARGET_RECRUITMENT and not can_share_recruitment(
+            obj, ShareViewer.from_actor(actor)
+        ):
+            return ShareService._every_target_failed(
+                conversation_ids, recipients, NotShareableError.reason
+            )
 
         sender_user = actor.user if actor.is_user else None
         sender_org = actor.organization if actor.is_org else None
@@ -193,6 +207,17 @@ class ShareService:
 
     # ----------------------------------------
     @staticmethod
+    def _every_target_failed(conversation_ids, recipients, reason):
+        ids = [str(conversation_id) for conversation_id in (conversation_ids or [])]
+        ids += [str(recipient.get("actor_id")) for recipient in (recipients or [])]
+
+        return {
+            "sent": [],
+            "failed": [{"id": target_id, "reason": reason} for target_id in ids],
+        }
+
+    # ----------------------------------------
+    @staticmethod
     def _send(kind, obj, conversation, sender_user, sender_org, note):
         common = {
             "conversation": conversation,
@@ -236,14 +261,14 @@ class ShareService:
         target_org = None
 
         if actor_type == "user":
-            target_user = User.objects.filter(id=actor_id).first()
+            target_user = User.objects.filter(id=actor_id, is_active=True).first()
             if not target_user:
                 raise RecipientNotFoundError("Recipient not found")
             if actor.is_user and actor.user.id == target_user.id:
                 raise SelfShareError("Cannot share with yourself")
         else:
             target_org = Organization.objects.filter(
-                id=actor_id, is_active=True
+                id=actor_id, is_active=True, is_suspended=False
             ).first()
             if not target_org:
                 raise RecipientNotFoundError("Recipient not found")

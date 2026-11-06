@@ -107,12 +107,9 @@ class User(BaseUUIDModel, AbstractBaseUser, PermissionsMixin):
     # Blank means "never asked" — every row created before the signup gate.
     country_code = models.CharField(max_length=2, blank=True)
 
-    # How many times this user has corrected their date of birth through the
-    # app. The self-serve route allows exactly one (see
-    # accounts/serializers/user_update_serilizer.validate_birthdate); after
-    # that, corrections go through support. Counted rather than flagged so the
-    # limit can be loosened, or a pattern of attempts spotted, without a
-    # migration.
+    # UNUSED. The date of birth is locked once onboarding is done
+    # (age_service.birthdate_editable), so there are no self-serve corrections
+    # left to count. Kept to avoid a migration, and for the counts already in it.
     birthdate_corrections = models.PositiveSmallIntegerField(default=0)
 
     is_active = models.BooleanField(default=True)

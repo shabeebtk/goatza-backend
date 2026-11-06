@@ -18,15 +18,18 @@ from django.db import transaction
 from apps.messaging.models import Message, Conversation, ConversationParticipant
 from apps.messaging.tasks import push_message
 from apps.messaging.selectors.share_selectors import (
+    COUNTERPART_DELETED_MESSAGE,
     ShareViewer,
+    can_view_shared_recruitment,
+    counterpart_unavailable_reason,
     is_org_profile_shareable,
     is_post_shareable,
-    is_recruitment_shareable,
     is_user_profile_shareable,
 )
 from apps.messaging.services.exceptions import (
     BlockedParticipantError,
     ContentUnavailableError,
+    CounterpartUnavailableError,
     EmptyMessageError,
     InvalidMediaError,
     InvalidSenderError,
@@ -133,10 +136,15 @@ class MessageService:
         """
         Forward a recruitment into a conversation. ``note`` is an optional
         caption and is stored as the message content.
+
+        Asks whether it may be SEEN, not ``can_share_recruitment``: the org's own
+        trial updates to its applicants come through here too
+        (RecruitmentMessageService), and those matter most once applications have
+        closed. ShareService applies the stricter rule to a share.
         """
         viewer = ShareViewer(user=sender_user, org=sender_org)
 
-        if not is_recruitment_shareable(recruitment, viewer):
+        if not can_view_shared_recruitment(recruitment, viewer):
             raise ContentUnavailableError(
                 "This recruitment is no longer available"
             )
@@ -435,6 +443,9 @@ class MessageService:
         shared_recruitment, media_* …) straight through to the row.
         """
         MessageService._validate_sender(conversation, sender_user, sender_org)
+        MessageService._validate_counterpart_available(
+            conversation, sender_user, sender_org
+        )
         MessageService._validate_not_blocked(conversation, sender_user, sender_org)
 
         with transaction.atomic():
@@ -645,6 +656,35 @@ class MessageService:
         if not query.exists():
             raise NotParticipantError("Sender not part of conversation")
 
+    # THE OTHER SIDE IS STILL THERE
+    @staticmethod
+    def _validate_counterpart_available(conversation, sender_user, sender_org):
+        """
+        Refuse a send to somebody who can no longer read it: deleted, deactivated
+        or suspended, or whose row is gone altogether. Here for the same reason as
+        the block guard below, so that no sender can forget it. A MessageError, so
+        the media endpoint answers 400 with the sentence and a share reports it
+        against that one target.
+        """
+        others = ConversationParticipant.objects.filter(
+            conversation=conversation
+        ).select_related("user", "org")
+
+        if sender_user:
+            others = others.exclude(user=sender_user)
+        else:
+            others = others.exclude(org=sender_org)
+
+        others = list(others)
+
+        if not others:
+            raise CounterpartUnavailableError(COUNTERPART_DELETED_MESSAGE)
+
+        for participant in others:
+            reason = counterpart_unavailable_reason(participant.user or participant.org)
+            if reason:
+                raise CounterpartUnavailableError(reason)
+
     # BLOCK GUARD
     @staticmethod
     def _validate_not_blocked(conversation, sender_user, sender_org):
@@ -703,10 +743,10 @@ class MessageService:
         from apps.messaging.serializers.message_serializers import MessageSerializer
 
         # One group_send serves every socket in the room, so the payload is
-        # rendered with no viewer: previews that depend on who is looking
-        # (followers-only content) come back "unavailable" here rather than
-        # leaking to a participant who cannot see them. ChatConsumer re-renders
-        # those few for its own actor — see chat_message().
+        # rendered with no viewer: followers-only previews come back "unavailable"
+        # here rather than leaking to a participant who cannot see them. Who is
+        # looking also decides blocks, so ChatConsumer re-renders every share for
+        # its own actor — see chat_message().
         payload = MessageSerializer(message, context={"viewer": None}).data
 
         # ----------------------------------------

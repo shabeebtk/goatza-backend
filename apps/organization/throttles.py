@@ -3,18 +3,42 @@
 from rest_framework.throttling import SimpleRateThrottle
 
 from apps.messaging.throttles import ActorScopedThrottle
+from apps.organization.models import OrganizationMember
+from apps.organization.permissions import OrgPermission, has_org_permission
+from utils.validations import is_valid_uuid
 
 
 class OrgInviteCreateThrottle(ActorScopedThrottle):
     """
-    30/day on ``POST /organizations/members/invite``, per org actor.
+    30/day on ``POST /organizations/members/invite``, per organization.
 
     Every invite can mail an address the caller typed, which makes this worth
-    more to a spammer than most of what an org account does. Per actor because a
-    person with two clubs is running two separate rosters.
+    more to a spammer than most of what an org account does. Per org, not per
+    member, or an org could send 30 a day for each person in it.
     """
 
     scope = "org_invites"
+
+    def org_ident(self, user, org_id):
+        """
+        The org's shared bucket, for those who can actually invite. A request is
+        counted whether or not it goes on to be refused, and the header is not even
+        verified yet (see ActorScopedThrottle), so anybody else drawing from it
+        could spend the club's daily allowance: an outsider naming the org, or a
+        coach whose invites all answer 403. They get a bucket of their own.
+        """
+        member = (
+            OrganizationMember.objects
+            .filter(organization_id=org_id, user=user)
+            .first()
+            if is_valid_uuid(org_id)
+            else None
+        )
+
+        if has_org_permission(member, OrgPermission.MEMBERS_MANAGE):
+            return f"org:{org_id}"
+
+        return super().org_ident(user, org_id)
 
 
 class OrgInviteTokenThrottle(SimpleRateThrottle):

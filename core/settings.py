@@ -1184,11 +1184,19 @@ LOGGING = {
             "style": "{",
         },
     },
+    # A token in a URL is a credential, and every line below goes through this
+    # handler: core/log_redaction.py says why it sits here and not on the loggers.
+    "filters": {
+        "redact_token_paths": {
+            "()": "core.log_redaction.RedactTokenPathsFilter",
+        },
+    },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
             "stream": sys.stdout,
             "formatter": "standard",
+            "filters": ["redact_token_paths"],
         },
     },
     "root": {
@@ -1229,8 +1237,14 @@ SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:
     import sentry_sdk
 
+    from core.log_redaction import sentry_redact_breadcrumb, sentry_redact_event
+
     _sentry_options = {
         "dsn": SENTRY_DSN,
+        # Tokens in URLs. Errors and transactions are two separate hooks.
+        "before_send": sentry_redact_event,
+        "before_send_transaction": sentry_redact_event,
+        "before_breadcrumb": sentry_redact_breadcrumb,
         # Performance tracing off by default — it is sampled per transaction
         # and the free tier's quota is spent on errors, not traces.
         "traces_sample_rate": float(os.getenv("SENTRY_TRACES_SAMPLE_RATE") or 0.0),
