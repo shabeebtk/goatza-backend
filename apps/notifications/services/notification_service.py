@@ -5,6 +5,7 @@ from apps.notifications.models import Notification
 from apps.notifications.services.deeplink_service import build_notification_url
 from apps.accounts.models import User
 from apps.organization.models import OrganizationMember
+from apps.organization.permissions import OrgPermission, members_with_permission
 from utils.background_jobs import enqueue
 
 # A single recruitment can attract hundreds of applies; only one push per
@@ -99,6 +100,73 @@ PUBLICATION_FAILED_TITLES = {
     "highlight": "Your highlight couldn't be added",
 }
 
+# Organization-members notifications, whose copy is built from `data` alone.
+ORG_MEMBER_TYPES = (
+    Notification.Type.ORG_INVITE,
+    Notification.Type.ORG_INVITE_ACCEPTED,
+    Notification.Type.ORG_INVITE_DECLINED,
+    Notification.Type.ORG_MEMBER_REMOVED,
+    Notification.Type.ORG_ROLE_CHANGED,
+    Notification.Type.ORG_OWNER_CHANGED,
+)
+
+
+def org_member_copy(notification_type, data) -> tuple:
+    """
+    ``(title, body)`` for one org-members notification. Shared with
+    grouping_service so in-app + push text can't drift. Every name is read from
+    ``data``: a person's name or an org's can change later, and what happened
+    then is what the row should keep saying.
+    """
+    org = (data.get("organization") or {}).get("name") or "the organization"
+    role = data.get("role_label", "")
+    name = data.get("member_name", "")
+
+    if notification_type == Notification.Type.ORG_INVITE:
+        inviter = data.get("inviter_name") or "Someone"
+        return f"{inviter} invited you to join {org}", f"as {role}"
+
+    if notification_type == Notification.Type.ORG_INVITE_ACCEPTED:
+        return f"{name} joined {org}", f"as {role}"
+
+    if notification_type == Notification.Type.ORG_INVITE_DECLINED:
+        return f"{name} declined your invite to join {org}", "Tap to view members"
+
+    if notification_type == Notification.Type.ORG_MEMBER_REMOVED:
+        return f"You were removed from {org}", "You no longer have access"
+
+    if notification_type == Notification.Type.ORG_ROLE_CHANGED:
+        return f"You're now {role} at {org}", "Tap to view members"
+
+    if notification_type == Notification.Type.ORG_OWNER_CHANGED:
+        return (
+            f"{data.get('actor_name', '')} removed {name} as owner of {org}",
+            "Tap to view members",
+        )
+
+    return "Goatza", "Tap to view"
+
+
+def _org_data(organization) -> dict:
+    """The org as a notification's `data` carries it: what the card renders."""
+    profile = getattr(organization, "profile", None)
+    return {
+        "id": str(organization.id),
+        "name": organization.name,
+        "username": organization.username,
+        "logo": getattr(profile, "logo", "") or "",
+    }
+
+
+def _person_name(user) -> str:
+    profile = getattr(user, "profile", None)
+    return getattr(profile, "name", "") or user.username or ""
+
+
+def _role_label(role) -> str:
+    return OrganizationMember.Role(role).label
+
+
 # A removal push carries the club's note (up to 500 chars). Lock screens show
 # two or three lines, so the body is cut at a word boundary and the full note
 # waits on the Applied card.
@@ -173,9 +241,10 @@ def _resolve_actor_display(notification: "Notification"):
     return name, username, avatar
 
 
-def get_org_admin_users(organization) -> list:
+def get_org_alert_recipients(organization) -> list:
     """
-    The people who receive an organization's pushes: its OWNER / ADMIN members.
+    The people who receive an organization's pushes: its members with the
+    org.receive_alerts permission.
 
     Exported because messaging fans ordinary chat pushes out to an org
     participant the same way — an org has no device of its own, only members.
@@ -183,12 +252,8 @@ def get_org_admin_users(organization) -> list:
     if organization is None:
         return []
 
-    member_user_ids = OrganizationMember.objects.filter(
-        organization=organization,
-        role__in=[
-            OrganizationMember.Role.OWNER,
-            OrganizationMember.Role.ADMIN,
-        ]
+    member_user_ids = members_with_permission(
+        organization, OrgPermission.ORG_RECEIVE_ALERTS
     ).values_list("user_id", flat=True)
 
     return list(User.objects.filter(id__in=member_user_ids, is_active=True))
@@ -198,14 +263,14 @@ def _get_recipient_users(notification: "Notification") -> list:
     """
     Return a list of User objects that should receive the push.
     - recipient_user  → [recipient_user]
-    - recipient_org   → members with OWNER / ADMIN role
+    - recipient_org   → members with the org.receive_alerts permission
     Returns [] if nobody to notify.
     """
     if notification.recipient_user:
         return [notification.recipient_user]
 
     if notification.recipient_org:
-        return get_org_admin_users(notification.recipient_org)
+        return get_org_alert_recipients(notification.recipient_org)
 
     return []
 
@@ -372,6 +437,9 @@ def build_notification_payload(notification: "Notification") -> dict:
             notification.data.get("target"), PUBLICATION_FAILED_TITLES["post"]
         )
         body = notification.data.get("error_message", "") or "Tap to view"
+
+    elif notification.type in ORG_MEMBER_TYPES:
+        title, body = org_member_copy(notification.type, notification.data)
 
     return {
         "type": notification.type,
@@ -962,8 +1030,9 @@ class NotificationService:
         fifteen. Not deduplicated — a re-request after an edit is a genuinely
         new decision to make.
 
-        Recipients are the org's OWNER/ADMIN members (``_get_recipient_users``)
-        — exactly the roles allowed to act on the request.
+        Recipients are the org's members with org.receive_alerts
+        (``_get_recipient_users``) — by default exactly the people allowed to
+        act on the request.
         """
         recipient_org = career_entry.organization
 
@@ -1004,8 +1073,9 @@ class NotificationService:
         deduplicated — a re-request after an edit is a genuinely new decision to
         make.
 
-        Recipients are the org's OWNER/ADMIN members (``_get_recipient_users``)
-        — exactly the roles allowed to act on the request.
+        Recipients are the org's members with org.receive_alerts
+        (``_get_recipient_users``) — by default exactly the people allowed to
+        act on the request.
         """
         recipient_org = achievement.awarded_by
 
@@ -1170,6 +1240,112 @@ class NotificationService:
         _dispatch(notification)
 
         return notification
+
+    # ──────────────────────────────────────────
+    # ORGANIZATION MEMBERS
+    # ──────────────────────────────────────────
+    @staticmethod
+    def org_invite(invite, recipient_user):
+        """
+        Tell a person an organization wants them. Deduplicated per invite: an
+        invite reaches this once at sending, or once when an email invite is
+        claimed by a newly verified account, and never should twice.
+
+        ``actor_org``, so the card shows the org's logo. The inviter is named in
+        the copy from ``data``.
+        """
+        dedup_key = f"org_invite:{invite.id}:{recipient_user.id}"
+
+        if Notification.objects.filter(dedup_key=dedup_key).exists():
+            return
+
+        inviter = invite.invited_by
+        notification = Notification.objects.create(
+            type=Notification.Type.ORG_INVITE,
+            dedup_key=dedup_key,
+            data={
+                "invite_id": str(invite.id),
+                "organization": _org_data(invite.organization),
+                "role": invite.role,
+                "role_label": _role_label(invite.role),
+                "inviter_name": _person_name(inviter.user) if inviter else "",
+            },
+            **NotificationService._actor_kwargs(actor_org=invite.organization),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        _dispatch(notification)
+
+    @staticmethod
+    def org_invite_accepted(actor_user, organization, recipient_user, role):
+        """One manager hears that someone joined. In-app and push."""
+        notification = Notification.objects.create(
+            type=Notification.Type.ORG_INVITE_ACCEPTED,
+            data={
+                "organization": _org_data(organization),
+                "role": role,
+                "role_label": _role_label(role),
+                "member_name": _person_name(actor_user),
+            },
+            **NotificationService._actor_kwargs(actor_user=actor_user),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        _dispatch(notification)
+
+    @staticmethod
+    def org_invite_declined(organization, recipient_user, member_name):
+        """The inviter hears a no. In-app only: a decline is not worth a buzz."""
+        return Notification.objects.create(
+            type=Notification.Type.ORG_INVITE_DECLINED,
+            data={
+                "organization": _org_data(organization),
+                "member_name": member_name,
+            },
+            **NotificationService._actor_kwargs(actor_org=organization),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+
+    @staticmethod
+    def org_member_removed(organization, recipient_user):
+        """In-app only: nobody needs their phone to buzz to say they were removed."""
+        return Notification.objects.create(
+            type=Notification.Type.ORG_MEMBER_REMOVED,
+            data={"organization": _org_data(organization)},
+            **NotificationService._actor_kwargs(actor_org=organization),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+
+    @staticmethod
+    def org_role_changed(organization, recipient_user, role):
+        """Tell a member what they can now do. In-app and push."""
+        notification = Notification.objects.create(
+            type=Notification.Type.ORG_ROLE_CHANGED,
+            data={
+                "organization": _org_data(organization),
+                "role": role,
+                "role_label": _role_label(role),
+            },
+            **NotificationService._actor_kwargs(actor_org=organization),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        _dispatch(notification)
+
+    @staticmethod
+    def org_owner_changed(actor_user, organization, recipient_user, removed_name):
+        """
+        An owner stopped being one, told to the other owners with a push: it is
+        the safeguard against one owner quietly pushing out another.
+        """
+        notification = Notification.objects.create(
+            type=Notification.Type.ORG_OWNER_CHANGED,
+            data={
+                "organization": _org_data(organization),
+                "actor_name": _person_name(actor_user),
+                "member_name": removed_name,
+            },
+            **NotificationService._actor_kwargs(actor_user=actor_user),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+        _dispatch(notification)
 
     # ──────────────────────────────────────────
     # MEDIA (platform → author)

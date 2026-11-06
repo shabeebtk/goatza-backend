@@ -120,7 +120,7 @@ class CareerVerificationRequestListAPIView(BaseAPIView):
 
 
 class VerifyCareerEntryAPIView(BaseAPIView):
-    """POST /careers/<entry_id>/verify — owner/admin confirms the claim."""
+    """POST /careers/<entry_id>/verify — verifications.review confirms the claim."""
 
     def post(self, request, entry_id):
         TAG = "VerifyCareerEntryAPIView"
@@ -152,7 +152,7 @@ class VerifyCareerEntryAPIView(BaseAPIView):
 
 
 class RejectCareerEntryAPIView(BaseAPIView):
-    """POST /careers/<entry_id>/reject — owner/admin declines, with a note."""
+    """POST /careers/<entry_id>/reject — verifications.review declines, with a note."""
 
     def post(self, request, entry_id):
         TAG = "RejectCareerEntryAPIView"

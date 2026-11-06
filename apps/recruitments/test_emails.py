@@ -316,23 +316,23 @@ class AlertRecipientTests(RecruitmentEmailFixture):
         )
         return user
 
-    def test_only_owners_and_admins_are_addressed(self):
-        admin = self._add_member(1, OrganizationMember.Role.ADMIN)
+    def test_only_owners_are_addressed(self):
+        co_owner = self._add_member(1, OrganizationMember.Role.OWNER)
         self._add_member(2, OrganizationMember.Role.COACH)
         self._add_member(3, OrganizationMember.Role.STAFF)
 
         recipients = new_applicant_alert_recipients(self.org)
 
-        self.assertCountEqual(recipients, [self.owner.email, admin.email])
+        self.assertCountEqual(recipients, [self.owner.email, co_owner.email])
 
     def test_inactive_and_email_less_members_are_dropped(self):
-        gone = self._add_member(1, OrganizationMember.Role.ADMIN)
+        gone = self._add_member(1, OrganizationMember.Role.OWNER)
         gone.is_active = False
         gone.save(update_fields=["is_active"])
 
         # A phone-only account: the DB requires one of the two, and this is
         # exactly the member the alert must skip rather than hand "" to Resend.
-        silent = self._add_member(2, OrganizationMember.Role.ADMIN)
+        silent = self._add_member(2, OrganizationMember.Role.OWNER)
         silent.email = None
         silent.phone = "+919000000002"
         silent.save(update_fields=["email", "phone"])
@@ -342,7 +342,7 @@ class AlertRecipientTests(RecruitmentEmailFixture):
         )
 
     def test_the_list_never_repeats_an_address(self):
-        self._add_member(1, OrganizationMember.Role.ADMIN)
+        self._add_member(1, OrganizationMember.Role.OWNER)
 
         recipients = new_applicant_alert_recipients(self.org)
 

@@ -35,25 +35,13 @@ from apps.achievements.selectors.achievement_selectors import (
     pending_verification_requests_for,
 )
 from apps.notifications.services.notification_service import NotificationService
-from apps.organization.models import OrganizationMember
+from apps.organization.permissions import OrgPermission, require_org_permission
 from utils.validations import is_valid_uuid
 
 logger = logging.getLogger(__name__)
 
 
 class AchievementVerificationService:
-
-    # Confirming someone's award is a claim the organization is publicly
-    # standing behind, so it sits with the roles that speak for the org. COACH
-    # and STAFF can be members of many orgs and are not the org's voice.
-    #
-    # Deliberately the same pair `notifications._get_recipient_users` pushes an
-    # org notification to: exactly the people who are told about a request are
-    # the people who can act on it.
-    REVIEWER_ROLES = (
-        OrganizationMember.Role.OWNER,
-        OrganizationMember.Role.ADMIN,
-    )
 
     # =================================================================
     # GUARDS
@@ -67,7 +55,11 @@ class AchievementVerificationService:
         (→ 403).
 
         ``resolve_actor`` has already proved the logged-in user is a member of
-        the org they claim to act as; this only adds the role rule on top.
+        the org they claim to act as; this only adds verifications.review on
+        top. Confirming someone's award is a claim the organization is publicly
+        standing behind, so it sits with the people who speak for the org. By
+        default that is also who gets the org's alerts, so the people told about
+        a request are the people who can act on it.
 
         Public because the write views call it *before* validating the body: a
         COACH should get 403, not a critique of a payload that was never going
@@ -79,12 +71,11 @@ class AchievementVerificationService:
                 "Switch to your organization account to review achievements."
             )
 
-        member = actor.organization_member
-
-        if member is None or member.role not in AchievementVerificationService.REVIEWER_ROLES:
-            raise PermissionDenied(
-                "Only organization owners and admins can verify achievements."
-            )
+        member = require_org_permission(
+            actor,
+            OrgPermission.VERIFICATIONS_REVIEW,
+            message="Only organization owners can verify achievements.",
+        )
 
         return actor.organization, member
 

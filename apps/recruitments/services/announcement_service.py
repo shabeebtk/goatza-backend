@@ -30,7 +30,7 @@ from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.moderation.models import Block
-from apps.organization.models import OrganizationMember
+from apps.organization.permissions import OrgPermission, require_org_permission
 from apps.recruitments.models import (
     AnnouncementDelivery,
     Recruitment,
@@ -86,13 +86,6 @@ MAX_PER_DAY = 5
 # change uses, and for the same reason: it is the tested one.
 MAX_BULK_MESSAGE = 100
 
-# Org roles that may speak FOR the organization. A coach reads the pipeline;
-# announcing to every applicant is the club's voice.
-REVIEWER_ROLES = (
-    OrganizationMember.Role.OWNER,
-    OrganizationMember.Role.ADMIN,
-)
-
 
 def _local_now(recruitment):
     """Now, on the recruitment's own clock. The only reason the cap needs one."""
@@ -111,7 +104,9 @@ class AnnouncementService:
         PermissionDenied (→ 403).
 
         ``resolve_actor`` has already proved the logged-in user is a member of
-        the org they claim to act as; this only adds the role rule on top.
+        the org they claim to act as; this only adds the recruitments.speak rule
+        on top, because announcing to every applicant is the club's voice and a
+        coach reads the pipeline.
         Public because the write views call it BEFORE validating the body: a
         coach should get a 403, not a critique of a payload that was never
         going to be accepted.
@@ -121,13 +116,11 @@ class AnnouncementService:
                 "Switch to your organization account to post an announcement."
             )
 
-        member = actor.organization_member
-        if member is None or member.role not in REVIEWER_ROLES:
-            raise PermissionDenied(
-                "Only organization owners and admins can post announcements."
-            )
-
-        return member
+        return require_org_permission(
+            actor,
+            OrgPermission.RECRUITMENTS_SPEAK,
+            message="Only organization owners can post announcements.",
+        )
 
     # -----------------------------------------------------------------
     # AUDIENCE — the one resolver
@@ -361,7 +354,7 @@ class AnnouncementService:
         else. The composer says so; this is what makes it true.
 
         Any org member may send one. Announcing to the whole trial is the
-        club's voice and is owner/admin-gated; messaging the four people you
+        club's voice and needs recruitments.speak; messaging the four people you
         just watched play is the job of whoever watched them.
 
         Returns {"queued": n, "skipped": [{"id", "reason"}]}.

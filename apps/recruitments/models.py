@@ -272,7 +272,7 @@ class Recruitment(BaseUUIDModel):
     is_deleted = models.BooleanField(default=False)
 
     # WHO TOOK IT DOWN, AND WHAT THEY TOLD APPLICANTS. Written once, by
-    # RecruitmentService.delete_recruitment (owner/admin) or
+    # RecruitmentService.delete_recruitment (recruitments.speak) or
     # moderator_delete_recruitment (deleted_at only — a takedown has no club
     # note and no member behind it). The note is what the player's Applied
     # card shows in place of the dead link, so it outlives the listing.

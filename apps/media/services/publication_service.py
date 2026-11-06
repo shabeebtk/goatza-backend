@@ -240,7 +240,9 @@ class PublicationService:
             return None
 
         membership = OrganizationMember.objects.filter(
-            user=user, organization=org
+            user=user,
+            organization=org,
+            status=OrganizationMember.Status.ACTIVE,
         ).first()
         if membership is None:
             return None

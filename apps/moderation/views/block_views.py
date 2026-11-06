@@ -2,7 +2,7 @@
 HTTP entry points for blocking, mounted under /moderation/.
 
 Thin by design: these resolve the target, hand it to BlockService, and map the
-outcome onto the standard envelope. Every rule — self-block, the org owner/admin
+outcome onto the standard envelope. Every rule — self-block, the org.block
 gate, follow teardown, cache invalidation — lives in the service, because the
 same rules have to hold for the internal callers (messaging, feed, recruitments)
 that will reach BlockService directly and never pass through a view.

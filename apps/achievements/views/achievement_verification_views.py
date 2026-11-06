@@ -115,7 +115,7 @@ class AchievementVerificationRequestListAPIView(BaseAPIView):
 
 
 class VerifyAchievementAPIView(BaseAPIView):
-    """POST /achievements/<achievement_id>/verify — owner/admin confirms the claim."""
+    """POST /achievements/<achievement_id>/verify — verifications.review confirms the claim."""
 
     def post(self, request, achievement_id):
         TAG = "VerifyAchievementAPIView"
@@ -149,7 +149,7 @@ class VerifyAchievementAPIView(BaseAPIView):
 
 
 class RejectAchievementAPIView(BaseAPIView):
-    """POST /achievements/<achievement_id>/reject — owner/admin declines, with a note."""
+    """POST /achievements/<achievement_id>/reject — verifications.review declines, with a note."""
 
     def post(self, request, achievement_id):
         TAG = "RejectAchievementAPIView"

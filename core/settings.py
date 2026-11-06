@@ -378,6 +378,14 @@ REST_FRAMEWORK = {
         # Per ACTOR. The costliest request in the app — minutes of worker CPU
         # each — so an hourly ceiling; polling the job is not counted.
         'media_jobs': '60/hour',
+        # Sending organization invites (organization.throttles). Per ACTOR, so
+        # per org: every invite mails an address the CALLER typed, so a member
+        # cap of 50 does not need more than this in a day.
+        'org_invites': '30/day',
+        # An invite link's token, read or answered (organization.throttles). Per
+        # IP, logged in or not: the only way to attack a token is to try tokens,
+        # and a session must not buy a way round that.
+        'org_invite_token': '30/min',
         # Feed impression flushes (see feed.throttles). Its own scope so a long
         # scroll's telemetry never drains the shared 'user' budget that posting,
         # liking and messaging draw on.

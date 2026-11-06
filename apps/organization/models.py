@@ -3,8 +3,10 @@ from django.conf import settings
 from django.db.models import Q
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
+from django.utils import timezone
 from shared.models import BaseUUIDModel, Location
 from apps.accounts.models import User
+from apps.organization.permissions import validate_permission_overrides
 from apps.sports.models import Sport
 from utils.timezones import (
     TIMEZONE_MAX_LENGTH,
@@ -159,8 +161,8 @@ class OrganizationProfile(BaseUUIDModel):
 
     # Governs the LOGGED-OUT web view only (GET /public/organization/<username>).
     # Same semantics as UserProfile.is_public_profile: signed-in actors are
-    # unaffected, and a hidden org is still shareable in DMs. Only OWNER/ADMIN
-    # members may flip it — enforced in OrganizationPrivacyService.
+    # unaffected, and a hidden org is still shareable in DMs. Only members with
+    # the org.privacy permission may flip it — OrganizationPrivacyService.
     is_public_profile = models.BooleanField(
         default=True,
         help_text="Visible to logged-out visitors. Does not affect in-app visibility.",
@@ -243,12 +245,36 @@ class OrganizationLocation(BaseUUIDModel):
         return f"{self.organization.name} - {self.city}"
 
 
+class ActiveMemberManager(models.Manager):
+    """
+    Members who still have access. The default manager, so ``.objects`` and the
+    reverse managers (``organization.members``) can never hand back someone who
+    was removed.
+
+    THREE THINGS DO NOT GO THROUGH THIS, and each is on purpose or a trap:
+
+      * Forward FK access (``recruitment.created_by_member``) uses the plain
+        base manager, which is what keeps a removed member's name on history.
+      * ``select_related`` is a join, for the same result.
+      * Relation lookups inside ``filter()`` (``members__user=…``) are joins
+        too. THE TRAP: each of those needs its own ``members__status="active"``
+        in the same ``filter()`` call.
+    """
+
+    def get_queryset(self):
+        return super().get_queryset().filter(status=OrganizationMember.Status.ACTIVE)
+
+
 class OrganizationMember(BaseUUIDModel):
     class Role(models.TextChoices):
         OWNER = "owner", "Owner"
-        ADMIN = "admin", "Admin"
         COACH = "coach", "Coach"
-        STAFF = "staff", "staff"
+        STAFF = "staff", "Staff"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        REMOVED = "removed", "Removed"
+        LEFT = "left", "Left"
 
     organization = models.ForeignKey(
         Organization,
@@ -261,7 +287,47 @@ class OrganizationMember(BaseUUIDModel):
         related_name="organization_memberships"
     )
     role = models.CharField(max_length=20, choices=Role.choices)
+
+    # Removal keeps the row. Every recruitment audit FK that points here
+    # (created_by_member, changed_by, reviewed_by, fee_marked_by, deleted_by) is
+    # SET_NULL, so deleting would blank "changed by" on applicant timelines.
+    # A returning person reactivates this row: (organization, user) stays unique.
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    joined_at = models.DateTimeField(default=timezone.now)
+    added_by = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    removed_at = models.DateTimeField(null=True, blank=True)
+    removed_by = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
+    # {"grant": [...], "revoke": [...]} on top of the role's defaults. No API
+    # edits it yet: it is here so per-person permissions are a screen and an
+    # endpoint, not a refactor. See apps/organization/permissions.py.
+    permission_overrides = models.JSONField(
+        default=dict,
+        blank=True,
+        validators=[validate_permission_overrides],
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = ActiveMemberManager()
+    all_objects = models.Manager()
 
     class Meta:
         db_table = "organization_members"
@@ -275,9 +341,125 @@ class OrganizationMember(BaseUUIDModel):
             models.Index(fields=["organization", "user"]),
         ]
 
+    @property
+    def is_former(self):
+        """On a serialized audit trail: this name no longer has access."""
+        return self.status != self.Status.ACTIVE
+
     def __str__(self):
         return f"{self.user_id} - {self.organization.name} ({self.role})"
-    
+
+
+class OrganizationInvite(BaseUUIDModel):
+    """
+    One offer to join an organization. Accepting it is what makes a member.
+
+    ``invited_user`` and ``email`` answer different questions, and an invite can
+    carry both. ``invited_user`` is the account allowed to answer it in the app.
+    ``email`` is set only when the inviter TYPED an address — so an invite with
+    an ``email`` is shown to the org by its masked address even when the address
+    turned out to belong to an account, which is what stops the pending list
+    telling an inviter who has a Goatza account.
+
+    Only the SHA-256 of the link's token is stored, like a guardian consent
+    token: a dump of this table is not a pile of working invite links.
+
+    EXPIRY IS READ-TIME. A pending row past ``expires_at`` IS expired everywhere
+    (``is_open`` and ``open_q``); its status is stamped only when a new invite
+    for the same person needs the unique constraint below freed.
+    """
+
+    TTL_DAYS = 14
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
+        DECLINED = "declined", "Declined"
+        CANCELLED = "cancelled", "Cancelled"
+        EXPIRED = "expired", "Expired"
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="invites",
+    )
+    role = models.CharField(max_length=20, choices=OrganizationMember.Role.choices)
+    invited_by = models.ForeignKey(
+        OrganizationMember,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    invited_user = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="organization_invites",
+    )
+    # Lower-cased by OrganizationMemberService. Blank for an invite by account.
+    email = models.EmailField(blank=True)
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    expires_at = models.DateTimeField()
+    responded_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    accepted_member = models.ForeignKey(
+        OrganizationMember,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
+    class Meta:
+        db_table = "organization_invites"
+        indexes = [
+            models.Index(fields=["organization", "status"]),
+            models.Index(fields=["invited_user", "status"]),
+            models.Index(fields=["email", "status"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(invited_user__isnull=False) | ~Q(email=""),
+                name="org_invite_has_a_target",
+            ),
+            models.UniqueConstraint(
+                fields=["organization", "invited_user"],
+                condition=Q(status="pending"),
+                name="unique_pending_org_invite_per_user",
+            ),
+            models.UniqueConstraint(
+                fields=["organization", "email"],
+                condition=Q(status="pending") & ~Q(email=""),
+                name="unique_pending_org_invite_per_email",
+            ),
+        ]
+
+    @classmethod
+    def open_q(cls, now=None):
+        """The queryset half of ``is_open``: pending and not past its date."""
+        return Q(
+            status=cls.Status.PENDING,
+            expires_at__gt=now or timezone.now(),
+        )
+
+    @property
+    def is_open(self):
+        return (
+            self.status == self.Status.PENDING
+            and self.expires_at > timezone.now()
+        )
+
+    def __str__(self):
+        return f"{self.organization_id} invite ({self.role}, {self.status})"
+
 
 
 class OrganizationSport(BaseUUIDModel):

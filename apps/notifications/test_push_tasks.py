@@ -10,7 +10,7 @@ Two properties are worth pinning down and both are about failure. A
 notification whose row is gone by the time the worker reaches it must return
 quietly (deleted, or a rolled-back transaction) — that is routine, not an
 error. And a fan-out to several recipients must not be abandoned because the
-first device is unreachable: an org notification goes to every OWNER/ADMIN, and
+first device is unreachable: an org notification goes to every owner, and
 one stale token used to be enough to silence the rest of the club.
 """
 
@@ -33,7 +33,7 @@ FCM = "apps.notifications.tasks.FCMService.send_to_user"
     PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"]
 )
 class PushNotificationTaskTests(TestCase):
-    """One player, one club with two admins, and a post to notify about."""
+    """One player, one club with two owners, and a post to notify about."""
 
     def setUp(self):
         self.actor = self._user("alice")
@@ -43,10 +43,10 @@ class PushNotificationTaskTests(TestCase):
             name="Dream FC", username="dreamfc", type=Organization.Type.CLUB,
         )
         self.owner = self._user("owner")
-        self.admin = self._user("admin")
+        self.co_owner = self._user("coowner")
         for user, role in (
             (self.owner, OrganizationMember.Role.OWNER),
-            (self.admin, OrganizationMember.Role.ADMIN),
+            (self.co_owner, OrganizationMember.Role.OWNER),
         ):
             OrganizationMember.objects.create(
                 organization=self.club, user=user, role=role
@@ -98,7 +98,7 @@ class PushNotificationTaskTests(TestCase):
         self.assertEqual(pushed_to.id, self.recipient.id)
         self.assertEqual(payload["notification_id"], str(notification.id))
 
-    def test_an_org_recipient_fans_out_to_every_admin(self):
+    def test_an_org_recipient_fans_out_to_every_owner(self):
         notification = self._notification(recipient_org=self.club)
 
         with patch(FCM) as send:
@@ -107,13 +107,13 @@ class PushNotificationTaskTests(TestCase):
         self.assertEqual(send.call_count, 2)
         self.assertEqual(
             {call.args[0].id for call in send.call_args_list},
-            {self.owner.id, self.admin.id},
+            {self.owner.id, self.co_owner.id},
         )
 
     def test_one_unreachable_recipient_does_not_cost_the_others_their_push(self):
         """
         THE REASON THE TRY/EXCEPT IS PER RECIPIENT. Without it, one stale token
-        on the first admin's phone would stop the whole club being told —
+        on the first owner's phone would stop the whole club being told —
         silently, since the request has already succeeded.
         """
         notification = self._notification(recipient_org=self.club)
@@ -149,14 +149,14 @@ class PushNotificationTaskTests(TestCase):
         # Worth recording rather than testing the empty fan-out: the
         # notification_recipient_user_or_org CHECK means a persisted row always
         # has somebody to notify, so _get_recipient_users can only return []
-        # for an org whose admins have all left.
+        # for an org whose owners have all left.
         from django.db import IntegrityError, transaction
 
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 self._notification()   # neither user nor org
 
-    def test_an_org_with_no_admins_left_sends_nothing(self):
+    def test_an_org_with_no_owners_left_sends_nothing(self):
         empty_club = Organization.objects.create(
             name="Ghost FC", username="ghostfc", type=Organization.Type.CLUB,
         )

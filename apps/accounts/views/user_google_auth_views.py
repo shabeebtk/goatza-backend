@@ -15,6 +15,9 @@ from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from apps.accounts.serializers.user_serializers import UserSerializer
 from apps.accounts.services.login_service import on_successful_login
+from apps.organization.services.organization_member_service import (
+    OrganizationMemberService,
+)
 from utils.response import response_data
 from apps.usernames.services.username_service import UsernameService
 from utils.passwords import generate_random_password
@@ -185,6 +188,11 @@ class GoogleAuthCallbackView(APIView):
                     user=user,
                     defaults={"name": name}
                 )
+
+            # Google has just vouched for this address, so invites sent to it
+            # can find their person. On every login rather than only the first:
+            # one may have been sent since. Never raises.
+            OrganizationMemberService.claim_email_invites(user)
 
             # Step 4: Generate JWT
             refresh = RefreshToken.for_user(user)

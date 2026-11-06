@@ -26,6 +26,9 @@ from apps.accounts.services.age_service import (
 from apps.accounts.constants import normalize_country
 from apps.accounts.services.login_service import on_successful_login
 from apps.guardians.services.consent_service import ensure_pending_for_minor
+from apps.organization.services.organization_member_service import (
+    OrganizationMemberService,
+)
 from apps.legal.constants import REQUIRED_DOCUMENTS
 from apps.legal.services.acceptance_service import record_acceptance
 from apps.usernames.services.username_service import UsernameService
@@ -269,6 +272,10 @@ class VerifySignupOTPAPIView(APIView):
         # response — whether to open the app or the parent screen. Adults get
         # False and nothing is written.
         guardian_required = ensure_pending_for_minor(user)
+
+        # The address is proved, so invites sent to it before there was an
+        # account can find their person. Never raises.
+        OrganizationMemberService.claim_email_invites(user)
 
         # The one moment an account becomes real. Fire-and-forget: the sender
         # swallows its own failures, so a welcome mail that never leaves must

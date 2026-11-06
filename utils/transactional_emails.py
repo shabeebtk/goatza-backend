@@ -907,24 +907,21 @@ def send_trial_reminder_email(*, application, session, blocking=True) -> bool:
 def new_applicant_alert_recipients(organization):
     """Emails of the members who actually triage applications.
 
-    Owners and admins only: coaches and staff read a recruitment, they do not
-    run its pipeline. Deduplicated and order-stable, and inactive or
+    Members with org.receive_alerts: coaches and staff read a recruitment, they
+    do not run its pipeline. Deduplicated and order-stable, and inactive or
     email-less members are dropped rather than handed to the transport.
     """
     # Imported here rather than at module scope: this module is pulled in by
     # accounts views very early, and it has no other reason to depend on the
     # organization app.
-    from apps.organization.models import OrganizationMember
+    from apps.organization.permissions import (
+        OrgPermission,
+        members_with_permission,
+    )
 
     emails = (
-        organization.members
-        .filter(
-            role__in=[
-                OrganizationMember.Role.OWNER,
-                OrganizationMember.Role.ADMIN,
-            ],
-            user__is_active=True,
-        )
+        members_with_permission(organization, OrgPermission.ORG_RECEIVE_ALERTS)
+        .filter(user__is_active=True)
         .exclude(user__email="")
         .exclude(user__email__isnull=True)
         .values_list("user__email", flat=True)
@@ -938,7 +935,7 @@ def new_applicant_alert_recipients(organization):
 def send_new_applicant_alert_email(
     *, recruitment, latest_application, new_count, total_count
 ) -> None:
-    """Alert the org's owners and admins, in ONE mail, about new applicants.
+    """Alert the org's alert audience, in ONE mail, about new applicants.
 
     `new_count` is how many arrived since the last alert. Above 1 means the
     tiered throttle held some back and this mail stands for all of them — the
@@ -1004,8 +1001,68 @@ def send_new_applicant_alert_email(
             "player_username": applicant.username,
             "applicant_meta": meta_tail(meta),
         },
-        # One call, one mail, every owner and admin on it.
+        # One call, one mail, the whole alert audience on it.
         to_email=recipients,
+    )
+
+
+# ---------------------------------------------------------------------
+# Organization invite
+# ---------------------------------------------------------------------
+
+ORG_INVITE_TEMPLATE = "emails/org_invite.html"
+ORG_INVITE_SUBJECT = "{inviter} invited you to join {org} on Goatza"
+
+
+def send_org_invite_email(invite, raw_token) -> None:
+    """The invite link, to the address it was sent to or the invitee's account.
+
+    `raw_token` is the credential: it is in this mail and nowhere else, and it is
+    not logged here. The same mail goes out whether or not the address has a
+    Goatza account, because the inviter must not be able to tell the difference
+    and the recipient only needs the link either way.
+
+    The expiry is passed as a number so the mail and ``TTL_DAYS`` cannot drift.
+    """
+    invited_user = invite.invited_user
+    recipient = invite.email or (invited_user.email if invited_user else "")
+    if not recipient:
+        return
+
+    organization = invite.organization
+    inviter = invite.invited_by
+    inviter_name = "Someone"
+    if inviter is not None:
+        profile = _profile_of(inviter.user)
+        inviter_name = (
+            getattr(profile, "name", "") or inviter.user.username or inviter_name
+        )
+
+    role_label = invite.get_role_display()
+    invite_url = (
+        f"{shared_email_context()['frontend_base_url']}/org-invite/{raw_token}"
+    )
+
+    _send(
+        subject=ORG_INVITE_SUBJECT.format(
+            inviter=inviter_name, org=organization.name
+        ),
+        text_body=(
+            f"{inviter_name} invited you to join {organization.name} on Goatza "
+            f"as {role_label}.\n\n"
+            f"View invite: {invite_url}\n\n"
+            f"This invite expires in {invite.TTL_DAYS} days. If you don't want "
+            f"to join, you can ignore this email."
+        ),
+        html_template=ORG_INVITE_TEMPLATE,
+        context={
+            "inviter_name": inviter_name,
+            "org_name": organization.name,
+            "role_label": role_label,
+            "invite_url": invite_url,
+            "expiry_days": invite.TTL_DAYS,
+        },
+        to_email=recipient,
     )
 
 

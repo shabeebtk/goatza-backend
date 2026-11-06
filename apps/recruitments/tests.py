@@ -8469,7 +8469,7 @@ class RecruitmentDeleteTests(_OrgFixtures, APITestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(
             response.data["message"],
-            "Only owners and admins can delete a recruitment.",
+            "Only owners can delete a recruitment.",
         )
         self.trial.refresh_from_db()
         self.assertFalse(self.trial.is_deleted)
@@ -8619,7 +8619,7 @@ class RemovedRecruitmentPlayerTests(_OrgFixtures, APITestCase):
 
 
 class ApplicantsExportTests(_OrgFixtures, APITestCase):
-    """The .xlsx: owner/admin only, at most 100 rows a file, oldest first so
+    """The .xlsx: recruitments.speak only, at most 100 rows a file, oldest first so
     a batch is the same people whenever it is fetched, and player text that
     can never become a formula."""
 
@@ -8716,7 +8716,7 @@ class ApplicantsExportTests(_OrgFixtures, APITestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(
             response.data["message"],
-            "Only owners and admins can download applicants.",
+            "Only owners can download applicants.",
         )
 
     def test_a_formula_typed_by_a_player_is_stored_as_text(self):

@@ -7,7 +7,7 @@ from apps.recruitments.serializers.recruitment_serializers import (
     RecruitmentCreateSerializer, RecruitmentUpdateSerializer,
     ChangeRecruitmentStatusSerializer, DeleteRecruitmentSerializer
 )
-from apps.recruitments.services.announcement_service import REVIEWER_ROLES
+from apps.organization.permissions import OrgPermission, has_org_permission
 from apps.recruitments.services.recruitment_service import (
     RecruitmentService
 )
@@ -324,14 +324,14 @@ class RecruitmentDeleteCheckAPIView(BaseAPIView):
                 )
 
             requirements = RecruitmentService.delete_requirements(recruitment)
-            member = actor.organization_member
 
             return response_data(
                 success=True,
                 data={
                     **requirements,
-                    "can_delete": bool(
-                        member and member.role in REVIEWER_ROLES
+                    "can_delete": has_org_permission(
+                        actor.organization_member,
+                        OrgPermission.RECRUITMENTS_SPEAK,
                     ),
                 }
             )

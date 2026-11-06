@@ -8,6 +8,8 @@ from apps.messaging.models import Conversation, ConversationParticipant
 from apps.messaging.services.exceptions import BlockedParticipantError
 from apps.messaging.services.message_service import MessageService
 from apps.moderation.services.block_guard import BLOCKED_MESSAGE
+from apps.organization.models import OrganizationMember
+from utils.realtime import WS_CLOSE_ORG_ACCESS_REVOKED, org_actor_sockets_group
 
 # Application close code for "you have not accepted the current terms". The
 # 4000-4999 range is reserved for the application, and 4403 is chosen to read
@@ -24,6 +26,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.actor = self.scope.get("actor")  # setup in auth websocket 
 
         if not self.user or self.user.is_anonymous:
+            await self.close()
+            return
+
+        # Asked to act as an org and was refused: not a member, or suspended.
+        if self.actor is None:
             await self.close()
             return
 
@@ -51,6 +58,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             self.channel_name
         )
 
+        if self.actor.is_org:
+            self.org_actor_group = org_actor_sockets_group(self.actor.organization.id)
+            await self.channel_layer.group_add(
+                self.org_actor_group,
+                self.channel_name
+            )
+
         await self.accept(subprotocol="access_token")
 
     # DISCONNECT
@@ -58,6 +72,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if hasattr(self, "room_group_name"):
             await self.channel_layer.group_discard(
                 self.room_group_name,
+                self.channel_name
+            )
+
+        if hasattr(self, "org_actor_group"):
+            await self.channel_layer.group_discard(
+                self.org_actor_group,
                 self.channel_name
             )
 
@@ -83,6 +103,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     "pending_documents": pending,
                 }))
                 await self.close(code=WS_CLOSE_TERMS_REQUIRED)
+                return
+
+            # Also per message. The server closes this socket when a member is
+            # removed, but that goes over the channel layer, and a send on it
+            # can be lost. A lost close must not leave someone speaking for the
+            # club.
+            if await self._lost_org_access():
+                await self.close(code=WS_CLOSE_ORG_ACCESS_REVOKED)
                 return
 
             conversation = await sync_to_async(Conversation.objects.get)(
@@ -158,6 +186,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "message_id": event["message_id"],
         }))
 
+    async def org_member_changed(self, event):
+        """A member lost access to the org this socket acts as, and it is theirs."""
+        if event["close"] and event["user_id"] == str(self.user.id):
+            await self.close(code=WS_CLOSE_ORG_ACCESS_REVOKED)
+
     async def conversation_read(self, event):
         """
         Someone read the thread up to ``last_read_at``.
@@ -207,6 +240,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
             conversation_id=self.conversation_id,
             user=self.actor.user if self.actor.is_user else None,
             org=self.actor.organization if self.actor.is_org else None
+        ).exists()
+
+    @sync_to_async
+    def _lost_org_access(self):
+        if not self.actor.is_org:
+            return False
+
+        return not OrganizationMember.objects.filter(
+            organization=self.actor.organization,
+            user=self.user,
+            status=OrganizationMember.Status.ACTIVE,
         ).exists()
 
     @sync_to_async

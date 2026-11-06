@@ -632,14 +632,14 @@ class CareerVerificationPermissionTests(CareerVerificationTestCase):
         with self.assertRaises(PermissionDenied):
             CareerVerificationService.verify_entry(self.actor, entry.id)
 
-    def test_admin_member_is_allowed(self):
+    def test_a_second_owner_is_allowed(self):
         entry = self._pending_entry()
-        admin = self._user("clubadmin", User.Role.ORG_USER)
-        admin_actor = self._org_actor(
-            admin, self.club, OrganizationMember.Role.ADMIN
+        co_owner = self._user("clubcoowner", User.Role.ORG_USER)
+        co_owner_actor = self._org_actor(
+            co_owner, self.club, OrganizationMember.Role.OWNER
         )
 
-        updated = CareerVerificationService.verify_entry(admin_actor, entry.id)
+        updated = CareerVerificationService.verify_entry(co_owner_actor, entry.id)
 
         self.assertEqual(
             updated.verification_status,

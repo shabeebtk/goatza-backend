@@ -11,18 +11,15 @@ import logging
 from rest_framework.exceptions import NotFound, PermissionDenied
 
 from apps.organization.models import Organization, OrganizationMember
+from apps.organization.permissions import (
+    DENIED_MESSAGES,
+    OrgPermission,
+    has_org_permission,
+)
 from utils.cache import cache_delete
 from utils.cache_keys import CacheKeys
 
 logger = logging.getLogger(__name__)
-
-# Roles allowed to change what the world sees of the organization. Coaches and
-# staff run the day-to-day (recruitments, verifications, posts); making the club
-# invisible to the public web is an ownership decision.
-PRIVACY_ROLES = (
-    OrganizationMember.Role.OWNER,
-    OrganizationMember.Role.ADMIN,
-)
 
 
 class OrganizationPrivacyService:
@@ -30,7 +27,10 @@ class OrganizationPrivacyService:
     @staticmethod
     def _require_privacy_role(organization, user):
         """
-        Raise unless ``user`` is an OWNER/ADMIN member of ``organization``.
+        Raise unless ``user`` holds the org.privacy permission in ``organization``.
+
+        Coaches and staff run the day-to-day; making the club invisible to the
+        public web is an ownership decision.
 
         NotFound (not PermissionDenied) for a non-member: someone who is not in
         the org at all should not learn that an org id is real by probing this.
@@ -38,16 +38,16 @@ class OrganizationPrivacyService:
         exists, and a precise error is what makes the disabled row explicable.
         """
         membership = OrganizationMember.objects.filter(
-            organization=organization, user=user
-        ).only("role").first()
+            organization=organization,
+            user=user,
+            status=OrganizationMember.Status.ACTIVE,
+        ).first()
 
         if membership is None:
             raise NotFound("Organization not found")
 
-        if membership.role not in PRIVACY_ROLES:
-            raise PermissionDenied(
-                "Only the organization's owner or an admin can change this"
-            )
+        if not has_org_permission(membership, OrgPermission.ORG_PRIVACY):
+            raise PermissionDenied(DENIED_MESSAGES[OrgPermission.ORG_PRIVACY.value])
 
         return membership
 

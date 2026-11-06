@@ -46,7 +46,7 @@ from utils.errors import flatten_validation_error
 
 logger = logging.getLogger(__name__)
 
-EXPORT_FORBIDDEN_MESSAGE = "Only owners and admins can download applicants."
+EXPORT_FORBIDDEN_MESSAGE = "Only owners can download applicants."
 XLSX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
@@ -281,7 +281,7 @@ class ApplicationExportAPIView(BaseAPIView):
     GET /recruitments/<recruitment_id>/applications/export
         ?scope=filtered|all&start=1&<the list's own params>
 
-    The applicants as an .xlsx — owner/admin only, at most 100 rows a file,
+    The applicants as an .xlsx — recruitments.speak only, at most 100 rows a file,
     rows ``start``..``start+99`` in a FIXED oldest-first order (see
     ``ApplicationSelector.export_queryset`` for why the order never follows
     the list's sort).
@@ -922,7 +922,7 @@ class MessageApplicantsAPIView(BaseAPIView):
     POST /recruitments/<recruitment_id>/applications/message
 
     "Message these players." Any org member — announcing to the whole trial is
-    the club's voice and is owner/admin-gated, but messaging the four people
+    the club's voice and needs recruitments.speak, but messaging the four people
     you just watched play is the job of whoever watched them.
 
     WRITES ROWS AND RETURNS. Like an announcement, and for the same reason: a

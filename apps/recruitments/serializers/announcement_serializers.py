@@ -109,8 +109,8 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         return trial_session_payload(obj.session, obj.recruitment)
 
     def get_posted_by(self, obj):
-        """The member who posted it, for the org's own audit. Null once they
-        leave — SET_NULL, so the announcement outlives the membership."""
+        """The member who posted it, for the org's own audit. A removed one stays
+        named with is_former, and null only if the row itself is ever deleted."""
         member = obj.created_by_member
         if member is None:
             return None
@@ -119,6 +119,7 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         return {
             "id": str(member.id),
             "name": getattr(profile, "name", "") or member.user.username or "",
+            "is_former": member.is_former,
         }
 
     def get_delivery_summary(self, obj):

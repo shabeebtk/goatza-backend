@@ -21,7 +21,7 @@ class OrganizationPublicProfilePrivacyAPIView(BaseAPIView):
     PATCH /organizations/privacy/public-profile   {"is_public_profile": bool}
 
     Acts on the ORG the caller is currently acting as (``?org_id=`` overrides,
-    matching the other org endpoints). Owner/admin only — enforced in
+    matching the other org endpoints). Needs org.privacy — enforced in
     OrganizationPrivacyService, not here, so the same gate covers any future
     caller.
     """
