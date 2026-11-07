@@ -914,6 +914,17 @@ class ClaimRaceTests(MemberFixesBase):
 # ---------------------------------------------------------------------
 
 
+# These render real admin pages, and the Manifest storage in settings raises on a
+# static file that collectstatic has not written, which is every file on a fresh
+# checkout. The plain storage resolves the same URLs without a manifest.
+@override_settings(
+    STORAGES={
+        **settings.STORAGES,
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+)
 class MemberAdminTests(MemberFixesBase):
     def setUp(self):
         super().setUp()
@@ -1021,6 +1032,15 @@ class MemberAdminTests(MemberFixesBase):
         html = self.client.get(self._admin_url("organizationmember_changelist")).content.decode()
 
         self.assertNotIn("delete_selected", html)
+
+    def test_the_org_list_offers_is_verified_as_an_editable_column(self):
+        self.client.force_login(self.request.user)
+
+        page = self.client.get(self._admin_url("organization_changelist"))
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("is_verified", page.context["cl"].list_editable)
+        self.assertContains(page, 'name="form-0-is_verified"')
 
     def test_the_org_page_offers_no_delete_on_a_member(self):
         self.client.force_login(self.request.user)
