@@ -94,8 +94,9 @@ class OrganizationAdmin(admin.ModelAdmin):
 
     # The un-suspend path. A moderation suspension is set by an action on a
     # Report; clearing it is a deliberate manual edit, and this is the only
-    # place it can be done.
-    list_editable = ("is_suspended",)
+    # place it can be done. is_verified is how staff verify an organization:
+    # there is no request flow behind it, only this tick.
+    list_editable = ("is_verified", "is_suspended")
 
     search_fields = (
         "name",
