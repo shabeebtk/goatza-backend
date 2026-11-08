@@ -5,6 +5,7 @@ from apps.organization.models import (
     OrganizationMember
 )
 from apps.organization.permissions import member_permissions
+from utils.validations import validate_username_format
 
 class OrganizationLocationInputSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255, required=False, allow_blank=True)
@@ -62,11 +63,19 @@ class OrganizationCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=100)
     type = serializers.ChoiceField(choices=Organization.Type.choices)
 
+    # The handle the page asked for. Optional: absent or blank means one is
+    # generated from the name, as before. Only the FORMAT is checked here; the
+    # claim inside create_organization is what decides whether it is free, so
+    # there is no check-then-insert gap. The cap is generous on purpose: the
+    # validator's "cannot be longer than 30" reads better than DRF's.
+    username = serializers.CharField(max_length=100, required=False, allow_blank=True)
+
     # optional profile
     headline = serializers.CharField(max_length=150, required=False, allow_blank=True)
     website = serializers.URLField(required=False, allow_blank=True)
     logo = serializers.URLField(required=False, allow_blank=True)
-    description = serializers.CharField(required=False, allow_blank=True)
+    # 600 is the create page's counter; the column itself is unbounded.
+    description = serializers.CharField(max_length=600, required=False, allow_blank=True)
     level = serializers.ChoiceField(
         choices=OrganizationProfile.Level.choices,
         required=False,
@@ -74,12 +83,21 @@ class OrganizationCreateSerializer(serializers.Serializer):
     )
     # optional location
     location = OrganizationLocationInputSerializer(required=False)
-    # optional sports ids
+    # optional sports ids. ORDER MATTERS: the first one becomes the primary.
     sport_ids = serializers.ListField(
         child=serializers.UUIDField(),
         required=False,
         allow_empty=True
     )
+
+    def validate_username(self, value):
+        """The NORMALIZED handle, or "" for "generate one for me"."""
+        if not (value or "").strip():
+            return ""
+        try:
+            return validate_username_format(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
 
 class OrganizationMiniSerializer(serializers.ModelSerializer):
     logo = serializers.SerializerMethodField()

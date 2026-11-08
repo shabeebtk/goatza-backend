@@ -11,6 +11,7 @@ from apps.organization.serializers.organization_serializers import (
     UpdateOrganizationMediaSerializer
 )
 from apps.organization.serializers.update_organization_serializer import UpdateOrganizationSerializer
+from utils.errors import error_body, flatten_validation_error
 from utils.response import response_data
 from utils.validations import is_valid_uuid
 from services.storage.validators import (
@@ -34,7 +35,32 @@ from apps.legal.permissions import HasAcceptedCurrentTerms
 
 logger = logging.getLogger(__name__)
 
+
+def _create_refusal(code, message, field=None, errors=None, status_code=400):
+    """
+    A refused create, in the members endpoints' shape: ``{code, message}`` in
+    response_data's ``data`` (plus ``errors``, keyed by field, like every other
+    400), with ``field`` naming the input it belongs to when there is one.
+    """
+    data = {"code": code, "message": message}
+    if field:
+        data["field"] = field
+    data.update(
+        {"errors": errors} if errors else error_body(message, field or "non_field_errors")
+    )
+    return response_data(
+        success=False, message=message, data=data, status_code=status_code
+    )
+
+
 class CreateOrganizationAPIView(APIView):
+    """
+    POST /organizations/create
+
+    400 codes: ``username_invalid`` / ``username_taken`` (field ``username``),
+    ``org_limit``, and ``invalid`` for any other field, with ``errors`` keyed
+    by field. ``create_failed`` is a 500.
+    """
     permission_classes = [
         IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
     ]
@@ -46,11 +72,22 @@ class CreateOrganizationAPIView(APIView):
             )
 
             if not serializer.is_valid():
-                return response_data(
-                    success=False,
-                    message="Invalid data",
-                    data=serializer.errors,
-                    status_code=400
+                flat = flatten_validation_error(serializer.errors)
+
+                # The handle gets its own code: the page answers it on the
+                # field itself, the same way it answers a taken one.
+                if "username" in flat["errors"]:
+                    return _create_refusal(
+                        "username_invalid",
+                        flat["errors"]["username"],
+                        field="username",
+                    )
+
+                return _create_refusal(
+                    "invalid",
+                    flat["message"],
+                    field=next(iter(flat["errors"]), None),
+                    errors=flat["errors"],
                 )
 
             success, result = OrganizationService.create_organization(
@@ -58,14 +95,19 @@ class CreateOrganizationAPIView(APIView):
                 data=serializer.validated_data
             )
 
+            if not success:
+                return _create_refusal(
+                    result["code"],
+                    result["message"],
+                    field=result.get("field"),
+                    status_code=result.get("status_code", 400),
+                )
+
             return response_data(
-                success=success,
-                message=(
-                    "Organization created successfully"
-                    if success else result
-                ),
-                data=result if success else {},
-                status_code=201 if success else 400
+                success=True,
+                message="Organization created successfully",
+                data=result,
+                status_code=201
             )
 
         except Exception as e:
@@ -80,6 +122,24 @@ class CreateOrganizationAPIView(APIView):
                 error=str(e)
             )
 
+
+class OrganizationCreateEligibilityAPIView(APIView):
+    """
+    GET /organizations/create/eligibility → ``{allowed, limit, used}``.
+
+    Lets the create page show "you've reached the limit" before anybody fills
+    in four steps. A hint only: the create itself re-counts under a lock.
+    """
+    permission_classes = [
+        IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
+    ]
+
+    def get(self, request):
+        return response_data(
+            success=True,
+            message="Eligibility fetched successfully",
+            data=OrganizationService.create_eligibility(request.user),
+        )
 
 
 class ListUserOrganizationsAPIView(APIView):
@@ -252,7 +312,9 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
             user = request.user 
            
         
-            org_id = request.query_params.get('org_id')
+            # The query string is the documented place; the body is accepted
+            # too because the org-admin photo editor has always sent it there.
+            org_id = request.query_params.get('org_id') or request.data.get('org_id')
             if not org_id:
                 if not actor.is_org:
                     return response_data(
@@ -260,9 +322,15 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
                         error="organization request only",
                         status_code=400
                     )
-                
+
                 org_id = actor.organization.id
 
+            if not is_valid_uuid(org_id):
+                return response_data(
+                    success=False,
+                    message="Organization not found",
+                    status_code=404
+                )
 
             serializer = UpdateOrganizationMediaSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
@@ -314,15 +382,21 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
                 update_fields += ["cover_image", "cover_image_public_id"]
 
             # UPDATE LOGO
-                        # UPDATE LOGO
             # logo/cover each own ONE key per org and are overwritten in place,
             # so the URL never changes and the CDN keeps serving the old image.
             # with_cache_buster stamps ?v=<ts> on the stored URL; the public_id
             # column keeps the bare key, which is what delete_file needs.
+            #
+            # The key is checked against THIS org — the one looked up and
+            # membership-checked above — not request.actor.organization. The
+            # create page attaches the first logo while still acting as the
+            # person (?org_id=), and the actor's org is None then, so the key
+            # was checked against users/<id>/ and every create-time logo was
+            # refused.
             if "logo" in data:
                 validate_media(
                     user=request.user,
-                    org=request.actor.organization,   # NEW
+                    org=org,
                     url=data["logo"],
                     public_id=data["logo_public_id"],
                     allowed_extensions=allowed_image_extensions()
@@ -338,7 +412,7 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
             if "cover_image" in data:
                 validate_media(
                     user=request.user,
-                    org=request.actor.organization,   # NEW
+                    org=org,
                     url=data["cover_image"],
                     public_id=data["cover_image_public_id"],
                     allowed_extensions=allowed_image_extensions()
@@ -359,9 +433,15 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
             if orphaned_keys:
                 enqueue(delete_keys, (orphaned_keys,))
 
+            # The stored URLs, ?v= included, so a client can show exactly what
+            # was saved without refetching the org.
             return response_data(
                 success=True,
-                message="Organization media updated successfully"
+                message="Organization media updated successfully",
+                data={
+                    "logo": profile.logo or "",
+                    "cover_image": profile.cover_image or "",
+                },
             )
 
         except serializers.ValidationError as e:
