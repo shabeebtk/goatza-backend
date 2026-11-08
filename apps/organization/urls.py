@@ -1,6 +1,7 @@
 from django.urls import path
 from apps.organization.views.organization_views import (
     CreateOrganizationAPIView, ListUserOrganizationsAPIView, OrganizationsDetailsAPIView,
+    OrganizationCreateEligibilityAPIView,
     UpdateOrganizationMediaAPIView, UpdateOrganizationAPIView
 )
 from apps.organization.views.organization_location_views import (
@@ -30,6 +31,7 @@ from apps.organization.views.organization_member_views import (
 
 urlpatterns = [
     path('create', CreateOrganizationAPIView.as_view()),
+    path('create/eligibility', OrganizationCreateEligibilityAPIView.as_view()),
     path('list', ListUserOrganizationsAPIView.as_view()),
     path('details', OrganizationsDetailsAPIView.as_view()),
     path('update/logo/cover', UpdateOrganizationMediaAPIView.as_view()),

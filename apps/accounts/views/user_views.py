@@ -45,9 +45,10 @@ from apps.usernames.exceptions import UsernameTaken
 from apps.usernames.services.username_service import UsernameService
 from shared.tasks import delete_keys
 from utils.background_jobs import enqueue
-from utils.validations import validate_username_format
-from core.constant import TYPE_USER
+from utils.validations import is_valid_uuid, validate_username_format
+from core.constant import TYPE_ORGANIZATION, TYPE_USER
 from core.actor import Actor
+from apps.organization.models import Organization, OrganizationMember
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,36 @@ class GetUserDetailsByID(APIView):
         
 
 
+def _own_organization(user, org_id):
+    """
+    The org whose CURRENT handle a rename check may ignore, or None.
+
+    Only an org the caller actively belongs to: anyone else's org_id is
+    ignored rather than refused, so the check cannot be used to learn which
+    handle belongs to which org — it just answers "taken" as it would anyway.
+    """
+    if not org_id or not is_valid_uuid(org_id):
+        return None
+
+    return Organization.objects.filter(
+        id=org_id,
+        members__user=user,
+        members__status=OrganizationMember.Status.ACTIVE,
+    ).first()
+
+
 class CheckUsernameAvailabilityAPIView(APIView):
+    """
+    GET /user/check/username/availability?username=…[&for=organization[&org_id=…]]
+
+    Without ``for``: is this handle free for ME (my own handle counts as free).
+
+    ``for=organization``: is it free for a PAGE. The person's own handle is
+    taken here — it belongs to them, not to the page — and the only handle
+    ignored is ``org_id``'s current one, for a rename, and only when the
+    caller is an active member of that org. A taken answer also carries a
+    free ``suggestion``.
+    """
     permission_classes = [
         IsAuthenticated, HasAcceptedCurrentTerms, HasGuardianConsentIfMinor
     ]
@@ -184,15 +214,23 @@ class CheckUsernameAvailabilityAPIView(APIView):
                 )
 
             user = request.user
+            for_org = request.query_params.get("for") == "organization"
+
+            if for_org:
+                exclude = {
+                    "exclude_org": _own_organization(
+                        user, request.query_params.get("org_id")
+                    )
+                }
+            else:
+                exclude = {"exclude_user": user}
 
             # INVALID and TAKEN are different answers and the UI says different
             # things about them, so they get different shapes: a 400 with the
             # reason for a handle that could never be allowed, a 200 with
             # available=false for one that is merely spoken for.
             try:
-                available = UsernameService.is_available(
-                    username, exclude_user=user
-                )
+                available = UsernameService.is_available(username, **exclude)
             except ValueError as ve:
                 return response_data(
                     False,
@@ -208,14 +246,21 @@ class CheckUsernameAvailabilityAPIView(APIView):
                 f"available={available}"
             )
 
+            data = {
+                "username": username,
+                "valid": True,
+                "available": available
+            }
+
+            if for_org and not available:
+                data["suggestion"] = UsernameService.generate(
+                    username, owner_type=TYPE_ORGANIZATION
+                )
+
             return response_data(
                 True,
                 message="Username available" if available else "Username already taken",
-                data={
-                    "username": username,
-                    "valid": True,
-                    "available": available
-                }
+                data=data
             )
 
         except Exception as e:
