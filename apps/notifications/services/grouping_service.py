@@ -9,8 +9,25 @@ from apps.notifications.services.notification_service import (
     PUBLICATION_FAILED_TITLES,
     RECRUITMENT_STATUS_COPY,
     RECRUITMENT_STATUS_COPY_DEFAULT,
+    SQUAD_TYPES,
     org_member_copy,
+    squad_copy,
 )
+
+
+def _squad_request_others(items) -> int:
+    """
+    How many MORE players asked, for a grouped squad_join_request row. Counted
+    from `data`, not from the actors: every squad row's actor is the club. A
+    player who withdrew and asked again is still one player.
+    """
+    players = {
+        (n.data or {}).get("player_id") or (n.data or {}).get("player_name")
+        for n in items
+    }
+    players.discard(None)
+    players.discard("")
+    return max(0, len(players) - 1)
 
 
 class NotificationGroupingService:
@@ -104,6 +121,11 @@ class NotificationGroupingService:
         # is still one person. `message` is the exception and uses total_count
         # directly (see _build_text), because there it means "N more things".
         others_count = max(0, len(distinct_actors) - len(top_actors))
+
+        # The club is the actor on every squad row, so "and N others" counts
+        # the players in `data` instead.
+        if primary.type == "squad_join_request":
+            others_count = _squad_request_others(items)
 
         # ----------------------------------------
         # RECRUITMENT DATA (applicants notifications)
@@ -214,6 +236,14 @@ class NotificationGroupingService:
             # The card has no second line, and the role is part of the question
             # an invite asks: "... invited you to join X as Coach".
             return f"{title} {body}" if notification_type == "org_invite" else title
+
+        if notification_type in SQUAD_TYPES:
+            # One line on the card. The invite's second line ("Accepting adds
+            # …") and the review prompt are push bodies; the card has buttons.
+            title, _ = squad_copy(
+                notification_type, data or {}, others_count=others_count
+            )
+            return title
 
         if notification_type == "publication_failed":
             # Platform-voiced: no actor, so no names. The reason is in

@@ -51,6 +51,16 @@ class Notification(BaseUUIDModel):
         ORG_MEMBER_REMOVED = "org_member_removed", "Organization Member Removed"
         ORG_ROLE_CHANGED = "org_role_changed", "Organization Role Changed"
         ORG_OWNER_CHANGED = "org_owner_changed", "Organization Owner Changed"
+        # Squads (apps/squads). Same rule as the org-member types above: every
+        # one goes to a PERSON (recipient_user), with the club as actor_org so
+        # the card shows its logo. Copy comes from `data` alone (squad_copy).
+        SQUAD_JOIN_REQUEST = "squad_join_request", "Squad Join Request"
+        SQUAD_INVITE = "squad_invite", "Squad Invite"
+        SQUAD_REQUEST_APPROVED = "squad_request_approved", "Squad Request Approved"
+        SQUAD_REQUEST_DECLINED = "squad_request_declined", "Squad Request Declined"
+        SQUAD_INVITE_ACCEPTED = "squad_invite_accepted", "Squad Invite Accepted"
+        SQUAD_MEMBER_REMOVED = "squad_member_removed", "Squad Member Removed"
+        SQUAD_MEMBER_MOVED = "squad_member_moved", "Squad Member Moved"
         # future:
         # TRIAL = "trial"
         

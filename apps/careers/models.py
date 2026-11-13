@@ -39,6 +39,8 @@ class CareerEntry(BaseUUIDModel):
     class Source(models.TextChoices):
         MANUAL = "manual", "Manual"
         RECRUITMENT = "recruitment", "Recruitment"
+        # Created by a squad membership (apps/squads), which also verifies it.
+        SQUAD = "squad", "Squad"
 
     user = models.ForeignKey(
         User,

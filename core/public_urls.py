@@ -44,6 +44,10 @@ from apps.cv.views.public_cv_views import PublicCVAPIView
 from apps.recruitments.views.public_recruitment_views import (
     PublicRecruitmentDetailAPIView,
 )
+from apps.squads.views.showcase_views import (
+    PublicSquadShowcaseDetailAPIView,
+    PublicSquadShowcaseListAPIView,
+)
 from apps.support.views.problem_report_views import PublicProblemReportAPIView
 from apps.waitlist.views.signup_views import (
     PlayerSignupCardAPIView,
@@ -68,6 +72,20 @@ urlpatterns = [
     path(
         'organization/<str:username>/posts',
         PublicOrganizationPostsAPIView.as_view(),
+    ),
+
+    # The club's squads, logged out. The rules are shared with the signed-in
+    # showcase (squads/selectors/showcase_selectors.py): live, public squads
+    # with at least one visible player, of an org that passes its own public-
+    # profile setting. Private profiles are counted, never listed; no minor's
+    # photo; never an age, a note, or how anyone joined. Every miss is one 404.
+    path(
+        'organization/<str:username>/squads',
+        PublicSquadShowcaseListAPIView.as_view(),
+    ),
+    path(
+        'organization/<str:username>/squads/<uuid:squad_id>',
+        PublicSquadShowcaseDetailAPIView.as_view(),
     ),
 
     # A single recruitment. The flagship share: a club posts a trial, the link

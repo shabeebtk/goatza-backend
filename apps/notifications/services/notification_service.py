@@ -147,6 +147,69 @@ def org_member_copy(notification_type, data) -> tuple:
     return "Goatza", "Tap to view"
 
 
+# Squads notifications, whose copy is built from `data` alone.
+SQUAD_TYPES = (
+    Notification.Type.SQUAD_JOIN_REQUEST,
+    Notification.Type.SQUAD_INVITE,
+    Notification.Type.SQUAD_REQUEST_APPROVED,
+    Notification.Type.SQUAD_REQUEST_DECLINED,
+    Notification.Type.SQUAD_INVITE_ACCEPTED,
+    Notification.Type.SQUAD_MEMBER_REMOVED,
+    Notification.Type.SQUAD_MEMBER_MOVED,
+)
+
+
+def squad_copy(notification_type, data, others_count=0) -> tuple:
+    """
+    ``(title, body)`` for one squads notification. Shared with grouping_service
+    so in-app + push text can't drift, and read from ``data`` alone for the
+    same reason as ``org_member_copy``: names change, history should not.
+
+    ``others_count`` is for the grouped join-request row only: how many MORE
+    players asked. Every squad row's actor is the club, so the grouping
+    service counts the players from ``data``, not from the actors.
+    """
+    data = data or {}
+    org = (data.get("organization") or {}).get("name") or "The club"
+    squad = (data.get("squad") or {}).get("name") or "the squad"
+    player = data.get("player_name") or "A player"
+
+    if notification_type == Notification.Type.SQUAD_JOIN_REQUEST:
+        if others_count > 0:
+            return (
+                f"{player} and {others_count} others asked to join {squad}",
+                "Review requests",
+            )
+        return f"{player} asked to join {squad}", "Review requests"
+
+    if notification_type == Notification.Type.SQUAD_INVITE:
+        return (
+            f"{org} invited you to join {squad}",
+            f"Accepting adds {squad} to your profile as verified.",
+        )
+
+    if notification_type == Notification.Type.SQUAD_REQUEST_APPROVED:
+        return f"You're in! {org} approved you for {squad}.", "Tap to view"
+
+    if notification_type == Notification.Type.SQUAD_REQUEST_DECLINED:
+        return (
+            f"Your request to join {squad} wasn't accepted this time.",
+            "Tap to view",
+        )
+
+    if notification_type == Notification.Type.SQUAD_INVITE_ACCEPTED:
+        return f"{player} joined {squad}.", "Tap to view"
+
+    if notification_type == Notification.Type.SQUAD_MEMBER_REMOVED:
+        return f"You're no longer listed in {squad} at {org}.", "Tap to view"
+
+    if notification_type == Notification.Type.SQUAD_MEMBER_MOVED:
+        to_squad = (data.get("to_squad") or {}).get("name") or "another squad"
+        return f"{org} moved you to {to_squad}.", "Tap to view"
+
+    return "Goatza", "Tap to view"
+
+
 def _org_data(organization) -> dict:
     """The org as a notification's `data` carries it: what the card renders."""
     profile = getattr(organization, "profile", None)
@@ -161,6 +224,18 @@ def _org_data(organization) -> dict:
 def _person_name(user) -> str:
     profile = getattr(user, "profile", None)
     return getattr(profile, "name", "") or user.username or ""
+
+
+def _squad_data(squad, **extra) -> dict:
+    """
+    What every squads notification carries: the squad, the club, and the
+    type's own extras. Never a birthdate, never the club's private notes.
+    """
+    return {
+        "squad": {"id": str(squad.id), "name": squad.name},
+        "organization": _org_data(squad.organization),
+        **extra,
+    }
 
 
 def _role_label(role) -> str:
@@ -440,6 +515,9 @@ def build_notification_payload(notification: "Notification") -> dict:
 
     elif notification.type in ORG_MEMBER_TYPES:
         title, body = org_member_copy(notification.type, notification.data)
+
+    elif notification.type in SQUAD_TYPES:
+        title, body = squad_copy(notification.type, notification.data)
 
     return {
         "type": notification.type,
@@ -1346,6 +1424,169 @@ class NotificationService:
             **NotificationService._recipient_kwargs(recipient_user=recipient_user),
         )
         _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # SQUADS
+    # ──────────────────────────────────────────
+    # Every one goes to a PERSON with the club as actor_org (the card shows the
+    # club's logo). `data` carries what the copy and the deep link need, and
+    # never a birthdate or the club's private notes. Callers run these after
+    # commit (transaction.on_commit(..., robust=True)).
+    @staticmethod
+    def squad_join_request(membership):
+        """
+        A player asked to join through the squad's link. Told to every active
+        member holding squads.review.
+
+        One push per burst, not per request: a reviewer who already has an
+        UNREAD request for this squad gets the row (the list groups them by
+        ``group_key`` into "X and N others asked…") but no buzz. Twenty taps
+        on a shared link is one push.
+        """
+        squad = membership.squad
+        organization = squad.organization
+        player = membership.user
+        group_key = f"squad_request:{squad.id}"
+        data = _squad_data(
+            squad,
+            member_id=str(membership.id),
+            player_id=str(player.id),
+            player_name=_person_name(player),
+        )
+
+        reviewers = (
+            members_with_permission(organization, OrgPermission.SQUADS_REVIEW)
+            .filter(
+                user__is_active=True,
+                user__deletion_requested_at__isnull=True,
+            )
+            .exclude(user=player)
+            .select_related("user")
+        )
+
+        for reviewer in reviewers:
+            recipient = reviewer.user
+            dedup_key = f"squad_join_request:{membership.id}:{recipient.id}"
+            if Notification.objects.filter(dedup_key=dedup_key).exists():
+                continue
+
+            already_waiting = Notification.objects.filter(
+                recipient_user=recipient,
+                type=Notification.Type.SQUAD_JOIN_REQUEST,
+                group_key=group_key,
+                is_read=False,
+                is_deleted=False,
+            ).exists()
+
+            notification = Notification.objects.create(
+                type=Notification.Type.SQUAD_JOIN_REQUEST,
+                group_key=group_key,
+                dedup_key=dedup_key,
+                data=data,
+                **NotificationService._actor_kwargs(actor_org=organization),
+                **NotificationService._recipient_kwargs(recipient_user=recipient),
+            )
+
+            if not already_waiting:
+                _dispatch(notification)
+
+    @staticmethod
+    def squad_invite(membership):
+        """The club invited a player. In-app (Accept / Decline) and push, once per invite."""
+        dedup_key = f"squad_invite:{membership.id}"
+        if Notification.objects.filter(dedup_key=dedup_key).exists():
+            return
+
+        squad = membership.squad
+        inviter = membership.invited_by_member
+        application = membership.recruitment_application
+
+        notification = Notification.objects.create(
+            type=Notification.Type.SQUAD_INVITE,
+            dedup_key=dedup_key,
+            data=_squad_data(
+                squad,
+                member_id=str(membership.id),
+                inviter_name=_person_name(inviter.user) if inviter else "",
+                position_name=membership.position.name if membership.position else "",
+                jersey_number=membership.jersey_number,
+                recruitment_title=(
+                    application.recruitment.title if application else ""
+                ),
+            ),
+            **NotificationService._actor_kwargs(actor_org=squad.organization),
+            **NotificationService._recipient_kwargs(recipient_user=membership.user),
+        )
+        _dispatch(notification)
+
+    @staticmethod
+    def squad_request_approved(membership):
+        """The club said yes. In-app and push: it is the news they were waiting for."""
+        squad = membership.squad
+        notification = Notification.objects.create(
+            type=Notification.Type.SQUAD_REQUEST_APPROVED,
+            data=_squad_data(
+                squad,
+                member_id=str(membership.id),
+                position_name=membership.position.name if membership.position else "",
+                jersey_number=membership.jersey_number,
+            ),
+            **NotificationService._actor_kwargs(actor_org=squad.organization),
+            **NotificationService._recipient_kwargs(recipient_user=membership.user),
+        )
+        _dispatch(notification)
+
+    @staticmethod
+    def squad_request_declined(squad, recipient_user):
+        """In-app only. The request row is already gone, so the squad is passed in."""
+        return Notification.objects.create(
+            type=Notification.Type.SQUAD_REQUEST_DECLINED,
+            data=_squad_data(squad),
+            **NotificationService._actor_kwargs(actor_org=squad.organization),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+
+    @staticmethod
+    def squad_invite_accepted(membership, recipient_user):
+        """The inviter hears that the player said yes. In-app only."""
+        squad = membership.squad
+        player = membership.user
+        return Notification.objects.create(
+            type=Notification.Type.SQUAD_INVITE_ACCEPTED,
+            data=_squad_data(
+                squad,
+                member_id=str(membership.id),
+                player_id=str(player.id),
+                player_name=_person_name(player),
+                position_name=membership.position.name if membership.position else "",
+                jersey_number=membership.jersey_number,
+            ),
+            **NotificationService._actor_kwargs(actor_org=squad.organization),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+
+    @staticmethod
+    def squad_member_removed(squad, recipient_user):
+        """In-app only, whichever way the club removed them."""
+        return Notification.objects.create(
+            type=Notification.Type.SQUAD_MEMBER_REMOVED,
+            data=_squad_data(squad),
+            **NotificationService._actor_kwargs(actor_org=squad.organization),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
+
+    @staticmethod
+    def squad_member_moved(from_squad, to_squad, recipient_user):
+        """In-app only. ``squad`` is where they were, ``to_squad`` where they are."""
+        return Notification.objects.create(
+            type=Notification.Type.SQUAD_MEMBER_MOVED,
+            data=_squad_data(
+                from_squad,
+                to_squad={"id": str(to_squad.id), "name": to_squad.name},
+            ),
+            **NotificationService._actor_kwargs(actor_org=from_squad.organization),
+            **NotificationService._recipient_kwargs(recipient_user=recipient_user),
+        )
 
     # ──────────────────────────────────────────
     # MEDIA (platform → author)

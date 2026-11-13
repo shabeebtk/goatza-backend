@@ -144,6 +144,9 @@ INSTALLED_APPS = [
     # (MediaJob + the worker's ffmpeg/Pillow pipeline). Behind
     # MEDIA_PROCESSING_ENABLED, off by default.
     'apps.media',
+    # An organization's standing groups of players, one sport each. "Squad",
+    # never "team": that word is already an organization type.
+    'apps.squads',
 
     # buildin apps 
     'django.contrib.admin',
@@ -382,6 +385,17 @@ REST_FRAMEWORK = {
         # per org: every invite mails an address the CALLER typed, so a member
         # cap of 50 does not need more than this in a day.
         'org_invites': '30/day',
+        # Direct squad invites (squads.throttles). Per ORG, drawn only by members
+        # holding squads.review: each one pushes a player who did not ask. The
+        # open-invite cap (50 per squad) is the other half of the limit.
+        'squad_invites': '60/day',
+        # A squad's invite link, read or joined (squads.throttles). Per IP,
+        # logged in or not, like org_invite_token: the link only lets someone
+        # ASK, but trying links is still the only way to find one.
+        'squad_invite_token': '30/min',
+        # Joining through a link (squads.throttles). Per PERSON: each request
+        # notifies the club's reviewers.
+        'squad_join': '20/hour',
         # An invite link's token, read or answered (organization.throttles). Per
         # IP, logged in or not: the only way to attack a token is to try tokens,
         # and a session must not buy a way round that.

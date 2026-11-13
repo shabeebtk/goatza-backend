@@ -106,8 +106,12 @@ class PublicSitemapURLsTests(TestCase):
     # THE ALLOW-LIST
     # =================================================================
 
-    def test_the_payload_has_exactly_two_lists(self):
-        self.assertEqual(sorted(self._feed().keys()), ["organizations", "users"])
+    def test_the_payload_has_exactly_three_lists(self):
+        # "squads" is covered in apps/squads/tests/test_showcase.py
+        # (SquadSitemapTests), next to the showcase rules it mirrors.
+        self.assertEqual(
+            sorted(self._feed().keys()), ["organizations", "squads", "users"]
+        )
 
     def test_a_row_carries_a_handle_and_a_timestamp_and_nothing_else(self):
         """

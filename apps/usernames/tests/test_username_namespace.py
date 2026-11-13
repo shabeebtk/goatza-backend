@@ -101,6 +101,15 @@ class ValidatorTests(TestCase):
         ):
             self.assertIn(segment, RESERVED_USERNAMES, segment)
 
+    def test_the_invite_link_routes_are_reserved_and_refused(self):
+        # /org-invite/<token> and /squad-invite/<token> are top-level frontend
+        # pages. The hyphen already fails the charset; the entry is there so the
+        # list stays a true mirror of the routes, whatever the charset becomes.
+        for segment in ("org-invite", "squad-invite"):
+            self.assertIn(segment, RESERVED_USERNAMES, segment)
+            with self.assertRaises(ValueError, msg=segment):
+                validate_username_format(segment)
+
 
 class ReservedNameTests(TestCase):
     """Reserved handles are refused to BOTH actor types, not just to users."""

@@ -103,6 +103,21 @@ class CacheKeys:
         return f"public:profile:org:{username}"
 
     @staticmethod
+    def public_org_squads(username):
+        """
+        The anonymous squad list on an org's public profile. Cleared, with every
+        one of the org's squad pages below, by squads' ``bust_public_squads`` on
+        each write that changes what they show — a squad page also lists the
+        club's OTHER squads, so one squad's change reaches every page.
+        """
+        return f"public:squads:org:{username}"
+
+    @staticmethod
+    def public_org_squad(username, squad_id):
+        """One squad's anonymous page. See public_org_squads."""
+        return f"public:squads:org:{username}:{squad_id}"
+
+    @staticmethod
     def public_cv(username):
         """
         The anonymous rendering of a player's Sports CV.

@@ -18,6 +18,10 @@ from apps.sports.serializers.sports_serializers import (
     SportPositionSerializer,
     SportSerializer,
 )
+from apps.squads.selectors.squad_selectors import (
+    CAREER_SQUAD_ATTR,
+    career_squad_memberships,
+)
 
 
 class CareerEntrySerializer(serializers.ModelSerializer):
@@ -33,6 +37,7 @@ class CareerEntrySerializer(serializers.ModelSerializer):
     organization = OrganizationMiniSerializer(read_only=True)
     sport = SportSerializer(read_only=True)
     positions = SportPositionSerializer(many=True, read_only=True)
+    squad = serializers.SerializerMethodField()
 
     class Meta:
         model = CareerEntry
@@ -53,9 +58,34 @@ class CareerEntrySerializer(serializers.ModelSerializer):
             "verification_status",
             "verified_at",
             "source",
+            "squad",
             "created_at",
             "updated_at",
         ]
+
+    def get_squad(self, obj):
+        """
+        The squad this stint is backed by: the entry's ACTIVE membership in a
+        live, PUBLIC squad (earliest joined), or null. A hidden squad never
+        shows here. Prefetched by ``career_entries_for``; a single entry read
+        anywhere else costs one query.
+        """
+        memberships = getattr(obj, CAREER_SQUAD_ATTR, None)
+        if memberships is None:
+            memberships = list(
+                career_squad_memberships().filter(career_entry_id=obj.id)[:1]
+            )
+        if not memberships:
+            return None
+
+        membership = memberships[0]
+        return {
+            "id": str(membership.squad_id),
+            "name": membership.squad.name,
+            "jersey_number": membership.jersey_number,
+            "is_captain": membership.is_captain,
+            "position_name": membership.position.name if membership.position else "",
+        }
 
 
 class CareerEntryCreateSerializer(serializers.Serializer):

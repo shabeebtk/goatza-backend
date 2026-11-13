@@ -17,6 +17,11 @@ _TOKEN_PATH = re.compile(
     r"(/organizations/invites/token/"
     r"|/guardian/consent/"
     r"|/org-invite/"
+    # A squad's invite link (API and frontend page). Shareable rather than a
+    # credential — it only lets someone ASK to join — but keeping it out of
+    # logs costs nothing.
+    r"|/squads/invite/"
+    r"|/squad-invite/"
     r"|/guardian/(?!consent/|details\b|resend\b))"
     r"[^/?#\s\"'<>]+"
 )

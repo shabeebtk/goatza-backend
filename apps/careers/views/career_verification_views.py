@@ -9,22 +9,40 @@ through ``_service_error``.
 
 import logging
 
+from django.db import transaction
 from rest_framework.exceptions import (
     NotFound,
     PermissionDenied,
     ValidationError,
 )
 
+from apps.careers.models import CareerEntry
 from apps.careers.selectors.career_selectors import (
+    career_entries_for,
     decided_verification_requests_for,
     pending_verification_requests_for,
 )
+from apps.organization.permissions import (
+    DENIED_MESSAGES,
+    OrgPermission,
+    has_org_permission,
+)
+from apps.squads.errors import SquadError
+from apps.squads.selectors.squad_selectors import (
+    members_for_response,
+    primary_positions_for,
+)
+from apps.squads.serializers.squad_serializers import MemberItemSerializer
+from apps.squads.services.guards import get_org_squad
+from apps.squads.services.membership_service import MembershipService
+from apps.squads.views.base import squad_error_response
 from apps.careers.serializers.career_serializers import (
     CareerEntrySerializer,
     CareerRejectSerializer,
     CareerVerificationRequestSerializer,
 )
 from apps.careers.services.career_verification_services import CareerVerificationService
+from apps.notifications.services.notification_service import NotificationService
 from apps.careers.views.career_views import _service_error
 from core.views.base_views import BaseAPIView
 from utils.errors import error_body
@@ -120,11 +138,27 @@ class CareerVerificationRequestListAPIView(BaseAPIView):
 
 
 class VerifyCareerEntryAPIView(BaseAPIView):
-    """POST /careers/<entry_id>/verify — verifications.review confirms the claim."""
+    """
+    POST /careers/<entry_id>/verify — verifications.review confirms the claim.
+
+    Optional body ``{squad_id, position_id?, jersey_number?}``: "Verify and add
+    to squad". Without ``squad_id`` nothing about this endpoint changes. With
+    it, the actor also needs squads.review, the squad must be this org's, live,
+    and for the entry's sport — and the verify and the squad place happen in
+    ONE transaction: a squad refusal rolls the verify back too, and answers in
+    the squads ``{code, message}`` shape. The response gains ``squad_member``
+    (a MemberItem), and the player is told ONCE, as a squad place
+    (squad_request_approved), not with career_verified as well.
+    """
 
     def post(self, request, entry_id):
         TAG = "VerifyCareerEntryAPIView"
+        body = request.data if isinstance(request.data, dict) else {}
+
         try:
+            if body.get("squad_id"):
+                return self._verify_into_squad(request, entry_id, body)
+
             entry = CareerVerificationService.verify_entry(
                 request.actor,
                 entry_id
@@ -138,6 +172,9 @@ class VerifyCareerEntryAPIView(BaseAPIView):
                 data=CareerEntrySerializer(entry).data,
             )
 
+        except SquadError as e:
+            return squad_error_response(e)
+
         except (ValidationError, PermissionDenied, NotFound) as e:
             return _service_error(TAG, e)
 
@@ -149,6 +186,82 @@ class VerifyCareerEntryAPIView(BaseAPIView):
                 status_code=500,
                 error=str(e)
             )
+
+    def _verify_into_squad(self, request, entry_id, body):
+        # The career gate first, in its own shape, exactly as a plain verify.
+        organization, member = CareerVerificationService.require_reviewer(
+            request.actor
+        )
+        if not has_org_permission(member, OrgPermission.SQUADS_REVIEW):
+            raise SquadError(
+                "forbidden",
+                DENIED_MESSAGES[OrgPermission.SQUADS_REVIEW.value],
+                status_code=403,
+            )
+
+        with transaction.atomic():
+            squad = get_org_squad(organization, body.get("squad_id"))
+
+            # The status before this verify, so "added by mistake" can put it
+            # back. Read under the entry's lock; an entry that is missing or
+            # another club's is the verify's own refusal below.
+            before = (
+                CareerEntry.objects.select_for_update()
+                .filter(id=entry_id, organization=organization)
+                .values("verification_status", "sport_id")
+                .first()
+            )
+            if before is not None and before["sport_id"] != squad.sport_id:
+                raise SquadError(
+                    "sport_mismatch",
+                    "This career entry is for a different sport than the squad.",
+                )
+
+            # One notification, as a squad place — not career_verified as well.
+            entry = CareerVerificationService.verify_entry(
+                request.actor, entry_id, notify=False
+            )
+
+            row = MembershipService.add_verified_entry_to_squad(
+                member,
+                squad,
+                entry,
+                before["verification_status"] if before else "",
+                position_id=body.get("position_id"),
+                jersey_number=body.get("jersey_number"),
+            )
+
+            # After commit and robust, like every squads side effect: a failed
+            # push must not fail or roll back what the club just did.
+            def notify_player():
+                NotificationService.squad_request_approved(row)
+
+            transaction.on_commit(notify_player, robust=True)
+
+        logger.info(
+            "VerifyCareerEntryAPIView | Career entry verified into squad "
+            f"| entry_id={entry.id} | squad_id={squad.id} | member_id={row.id}"
+        )
+
+        rows = members_for_response([row.id])
+        data = CareerEntrySerializer(
+            career_entries_for(entry.user).filter(id=entry.id).first() or entry
+        ).data
+        data["squad_member"] = MemberItemSerializer(
+            rows[0],
+            context={
+                "can_review": True,
+                "primary_positions": primary_positions_for(
+                    [rows[0].user_id], squad.sport_id
+                ),
+            },
+        ).data
+
+        return response_data(
+            success=True,
+            message="Career entry verified and added to the squad",
+            data=data,
+        )
 
 
 class RejectCareerEntryAPIView(BaseAPIView):

@@ -42,16 +42,31 @@ class OrgPermission(models.TextChoices):
     # Who gets the org's pushes and transactional emails. An org has no device
     # of its own, only members.
     ORG_RECEIVE_ALERTS = "org.receive_alerts", "Receive the org's alerts"
+    # Squads (apps/squads). Three tiers because three different people do the
+    # work: anyone in the club reads the squads, coaches run the players in them
+    # (approve link requests, invite, verify a career claim into a squad, edit a
+    # player's number or position), and only owners create, edit or delete a
+    # squad itself.
+    SQUADS_VIEW = "squads.view", "See the organization's squads"
+    SQUADS_REVIEW = "squads.review", "Approve, invite and manage squad players"
+    SQUADS_MANAGE = "squads.manage", "Create, edit and delete squads"
 
 
 # Keyed by role VALUE, not OrganizationMember.Role, for the import reason above.
-# Coach and staff read the list and nothing else here: this equals behaviour
-# from before permissions existed, when every one of those lists was
-# owner + admin and admin became owner.
+# Members: coach and staff read the list, as before permissions existed, when
+# every one of those lists was owner + admin and admin became owner. Squads are
+# the first feature where a coach does more than read: they run the players.
 ROLE_PERMISSIONS = {
     "owner": frozenset(OrgPermission.values),
-    "coach": frozenset({OrgPermission.MEMBERS_VIEW.value}),
-    "staff": frozenset({OrgPermission.MEMBERS_VIEW.value}),
+    "coach": frozenset({
+        OrgPermission.MEMBERS_VIEW.value,
+        OrgPermission.SQUADS_VIEW.value,
+        OrgPermission.SQUADS_REVIEW.value,
+    }),
+    "staff": frozenset({
+        OrgPermission.MEMBERS_VIEW.value,
+        OrgPermission.SQUADS_VIEW.value,
+    }),
 }
 
 OWNER_ROLE = "owner"
@@ -79,6 +94,15 @@ DENIED_MESSAGES = {
     ),
     OrgPermission.ORG_RECEIVE_ALERTS.value: (
         "You don't receive this organization's alerts."
+    ),
+    OrgPermission.SQUADS_VIEW.value: (
+        "You don't have access to this organization's squads."
+    ),
+    OrgPermission.SQUADS_REVIEW.value: (
+        "Only owners and coaches can manage squad players."
+    ),
+    OrgPermission.SQUADS_MANAGE.value: (
+        "Only the organization's owners can change squads."
     ),
 }
 

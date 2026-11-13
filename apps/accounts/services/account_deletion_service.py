@@ -285,7 +285,27 @@ def confirm_account_deletion(user, *, password=None, otp=None):
 
     removed_tokens, _ = UserFCMToken.objects.filter(user=user).delete()
 
+    # Squads: every ACTIVE place becomes LEFT (the career stint closed, not
+    # erased), requests and invites go, and each squad is recounted. After
+    # commit, and never allowed to break the deletion itself.
+    transaction.on_commit(lambda: _end_squad_memberships(user))
+
     logger.info(
         f"Account deletion confirmed | user={user.id} "
         f"| fcm_tokens_removed={removed_tokens}"
     )
+
+
+def _end_squad_memberships(user):
+    # Imported here: squads imports organization_member_service, which imports
+    # this module (mask_email), so a top-level import would be a cycle.
+    from apps.squads.services.membership_service import MembershipService
+
+    try:
+        MembershipService.end_all_for_user(user)
+    except Exception:
+        logger.warning(
+            "Account deletion | ending squad memberships failed | user=%s",
+            user.id,
+            exc_info=True,
+        )

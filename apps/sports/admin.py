@@ -105,7 +105,7 @@ class UserSportAdmin(admin.ModelAdmin):
 
 @admin.register(SportPosition)
 class SportPositionAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "sport")
+    list_display = ("id", "name", "sport", "group")
     search_fields = ("name", "sport__name")
     list_filter = ("sport",)
 

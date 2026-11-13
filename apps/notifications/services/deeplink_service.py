@@ -207,4 +207,46 @@ def build_notification_url(notification) -> str:
             if organization_id else fallback
         )
 
+    # ── SQUADS ────────────────────────────────────────────────────
+    # Every one goes to a PERSON too. The club's side opens in the admin space
+    # of the org in `data` (a reviewer is a member of it); the player's side
+    # opens the club's public squad page.
+    if ntype in (
+        Notification.Type.SQUAD_JOIN_REQUEST,
+        Notification.Type.SQUAD_INVITE_ACCEPTED,
+    ):
+        organization_id = (data.get("organization") or {}).get("id", "")
+        squad_id = (data.get("squad") or {}).get("id", "")
+        if not (organization_id and squad_id):
+            return fallback
+        squad_url = f"{_admin_base(organization_id)}/squads/{squad_id}"
+        if ntype == Notification.Type.SQUAD_JOIN_REQUEST:
+            return f"{squad_url}/requests"
+        return squad_url
+
+    if ntype in (
+        Notification.Type.SQUAD_REQUEST_APPROVED,
+        Notification.Type.SQUAD_MEMBER_MOVED,
+    ):
+        org_username = (data.get("organization") or {}).get("username", "")
+        squad = (
+            data.get("to_squad")
+            if ntype == Notification.Type.SQUAD_MEMBER_MOVED
+            else data.get("squad")
+        ) or {}
+        squad_id = squad.get("id", "")
+        return (
+            f"/organization/profile/{org_username}/squads/{squad_id}"
+            if org_username and squad_id else fallback
+        )
+
+    if ntype in (
+        Notification.Type.SQUAD_INVITE,
+        Notification.Type.SQUAD_REQUEST_DECLINED,
+        Notification.Type.SQUAD_MEMBER_REMOVED,
+    ):
+        # The invite is an action (the card has Accept / Decline); the other
+        # two have nowhere better to go.
+        return fallback
+
     return fallback
