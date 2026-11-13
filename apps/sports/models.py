@@ -133,6 +133,11 @@ class SportPosition(BaseUUIDModel):
     )
     name = models.CharField(max_length=100)
 
+    # The roster section this position is listed under on a squad ("Defenders",
+    # "Bowlers"). Blank = no section. Seeded data (seed_squad_configs), and the
+    # section order lives in squads.SportSquadConfig.group_order.
+    group = models.CharField(max_length=50, blank=True)
+
     class Meta:
         db_table = "sport_positions"
         constraints = [

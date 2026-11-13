@@ -85,6 +85,16 @@ def build_folder(actor, upload_type: str, temp_id: str = None) -> str:
         return f"organizations/{actor.organization.id}/recruitments/{temp_id}"
 
     # -----------------------------------------
+    # SQUAD PHOTOS  (org only)
+    # -----------------------------------------
+    # NOT a fixed slot: one org has many squads, so each upload gets a random
+    # object name (build_object_name's default branch) and replacing one
+    # squad's photo can never clobber another's. Attaching checks the key
+    # starts with `organizations/<org_id>/squads/`.
+    if upload_type == "squads":
+        return f"organizations/{actor.organization.id}/squads"
+
+    # -----------------------------------------
     # CHAT MEDIA  (user or org — direct messages)
     # -----------------------------------------
     # The per-actor subfolder lets the message service re-validate that a media

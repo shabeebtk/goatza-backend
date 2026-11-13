@@ -15,7 +15,7 @@ WHAT IS NOT IN HERE, deliberately:
     robots.ts disallows /recruitments — putting them in a sitemap would be
     asking Google to crawl a login redirect. Recruitments are surfaced publicly
     through the org profile they hang off, so the ORG is the indexable unit.
-  * Anything but a handle and a timestamp. Same allow-list rule as every other
+  * Anything but a handle (plus a squad's id) and a timestamp. Same allow-list rule as every other
     view on this surface: no names, no ids, no counts. A sitemap is a list of
     URLs, and a URL is the one thing about these profiles that is already
     public by construction.
@@ -27,6 +27,7 @@ something paginated.
 
 import logging
 
+from apps.squads.selectors.showcase_selectors import public_squad_sitemap_rows
 from core.selectors.public_profile_selectors import (
     public_organization_sitemap_rows,
     public_user_sitemap_rows,
@@ -51,7 +52,15 @@ class PublicSitemapURLsAPIView(PublicAPIView):
     GET /public/sitemap/urls
 
         {"users":         [{"username": "...", "updated_at": "ISO8601"}],
-         "organizations": [{"username": "...", "updated_at": "ISO8601"}]}
+         "organizations": [{"username": "...", "updated_at": "ISO8601"}],
+         "squads":        [{"org_username": "...", "squad_id": "...",
+                            "updated_at": "ISO8601"}]}
+
+    ``squads`` is every squad the ANONYMOUS showcase shows
+    (``/organization/<username>/squads/<squad_id>`` on the frontend): live,
+    on the club's profile, the club's own profile public, and at least one
+    player listed by name. One query for every club
+    (``public_squad_sitemap_rows``).
 
     Newest-first and capped per list (see ``SITEMAP_MAX_ROWS``). Anonymous, on
     PublicAPIView's standard read throttle — nothing here is more sensitive
@@ -74,6 +83,7 @@ class PublicSitemapURLsAPIView(PublicAPIView):
                 "organizations": _serialize(
                     public_organization_sitemap_rows()
                 ),
+                "squads": _serialize_squads(public_squad_sitemap_rows()),
             }
 
             cache_set(cache_key, data, timeout=SITEMAP_TTL)
@@ -103,6 +113,22 @@ def _serialize(rows):
         {
             "username": row["username"],
             "updated_at": row["profile_updated_at"].isoformat(),
+        }
+        for row in rows
+    ]
+
+
+def _serialize_squads(rows):
+    """
+    The squad twin of ``_serialize``: the org's handle, the squad's id and a
+    timestamp — enough for the frontend to spell the URL, and nothing that the
+    anonymous squad page itself does not already show.
+    """
+    return [
+        {
+            "org_username": row["org_username"],
+            "squad_id": str(row["id"]),
+            "updated_at": row["updated_at"].isoformat(),
         }
         for row in rows
     ]

@@ -98,6 +98,15 @@ POLICY = {
         "exclusive": False,
         "image_thumbs": False,
     },
+    # A squad's photo (apps/squads). Org only. A random name per upload, not a
+    # fixed slot: one org has many squads, so one photo must never overwrite
+    # another's. Attaching it checks the key sits in this org's squads folder.
+    "squads": {
+        "images": {"min": 1, "max": 1, "max_bytes": 5 * MB},
+        "video": {"min": 0, "max": 0, "max_bytes": 0},
+        "exclusive": False,
+        "image_thumbs": False,
+    },
 
     # ---- batches ----
     # A post is a gallery of up to 10 images OR one video — never both, which is
@@ -167,9 +176,11 @@ POLICY = {
 }
 
 # Actor restrictions, shared with the GET handler's guards below. An achievement
-# or a match belongs to a person; a recruitment belongs to an org.
+# or a match belongs to a person; a recruitment or a squad belongs to an org.
 USER_ONLY_TYPES = {"profile", "cover", "achievements", "matches", "highlights"}
-ORG_ONLY_TYPES = {"organization_logo", "organization_cover", "recruitments"}
+ORG_ONLY_TYPES = {
+    "organization_logo", "organization_cover", "recruitments", "squads",
+}
 
 
 def upload_error(message, field="non_field_errors", status_code=400,

@@ -31,6 +31,7 @@ from rest_framework.exceptions import (
 from apps.careers.models import CareerEntry
 from apps.notifications.services.notification_service import NotificationService
 from apps.organization.permissions import OrgPermission, require_org_permission
+from apps.squads.selectors.squad_selectors import career_squad_prefetch
 from utils.validations import is_valid_uuid
 
 logger = logging.getLogger(__name__)
@@ -93,8 +94,9 @@ class CareerVerificationService:
             raise ValidationError(f"'{entry_id}' is not a valid career entry id.")
 
         # The decision views serialize the result with CareerEntrySerializer,
-        # which reaches for the org's profile (logo), the sport and the
-        # positions — joined here so a verify costs one query, not four.
+        # which reaches for the org's profile (logo), the sport, the positions
+        # and the entry's public squad — loaded here so the response costs no
+        # query of its own.
         entry = (
             CareerEntry.objects
             .select_related(
@@ -103,7 +105,7 @@ class CareerVerificationService:
                 "organization__profile",
                 "sport",
             )
-            .prefetch_related("positions")
+            .prefetch_related("positions", career_squad_prefetch())
             .filter(id=entry_id)
             .first()
         )
@@ -129,7 +131,7 @@ class CareerVerificationService:
     # =================================================================
 
     @staticmethod
-    def verify_entry(actor, entry_id) -> CareerEntry:
+    def verify_entry(actor, entry_id, notify: bool = True) -> CareerEntry:
         """
         Confirm the claim. Stamps the deciding member's user on
         ``verified_by`` — the person, not the org, so the audit trail survives
@@ -137,6 +139,9 @@ class CareerVerificationService:
 
         Also the way a club reverses an earlier rejection: any state except
         already-verified is a valid starting point.
+
+        ``notify=False`` sends no career_verified: "Verify and add to squad"
+        tells the player once, as a squad place (squad_request_approved).
         """
         organization, member = CareerVerificationService.require_reviewer(actor)
         entry = CareerVerificationService._get_reviewable_entry(
@@ -155,11 +160,12 @@ class CareerVerificationService:
             ]
         )
 
-        CareerVerificationService._notify_decision(
-            organization,
-            entry,
-            NotificationService.career_verified,
-        )
+        if notify:
+            CareerVerificationService._notify_decision(
+                organization,
+                entry,
+                NotificationService.career_verified,
+            )
 
         return entry
 

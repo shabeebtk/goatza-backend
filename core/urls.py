@@ -53,6 +53,10 @@ urlpatterns = [
     path('careers/', include('apps.careers.urls')),
     path('achievements/', include('apps.achievements.urls')),
 
+    # An organization's standing groups of players. Its own top-level prefix,
+    # like matches: nothing under 'user/' or 'organizations/' can shadow it.
+    path('squads/', include('apps.squads.urls')),
+
     # No username-shadowing hazard here, unlike cv: the diary hangs off its own
     # top-level prefix rather than under 'user/', so ordering does not matter.
     path('matches/', include('apps.matches.urls')),

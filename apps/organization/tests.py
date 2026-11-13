@@ -248,11 +248,21 @@ class PermissionCatalogTests(MembersTestBase):
         self.assertEqual(
             member_permissions(self.owner_member), frozenset(OrgPermission.values)
         )
-        for member in (self.coach_member, self.staff_member):
-            self.assertEqual(
-                member_permissions(member),
-                frozenset({OrgPermission.MEMBERS_VIEW.value}),
-            )
+        self.assertEqual(
+            member_permissions(self.coach_member),
+            frozenset({
+                OrgPermission.MEMBERS_VIEW.value,
+                OrgPermission.SQUADS_VIEW.value,
+                OrgPermission.SQUADS_REVIEW.value,
+            }),
+        )
+        self.assertEqual(
+            member_permissions(self.staff_member),
+            frozenset({
+                OrgPermission.MEMBERS_VIEW.value,
+                OrgPermission.SQUADS_VIEW.value,
+            }),
+        )
 
     def test_overrides_grant_and_revoke(self):
         self.coach_member.permission_overrides = {
@@ -332,7 +342,9 @@ class PermissionCatalogTests(MembersTestBase):
         self.client.force_authenticate(user=self.coach)
         row = self.client.get("/organizations/list").data["data"][0]
         self.assertEqual(row["my_role"], "coach")
-        self.assertEqual(row["my_permissions"], ["members.view"])
+        self.assertEqual(
+            row["my_permissions"], ["members.view", "squads.review", "squads.view"]
+        )
 
         self.client.force_authenticate(user=self.owner)
         row = self.client.get("/organizations/list").data["data"][0]
@@ -347,7 +359,11 @@ class PermissionCatalogTests(MembersTestBase):
                 {"organization_id": str(self.org.id), "type": kind},
             ).data["data"]
             self.assertEqual(data["my_role"], "coach", kind)
-            self.assertEqual(data["my_permissions"], ["members.view"], kind)
+            self.assertEqual(
+                data["my_permissions"],
+                ["members.view", "squads.review", "squads.view"],
+                kind,
+            )
 
         self.client.force_authenticate(user=self.outsider)
         data = self.client.get(
@@ -415,7 +431,9 @@ class MembersListTests(MembersTestBase):
 
         roles = [member["role"] for member in data["members"]]
         self.assertEqual(roles, ["owner", "owner", "coach", "staff"])
-        self.assertEqual(data["me"], {"role": "staff", "permissions": ["members.view"]})
+        self.assertEqual(
+            data["me"], {"role": "staff", "permissions": ["members.view", "squads.view"]}
+        )
         self.assertEqual(
             [member["is_me"] for member in data["members"]],
             [False, False, False, True],
@@ -706,7 +724,9 @@ class AnswerInviteTests(MembersTestBase):
         organization = response.data["data"]["organization"]
         self.assertEqual(organization["id"], str(self.org.id))
         self.assertEqual(organization["my_role"], "staff")
-        self.assertEqual(organization["my_permissions"], ["members.view"])
+        self.assertEqual(
+            organization["my_permissions"], ["members.view", "squads.view"]
+        )
 
         member = OrganizationMember.objects.get(organization=self.org, user=self.outsider)
         self.assertEqual(member.role, "staff")

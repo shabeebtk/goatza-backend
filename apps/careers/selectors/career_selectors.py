@@ -11,6 +11,7 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from apps.careers.models import CareerEntry
+from apps.squads.selectors.squad_selectors import career_squad_prefetch
 
 
 def career_entries_for(user) -> QuerySet:
@@ -29,7 +30,10 @@ def career_entries_for(user) -> QuerySet:
     the scan.
 
     Joins the organization (and its profile, for the logo) and the sport, and
-    prefetches positions — three queries for any number of entries.
+    prefetches positions and the entry's public squad membership (the
+    serializer's ``squad``) — four queries for any number of entries. Every
+    list of entries is built here (the profile, the public bundle, the CV), so
+    this is the one place that prefetch has to be.
     """
     if user is None:
         return CareerEntry.objects.none()
@@ -38,7 +42,7 @@ def career_entries_for(user) -> QuerySet:
         CareerEntry.objects
         .filter(user=user)
         .select_related("organization", "organization__profile", "sport")
-        .prefetch_related("positions")
+        .prefetch_related("positions", career_squad_prefetch())
         .annotate(
             effective_end=Coalesce(
                 "end_date",

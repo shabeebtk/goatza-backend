@@ -99,7 +99,7 @@ RESERVED_USERNAMES = frozenset({
     "auth", "card", "chat", "coaching", "cv", "explore", "guidelines",
     "highlights", "home", "join", "matches", "messages", "notifications",
     "organization", "posts", "r", "recruitments", "safety", "scouting",
-    "search", "org-invite",
+    "search", "org-invite", "squad-invite",
 
     # ── pre-existing entries (kept) ───────────────────────────
     "admin", "root", "support", "help", "api", "system",
