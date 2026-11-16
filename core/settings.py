@@ -147,6 +147,9 @@ INSTALLED_APPS = [
     # An organization's standing groups of players, one sport each. "Squad",
     # never "team": that word is already an organization type.
     'apps.squads',
+    # Home-screen installs and opens of the web app, one row per device.
+    # Read in the Django admin only; no IP or user-agent is ever stored.
+    'apps.pwa',
 
     # buildin apps 
     'django.contrib.admin',
@@ -412,6 +415,10 @@ REST_FRAMEWORK = {
         # the public surface, so per IP and deliberately tight (see
         # waitlist.throttles.WaitlistSignupThrottle).
         'waitlist_signup': '5/hour',
+        # Install/open telemetry from the installed app (pwa.throttles
+        # .AppEventsThrottle). Per IP for every caller, signed in or not. An
+        # honest device sends a few a day; a trip only loses a count.
+        'app_events': '60/hour',
         # Filing reports. Per USER, not per actor (see
         # moderation.throttles.ReportThrottle) — an actor-scoped bucket would
         # give one person a fresh ten for every org they belong to.

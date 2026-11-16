@@ -39,6 +39,10 @@ WHAT HAPPENS TO A USER'S DATA — the three buckets, and why each is what it is:
   not develop holes because a user left. They survive automatically, because the
   User row is never deleted — only emptied.
 
+  DETACH — app install rows (``pwa.AppInstall``). The device's install still
+  counts, but it stops naming who used it. SET_NULL would do that on a hard
+  delete; this purge keeps the User row, so it clears the link itself.
+
 The User row itself is ANONYMIZED rather than deleted. Deleting it would cascade
 through every FK above and take the "keep" bucket with it.
 
@@ -62,6 +66,7 @@ from apps.connections.models import Follow
 from apps.notifications.models import Notification, UserFCMToken
 from apps.organization.models import OrganizationProfile
 from apps.posts.models import Comment, Like, Post, SavedPost
+from apps.pwa.models import AppInstall
 from apps.usernames.services.username_service import UsernameService
 from utils.cache import cache_delete
 from utils.cache_keys import CacheKeys
@@ -179,7 +184,8 @@ class Command(BaseCommand):
                 f"follows={counts['follows']} saved={counts['saved']} "
                 f"likes={counts['likes']} notifications={counts['notifications']} "
                 f"fcm={counts['fcm']} posts_soft={counts['posts']} "
-                f"comments_soft={counts['comments']}"
+                f"comments_soft={counts['comments']} "
+                f"app_installs={counts['app_installs']}"
             )
             self.stdout.write(f"  purged {user.id}")
 
@@ -253,6 +259,10 @@ class Command(BaseCommand):
         ).update(is_deleted=True)
 
         counts["comments"] = self._soft_delete_comments(user)
+
+        # ── DETACH ─────────────────────────────────────────────────
+        # The install stays counted; it just no longer names this person.
+        counts["app_installs"] = AppInstall.objects.filter(user=user).update(user=None)
 
         # ── ANONYMIZE ──────────────────────────────────────────────
         # The handle goes back to the shared namespace FIRST, while
