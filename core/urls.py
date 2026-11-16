@@ -72,6 +72,12 @@ urlpatterns = [
     # The logged-out half of this is in core/public_urls.py.
     path('support/', include('apps.support.urls')),
 
+    # Install/open telemetry from the installed web app. AllowAny (it must work
+    # before sign-in), but not under 'public/' for the same reason places and
+    # legal are not: that prefix is an allow-list of anonymous reads of OUR
+    # data, and this is a write that reads nothing.
+    path('app/', include('apps.pwa.urls')),
+
     # Terms/privacy versions and the consent write. 'versions' is AllowAny but
     # not under 'public/' for the same reason places is not: that prefix is an
     # allow-list of anonymous reads of OUR data, and this returns four

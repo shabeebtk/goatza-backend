@@ -110,6 +110,15 @@ class ValidatorTests(TestCase):
             with self.assertRaises(ValueError, msg=segment):
                 validate_username_format(segment)
 
+    def test_the_install_page_is_reserved_and_refused(self):
+        # /install is the public "add Goatza to your home screen" page. Unlike
+        # the invite routes it passes the charset, so the reserved list is the
+        # only thing standing between a user called "install" and that page.
+        self.assertIn("install", RESERVED_USERNAMES)
+        for spelling in ("install", "Install", " INSTALL "):
+            with self.assertRaises(ValueError, msg=spelling):
+                validate_username_format(spelling)
+
 
 class ReservedNameTests(TestCase):
     """Reserved handles are refused to BOTH actor types, not just to users."""
