@@ -20,7 +20,6 @@ class Organization(BaseUUIDModel):
         CLUB = "club", "Club"
         TEAM = "team", "Team"
         ACADEMY = "academy", "Academy"
-        SCHOOL = "school", "School / College"
 
     name = models.CharField(max_length=255)
 
