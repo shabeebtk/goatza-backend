@@ -118,6 +118,17 @@ class CacheKeys:
         return f"public:squads:org:{username}:{squad_id}"
 
     @staticmethod
+    def public_org_page(username):
+        """
+        The anonymous org page payload (GET /public/organization/<username>/page):
+        contact options, facts, programs, facilities, coaches, featured players
+        and the section order. Cleared by orgpages' ``bust_public_page`` on every
+        write that changes it, and when the org's public-profile setting,
+        profile, locations or sports change.
+        """
+        return f"public:page:org:{username}"
+
+    @staticmethod
     def public_cv(username):
         """
         The anonymous rendering of a player's Sports CV.

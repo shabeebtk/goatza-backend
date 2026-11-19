@@ -22,6 +22,7 @@ from services.storage.validators import (
 from shared.tasks import delete_keys
 from utils.background_jobs import enqueue
 from apps.organization.services.organization_member_service import OrganizationMemberService
+from apps.orgpages.services.public_cache import bust_public_page
 from apps.connections.services.follow_services import FollowService
 from apps.moderation.selectors.profile_visibility import (
     has_blocked_me,
@@ -426,6 +427,7 @@ class UpdateOrganizationMediaAPIView(BaseAPIView):
             if update_fields:
                 update_fields.append("updated_at")
                 profile.save(update_fields=update_fields)
+                bust_public_page(org.id)
 
             # AFTER the row is saved, for the reason the user-profile view
             # gives: the delete used to run first, so a failed save left the
@@ -568,6 +570,9 @@ class UpdateOrganizationAPIView(BaseAPIView):
 
                 if profile_fields:
                     profile.save(update_fields=profile_fields + ["updated_at"])
+
+                # The org page names the org and orders its sections by type.
+                bust_public_page(org.id)
 
             updated_fields = (
                 (["username"] if claims_username else []) + org_fields + profile_fields

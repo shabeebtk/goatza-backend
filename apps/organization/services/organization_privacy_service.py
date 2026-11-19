@@ -16,6 +16,7 @@ from apps.organization.permissions import (
     OrgPermission,
     has_org_permission,
 )
+from apps.orgpages.services.public_cache import bust_public_page
 from apps.squads.services.public_cache import bust_public_squads
 from utils.cache import cache_delete
 from utils.cache_keys import CacheKeys
@@ -85,6 +86,8 @@ class OrganizationPrivacyService:
         cache_delete(CacheKeys.public_org_profile(organization.username))
         # The anonymous squad pages are gated on the same setting.
         bust_public_squads(organization.id)
+        # And so is the anonymous org page.
+        bust_public_page(organization.id)
 
         logger.info(
             "[ORG PRIVACY] org=%s user=%s is_public_profile=%s",

@@ -90,6 +90,7 @@ class UsernameService:
             keys.append(CacheKeys.user_details(username, "full"))
         else:
             keys.append(CacheKeys.public_org_profile(username))
+            keys.append(CacheKeys.public_org_page(username))
 
         return keys
 

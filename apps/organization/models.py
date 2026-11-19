@@ -323,6 +323,11 @@ class OrganizationMember(BaseUUIDModel):
         validators=[validate_permission_overrides],
     )
 
+    # The person's OWN switch for enquiry emails from this org (apps/enquiries).
+    # Only read for members holding enquiries.manage; in-app and push alerts
+    # are not affected. Set by the person, never by the org's owners.
+    enquiry_email_alerts = models.BooleanField(default=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = ActiveMemberManager()

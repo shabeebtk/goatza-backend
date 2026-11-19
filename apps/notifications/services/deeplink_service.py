@@ -249,4 +249,14 @@ def build_notification_url(notification) -> str:
         # two have nowhere better to go.
         return fallback
 
+    # ── ENQUIRIES ─────────────────────────────────────────────────
+    # To a PERSON who handles the org's enquiries: the enquiry itself, in the
+    # admin space of the org in `data`.
+    if ntype == Notification.Type.ENQUIRY_RECEIVED:
+        organization_id = (data.get("organization") or {}).get("id", "")
+        enquiry_id = data.get("enquiry_id", "")
+        if not (organization_id and enquiry_id):
+            return fallback
+        return f"{_admin_base(organization_id)}/enquiries/{enquiry_id}"
+
     return fallback

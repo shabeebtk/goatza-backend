@@ -10,6 +10,7 @@ from apps.notifications.services.notification_service import (
     RECRUITMENT_STATUS_COPY,
     RECRUITMENT_STATUS_COPY_DEFAULT,
     SQUAD_TYPES,
+    enquiry_copy,
     org_member_copy,
     squad_copy,
 )
@@ -244,6 +245,11 @@ class NotificationGroupingService:
                 notification_type, data or {}, others_count=others_count
             )
             return title
+
+        if notification_type == "enquiry_received":
+            # One line on the card: "New enquiry: Aarav, 9 · U12 Football".
+            title, body = enquiry_copy(data or {})
+            return f"{title}: {body}"
 
         if notification_type == "publication_failed":
             # Platform-voiced: no actor, so no names. The reason is in

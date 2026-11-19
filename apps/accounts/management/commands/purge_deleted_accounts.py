@@ -23,7 +23,9 @@ WHAT HAPPENS TO A USER'S DATA — the three buckets, and why each is what it is:
   HARD DELETE — rows that are purely theirs, or that only describe a graph edge
   nobody else's record depends on: follows in both directions, saved posts,
   their reactions, notifications they received AND notifications they triggered,
-  FCM device tokens, their cached OTP. None of these mean anything once the
+  FCM device tokens, their cached OTP, their place on an org's page as a
+  featured player (orgpages.FeaturedPlayer), the enquiries they sent to org
+  pages while signed in (enquiries.Enquiry). None of these mean anything once the
   person is gone, and a follow edge pointing at a tombstone would keep inflating
   somebody else's follower count.
 
@@ -63,8 +65,11 @@ from django.utils import timezone
 
 from apps.accounts.models import User, UserProfile
 from apps.connections.models import Follow
+from apps.enquiries.models import Enquiry
 from apps.notifications.models import Notification, UserFCMToken
 from apps.organization.models import OrganizationProfile
+from apps.orgpages.models import FeaturedPlayer
+from apps.orgpages.services.public_cache import bust_public_page
 from apps.posts.models import Comment, Like, Post, SavedPost
 from apps.pwa.models import AppInstall
 from apps.usernames.services.username_service import UsernameService
@@ -185,7 +190,9 @@ class Command(BaseCommand):
                 f"likes={counts['likes']} notifications={counts['notifications']} "
                 f"fcm={counts['fcm']} posts_soft={counts['posts']} "
                 f"comments_soft={counts['comments']} "
-                f"app_installs={counts['app_installs']}"
+                f"app_installs={counts['app_installs']} "
+                f"featured={counts['featured']} "
+                f"enquiries={counts['enquiries']}"
             )
             self.stdout.write(f"  purged {user.id}")
 
@@ -242,6 +249,16 @@ class Command(BaseCommand):
         ).delete()[0]
 
         counts["fcm"] = UserFCMToken.objects.filter(user=user).delete()[0]
+
+        # Their place on any org's page as a "player we developed". The career
+        # entry behind it stays (KEEP); the showcase of a person who left does
+        # not. The page's cache is cleared with it.
+        counts["featured"] = self._remove_featured(user)
+
+        # The enquiries they sent to org pages while signed in: their phone,
+        # their child's name and age. The org loses the lead along with the
+        # person, which is what deleting an account means.
+        counts["enquiries"] = Enquiry.objects.filter(submitted_by=user).delete()[0]
 
         # OTPs live in the cache, not in a table (utils.otp_validation), so
         # "delete the OTP rows" is deleting these keys — before the email is
@@ -367,6 +384,16 @@ class Command(BaseCommand):
             UserProfile.objects.filter(user_id__in=mutual_ids).update(
                 connections_count=Greatest(F("connections_count") - 1, Value(0))
             )
+
+    @staticmethod
+    def _remove_featured(user):
+        """Delete the user's FeaturedPlayer rows and clear each page's cache after commit."""
+        rows = FeaturedPlayer.objects.filter(user=user)
+        org_ids = set(rows.values_list("organization_id", flat=True))
+        deleted = rows.delete()[0]
+        for organization_id in org_ids:
+            bust_public_page(organization_id)
+        return deleted
 
     @staticmethod
     def _remove_likes(user):

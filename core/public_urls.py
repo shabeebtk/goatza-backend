@@ -44,6 +44,7 @@ from apps.cv.views.public_cv_views import PublicCVAPIView
 from apps.recruitments.views.public_recruitment_views import (
     PublicRecruitmentDetailAPIView,
 )
+from apps.orgpages.views.showcase_views import PublicPageAPIView
 from apps.squads.views.showcase_views import (
     PublicSquadShowcaseDetailAPIView,
     PublicSquadShowcaseListAPIView,
@@ -86,6 +87,18 @@ urlpatterns = [
     path(
         'organization/<str:username>/squads/<uuid:squad_id>',
         PublicSquadShowcaseDetailAPIView.as_view(),
+    ),
+
+    # The org's page, logged out: contact options (a number only while its
+    # switch is on), key facts, programs, facilities, coaches and the players
+    # it developed, plus the section order. The rules are shared with the
+    # signed-in /page/showcase/<username> (orgpages/selectors/page_selectors.py):
+    # the org's own public-profile setting, switched-off sections empty, the
+    # squads privacy rules for players and member coaches. Never an enquiry,
+    # a note or any other contact detail. Every miss is one 404.
+    path(
+        'organization/<str:username>/page',
+        PublicPageAPIView.as_view(),
     ),
 
     # A single recruitment. The flagship share: a club posts a trial, the link

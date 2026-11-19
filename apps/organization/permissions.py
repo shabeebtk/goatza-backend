@@ -50,12 +50,20 @@ class OrgPermission(models.TextChoices):
     SQUADS_VIEW = "squads.view", "See the organization's squads"
     SQUADS_REVIEW = "squads.review", "Approve, invite and manage squad players"
     SQUADS_MANAGE = "squads.manage", "Create, edit and delete squads"
+    # The org's public page (apps/orgpages): contact options, key facts,
+    # section switches, programs, facilities, coaches and featured players.
+    # Staff as well as owners, because at an academy the front office keeps
+    # the page — and answers the enquiries it brings in (apps/enquiries).
+    # Coaches get neither by default: an enquiry carries a parent's phone.
+    PAGE_MANAGE = "page.manage", "Edit the organization's page"
+    ENQUIRIES_MANAGE = "enquiries.manage", "Handle enquiries"
 
 
 # Keyed by role VALUE, not OrganizationMember.Role, for the import reason above.
 # Members: coach and staff read the list, as before permissions existed, when
 # every one of those lists was owner + admin and admin became owner. Squads are
 # the first feature where a coach does more than read: they run the players.
+# The page and its enquiries are the first where staff do more than read.
 ROLE_PERMISSIONS = {
     "owner": frozenset(OrgPermission.values),
     "coach": frozenset({
@@ -66,6 +74,8 @@ ROLE_PERMISSIONS = {
     "staff": frozenset({
         OrgPermission.MEMBERS_VIEW.value,
         OrgPermission.SQUADS_VIEW.value,
+        OrgPermission.PAGE_MANAGE.value,
+        OrgPermission.ENQUIRIES_MANAGE.value,
     }),
 }
 
@@ -103,6 +113,12 @@ DENIED_MESSAGES = {
     ),
     OrgPermission.SQUADS_MANAGE.value: (
         "Only the organization's owners can change squads."
+    ),
+    OrgPermission.PAGE_MANAGE.value: (
+        "Only owners and staff can edit the page."
+    ),
+    OrgPermission.ENQUIRIES_MANAGE.value: (
+        "Only owners and staff can handle enquiries."
     ),
 }
 

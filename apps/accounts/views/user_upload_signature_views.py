@@ -107,6 +107,16 @@ POLICY = {
         "exclusive": False,
         "image_thumbs": False,
     },
+    # A photo on the org's page (apps/orgpages): a facility photo, or the
+    # photo of a coach who is not on Goatza. Org only, exactly like "squads":
+    # a random name per upload under organizations/<org_id>/page/, and
+    # attaching checks the key sits in that folder.
+    "org_page": {
+        "images": {"min": 1, "max": 1, "max_bytes": 5 * MB},
+        "video": {"min": 0, "max": 0, "max_bytes": 0},
+        "exclusive": False,
+        "image_thumbs": False,
+    },
 
     # ---- batches ----
     # A post is a gallery of up to 10 images OR one video — never both, which is
@@ -180,6 +190,7 @@ POLICY = {
 USER_ONLY_TYPES = {"profile", "cover", "achievements", "matches", "highlights"}
 ORG_ONLY_TYPES = {
     "organization_logo", "organization_cover", "recruitments", "squads",
+    "org_page",
 }
 
 
