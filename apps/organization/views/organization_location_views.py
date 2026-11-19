@@ -6,6 +6,11 @@ from core.views.base_views import BaseAPIView
 from apps.organization.models import Organization, OrganizationLocation
 from apps.organization.services.organization_location_service import resolve_place
 from apps.organization.services.organization_member_service import OrganizationMemberService
+from apps.orgpages.services.facility_service import (
+    delete_objects_later,
+    photo_keys_for_location,
+)
+from apps.orgpages.services.public_cache import bust_public_page
 from utils.response import response_data
 from apps.organization.serializers.organization_location_serializers import UpsertOrganizationLocationSerializer
 
@@ -98,6 +103,9 @@ class OrganizationLocationAPIView(BaseAPIView):
                     )
                     message = "Location added successfully"
 
+                # A branch is named on the org page's programs and facilities.
+                bust_public_page(org.id)
+
             # Return serialized location data
             from apps.organization.serializers.organization_serializers import OrganizationLocationSerializer
             return response_data(
@@ -133,6 +141,10 @@ class DeleteOrganizationLocationAPIView(BaseAPIView):
             with transaction.atomic():
                 loc = OrganizationLocation.objects.select_for_update().get(id=location_id, organization=org)
                 was_primary = loc.is_primary
+                # The branch's facility photos cascade with it; their objects
+                # go from storage after commit, and the org page is re-read.
+                delete_objects_later(photo_keys_for_location(loc))
+                bust_public_page(org.id)
                 loc.delete()
 
                 # If we deleted the primary location, try to assign a new one

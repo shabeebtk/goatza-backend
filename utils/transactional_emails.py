@@ -1177,3 +1177,140 @@ def send_guardian_consent_withdrawn_email(
         },
         to_email=email,
     )
+
+
+# ---------------------------------------------------------------------
+# Enquiries (apps/enquiries) — the org page's lead form
+# ---------------------------------------------------------------------
+#
+# NEVER a phone number, an age or the sender's message in either of these:
+# an inbox is forwarded, printed and left open on shared screens. The email
+# says that someone asked and points at the app; the details stay there.
+# The timing rule (window, daily cap, digest) is the caller's —
+# apps/enquiries/services/alert_service.py.
+
+ENQUIRY_ALERT_TEMPLATE = "emails/enquiry_alert.html"
+ENQUIRY_DIGEST_TEMPLATE = "emails/enquiry_digest.html"
+
+
+def enquiry_alert_recipients(organization):
+    """Emails of the people who handle this org's enquiries and want them mailed.
+
+    Active members holding enquiries.manage whose own ``enquiry_email_alerts``
+    is on, with a live account and an address. De-duplicated and order-stable,
+    like ``new_applicant_alert_recipients``.
+    """
+    from apps.organization.permissions import (
+        OrgPermission,
+        members_with_permission,
+    )
+
+    emails = (
+        members_with_permission(organization, OrgPermission.ENQUIRIES_MANAGE)
+        .filter(
+            enquiry_email_alerts=True,
+            user__is_active=True,
+            user__deletion_requested_at__isnull=True,
+        )
+        .exclude(user__email="")
+        .exclude(user__email__isnull=True)
+        .order_by("joined_at", "id")
+        .values_list("user__email", flat=True)
+    )
+    return list(dict.fromkeys(emails))
+
+
+def _enquiry_line(enquiry):
+    """``{name, program, branch, time}`` — the only things an email may say."""
+    first_name = (enquiry.player_name or "").split(" ")[0] or "Someone"
+    return {
+        "name": first_name,
+        "program": enquiry.program_name or "General enquiry",
+        "branch": enquiry.location_name or "",
+        "time": format_ist_timestamp(enquiry.created_at),
+    }
+
+
+def _enquiry_links(organization):
+    base = shared_email_context()["frontend_base_url"]
+    return {
+        "inbox_url": f"{base}/organization/admin/{organization.id}/enquiries",
+        "settings_url": f"{base}/settings/notifications?org={organization.id}",
+    }
+
+
+def send_enquiry_alert_email(enquiry) -> None:
+    """One new enquiry, to everyone who handles them — "New enquiry for {org}"."""
+    organization = enquiry.organization
+    recipients = enquiry_alert_recipients(organization)
+    if not recipients:
+        return
+
+    line = _enquiry_line(enquiry)
+    links = _enquiry_links(organization)
+    subject = f"New enquiry for {organization.name}"
+    where = " · ".join(part for part in (line["program"], line["branch"]) if part)
+
+    _send(
+        subject=subject,
+        text_body=(
+            f"{line['name']} sent an enquiry to {organization.name}.\n"
+            f"{where}\n"
+            f"{line['time']}\n\n"
+            f"Open enquiries: {links['inbox_url']}\n\n"
+            f"You get these because you handle enquiries for {organization.name}. "
+            f"Turn them off: {links['settings_url']}"
+        ),
+        html_template=ENQUIRY_ALERT_TEMPLATE,
+        context={
+            "org_name": organization.name,
+            "enquiry": line,
+            **links,
+        },
+        to_email=recipients,
+    )
+
+
+def send_enquiry_digest_email(organization, enquiries, total) -> None:
+    """
+    The waiting enquiries in ONE mail — "{n} new enquiries for {org}". Lists
+    ``enquiries`` (up to 5, newest first); ``total`` is how many it stands for.
+    """
+    recipients = enquiry_alert_recipients(organization)
+    if not recipients or not enquiries:
+        return
+
+    lines = [_enquiry_line(enquiry) for enquiry in enquiries]
+    more_count = max(0, total - len(lines))
+    links = _enquiry_links(organization)
+    noun = "enquiry" if total == 1 else "enquiries"
+    subject = f"{total} new {noun} for {organization.name}"
+
+    text_lines = "\n".join(
+        f"- {line['name']} · {line['program']}"
+        + (f" · {line['branch']}" if line["branch"] else "")
+        + f" · {line['time']}"
+        for line in lines
+    )
+    more_line = f"...and {more_count} more.\n" if more_count else ""
+
+    _send(
+        subject=subject,
+        text_body=(
+            f"{total} new {noun} for {organization.name}:\n\n"
+            f"{text_lines}\n{more_line}\n"
+            f"Open enquiries: {links['inbox_url']}\n\n"
+            f"You get these because you handle enquiries for {organization.name}. "
+            f"Turn them off: {links['settings_url']}"
+        ),
+        html_template=ENQUIRY_DIGEST_TEMPLATE,
+        context={
+            "org_name": organization.name,
+            "total": total,
+            "noun": noun,
+            "enquiries": lines,
+            "more_count": more_count,
+            **links,
+        },
+        to_email=recipients,
+    )

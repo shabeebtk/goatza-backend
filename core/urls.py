@@ -57,6 +57,15 @@ urlpatterns = [
     # like matches: nothing under 'user/' or 'organizations/' can shadow it.
     path('squads/', include('apps.squads.urls')),
 
+    # An organization's page: the club's editor and the signed-in showcase.
+    # The anonymous read is /public/organization/<username>/page.
+    path('page/', include('apps.orgpages.urls')),
+
+    # The org page's enquiry form and the org's inbox. The form is AllowAny
+    # but NOT under 'public/': that prefix is an allow-list of anonymous
+    # READS, and this is a write with its own per-IP throttle.
+    path('enquiries/', include('apps.enquiries.urls')),
+
     # No username-shadowing hazard here, unlike cv: the diary hangs off its own
     # top-level prefix rather than under 'user/', so ordering does not matter.
     path('matches/', include('apps.matches.urls')),

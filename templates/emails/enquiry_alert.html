@@ -1,0 +1,23 @@
+{% extends "emails/base.html" %}
+{% comment %}
+One new enquiry from the org page's form (apps/enquiries), sent at once when
+the org has had no enquiry email in the last 30 minutes and is under its daily
+cap — otherwise the enquiry waits for enquiry_digest.html.
+
+NEVER a phone number, an age or the sender's message here. Name, program,
+branch and time; everything else stays in the app.
+
+Context: org_name, enquiry {name, program, branch, time}, inbox_url,
+settings_url.
+{% endcomment %}
+{% block preheader %}{{ enquiry.name }} sent an enquiry to {{ org_name }}.{% endblock %}
+{% block content %}<div style="margin:0 0 12px 0;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:26px;color:#111111;line-height:1.15;">New enquiry</div><p style="margin:0 0 14px 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#555555;line-height:1.65;">Someone sent an enquiry to <b style='color:#111111;'>{{ org_name }}</b> from your Goatza page:</p><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:6px 0 16px 0;">
+  <tr><td style="border:1px solid #e4eae4;border-radius:12px;padding:15px 16px;">
+    <div style="font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#111111;line-height:1.3;">{{ enquiry.name }}</div>
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#555555;margin-top:3px;">{{ enquiry.program }}{% if enquiry.branch %} &middot; {{ enquiry.branch }}{% endif %}</div>
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#666666;margin-top:3px;">{{ enquiry.time }}</div>
+  </td></tr></table><p style="margin:0 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#666666;line-height:1.65;">Their details are in the app.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 12px 0;">
+  <tr><td style="background-color:#00B562;border-radius:10px;">
+    <a href="{{ inbox_url }}" style="display:inline-block;padding:13px 28px;font-family:Arial,Helvetica,sans-serif;font-weight:bold;font-size:15px;color:#ffffff;text-decoration:none;letter-spacing:0.4px;">Open enquiries</a>
+  </td></tr></table>{% endblock %}
+{% block footer_reason %}You get these because you handle enquiries for {{ org_name }}. <a href="{{ settings_url }}" style="color:#7a9480;text-decoration:none;font-weight:bold;">Turn them off</a>{% endblock %}

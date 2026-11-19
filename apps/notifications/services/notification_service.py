@@ -210,6 +210,20 @@ def squad_copy(notification_type, data, others_count=0) -> tuple:
     return "Goatza", "Tap to view"
 
 
+def enquiry_copy(data) -> tuple:
+    """
+    ``(title, body)`` for an enquiry_received row — "New enquiry" /
+    "Aarav, 9 · U12 Football". From ``data`` alone, like squad_copy. Never a
+    phone number or the parent's message: those stay in the inbox.
+    """
+    data = data or {}
+    name = data.get("player_first_name") or "Someone"
+    age = data.get("player_age")
+    program = data.get("program_name") or "General enquiry"
+    who = f"{name}, {age}" if age else name
+    return "New enquiry", f"{who} · {program}"
+
+
 def _org_data(organization) -> dict:
     """The org as a notification's `data` carries it: what the card renders."""
     profile = getattr(organization, "profile", None)
@@ -518,6 +532,9 @@ def build_notification_payload(notification: "Notification") -> dict:
 
     elif notification.type in SQUAD_TYPES:
         title, body = squad_copy(notification.type, notification.data)
+
+    elif notification.type == Notification.Type.ENQUIRY_RECEIVED:
+        title, body = enquiry_copy(notification.data)
 
     return {
         "type": notification.type,
@@ -1481,6 +1498,68 @@ class NotificationService:
             notification = Notification.objects.create(
                 type=Notification.Type.SQUAD_JOIN_REQUEST,
                 group_key=group_key,
+                dedup_key=dedup_key,
+                data=data,
+                **NotificationService._actor_kwargs(actor_org=organization),
+                **NotificationService._recipient_kwargs(recipient_user=recipient),
+            )
+
+            if not already_waiting:
+                _dispatch(notification)
+
+    # ──────────────────────────────────────────
+    # ENQUIRIES
+    # ──────────────────────────────────────────
+    @staticmethod
+    def enquiry_received(enquiry):
+        """
+        A new enquiry from the org page's form. Told, in-app, to every ACTIVE
+        member holding enquiries.manage (to the PERSON, with the org as
+        actor_org).
+
+        One push per burst, the squad_join_request rule: a person who already
+        has an UNREAD enquiry_received from this org gets the row but no buzz,
+        so ten enquiries in an hour are one push. Each enquiry is its own row
+        (its own deep link); nothing is grouped on the card.
+
+        Called after commit (``transaction.on_commit(..., robust=True)``).
+        """
+        organization = enquiry.organization
+        first_name = (enquiry.player_name or "").split(" ")[0]
+        data = {
+            "organization": _org_data(organization),
+            "enquiry_id": str(enquiry.id),
+            "player_first_name": first_name,
+            "player_age": enquiry.player_age,
+            "program_name": enquiry.program_name,
+        }
+
+        handlers = (
+            members_with_permission(organization, OrgPermission.ENQUIRIES_MANAGE)
+            .filter(
+                user__is_active=True,
+                user__deletion_requested_at__isnull=True,
+            )
+            .select_related("user")
+        )
+
+        for handler in handlers:
+            recipient = handler.user
+            dedup_key = f"enquiry_received:{enquiry.id}:{recipient.id}"
+            if Notification.objects.filter(dedup_key=dedup_key).exists():
+                continue
+
+            already_waiting = Notification.objects.filter(
+                recipient_user=recipient,
+                type=Notification.Type.ENQUIRY_RECEIVED,
+                actor_org=organization,
+                is_read=False,
+                is_deleted=False,
+            ).exists()
+
+            notification = Notification.objects.create(
+                type=Notification.Type.ENQUIRY_RECEIVED,
+                group_key=f"enquiry:{enquiry.id}",
                 dedup_key=dedup_key,
                 data=data,
                 **NotificationService._actor_kwargs(actor_org=organization),

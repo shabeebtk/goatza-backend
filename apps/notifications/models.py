@@ -61,6 +61,10 @@ class Notification(BaseUUIDModel):
         SQUAD_INVITE_ACCEPTED = "squad_invite_accepted", "Squad Invite Accepted"
         SQUAD_MEMBER_REMOVED = "squad_member_removed", "Squad Member Removed"
         SQUAD_MEMBER_MOVED = "squad_member_moved", "Squad Member Moved"
+        # Enquiries (apps/enquiries): a new lead from the org page's form, to
+        # each person holding enquiries.manage, with the org as actor_org.
+        # Copy comes from `data` alone (enquiry_copy).
+        ENQUIRY_RECEIVED = "enquiry_received", "Enquiry Received"
         # future:
         # TRIAL = "trial"
         

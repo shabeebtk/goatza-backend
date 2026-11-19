@@ -150,6 +150,12 @@ INSTALLED_APPS = [
     # Home-screen installs and opens of the web app, one row per device.
     # Read in the Django admin only; no IP or user-agent is ever stored.
     'apps.pwa',
+    # An organization's page: contact options, key facts, programs & fees,
+    # facilities, coaches, featured players and the section switches.
+    'apps.orgpages',
+    # The lead form on an organization's page and the inbox it fills. No
+    # account needed to send one; spam is never stored.
+    'apps.enquiries',
 
     # buildin apps 
     'django.contrib.admin',
@@ -419,6 +425,14 @@ REST_FRAMEWORK = {
         # .AppEventsThrottle). Per IP for every caller, signed in or not. An
         # honest device sends a few a day; a trip only loses a count.
         'app_events': '60/hour',
+        # The org page's enquiry form (enquiries.throttles
+        # .EnquirySubmitThrottle). Per IP for every caller, signed in or not —
+        # an anonymous-friendly WRITE — and every attempt counts, refused ones
+        # included. Generous on purpose: a family on one Wi-Fi, phones behind
+        # one carrier NAT, a QR poster at a trial day all share an address.
+        # The real anti-spam work is the same-phone limits (3 per org and 10
+        # overall in 24 h, database checks behind this) and the honeypot.
+        'enquiry_submit': '30/hour',
         # Filing reports. Per USER, not per actor (see
         # moderation.throttles.ReportThrottle) — an actor-scoped bucket would
         # give one person a fresh ten for every org they belong to.
@@ -975,6 +989,25 @@ CELERY_BEAT_SCHEDULE = {
         "task": "accounts.downgrade_precise_locations",
         "schedule": crontab(hour=3, minute=30),
         "options": {"expires": 3600},
+    },
+
+    # 03:45 IST — delete enquiries closed more than 365 days ago. A few
+    # batched deletes; nothing else walks those rows at night.
+    "enquiries.purge_closed_enquiries": {
+        "task": "enquiries.purge_closed_enquiries",
+        "schedule": crontab(hour=3, minute=45),
+        "options": {"expires": 3600},
+    },
+
+    # ── Enquiries ───────────────────────────────────────────────────────────
+
+    # Every 10 minutes: the enquiry digests (apps/enquiries/services/
+    # alert_service.py). Expires in 540s — the next tick does the same work,
+    # and a digest never sends twice because it stamps what it covers.
+    "enquiries.send_digests": {
+        "task": "enquiries.send_digests",
+        "schedule": crontab(minute="*/10"),
+        "options": {"expires": 540},
     },
 
     # ── Media processing ────────────────────────────────────────────────────

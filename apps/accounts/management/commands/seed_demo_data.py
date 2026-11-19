@@ -132,22 +132,34 @@ ORGANIZATIONS = [
     ("Future Stars Football Academy", "academy", "youth", False),
     ("Coastal Football Academy Kannur", "academy", "youth", False),
     ("ProPath Football Academy", "academy", "professional", True),
-    ("St. Xavier's College Kozhikode", "school", "youth", False),
-    ("Green Valley Higher Secondary School", "school", "youth", False),
+    ("St. Xavier's College Kozhikode", "team", "youth", False),
+    ("Green Valley Higher Secondary School", "team", "youth", False),
 ]
 
 ORG_HEADLINES = {
     "club": "Competitive football club — building squads for the upcoming season",
     "team": "Local football team competing in district & regional tournaments",
     "academy": "Football academy developing the next generation of talent",
-    "school": "School football program — trials, training and tournaments",
 }
 
 ORG_DESCRIPTIONS = {
     "club": "We are a football club committed to competitive excellence. We run senior and youth squads, participate in league and cup competitions, and regularly hold open trials for talented players. Join us and be part of a club that plays to win and develops its players.",
     "team": "A passionate local football team competing across district and regional tournaments. We train multiple times a week and are always on the lookout for committed players who want regular competitive football.",
     "academy": "Our academy focuses on structured player development — technical training, tactical education, fitness and match exposure. We run age-group batches with qualified coaches and a clear pathway toward competitive club football.",
-    "school": "Our institution runs an active football program with regular coaching, inter-school tournaments and annual selection trials. We believe in balancing sport and education to build well-rounded athletes.",
+}
+
+# School and college teams are "team" pages, but the generic team copy above
+# ("local football team…") does not describe them, so they carry their own.
+# Keyed by name: (headline, description).
+ORG_COPY_BY_NAME = {
+    "St. Xavier's College Kozhikode": (
+        "College football team — trials, training and tournaments",
+        "The college football team, run by the sports department. We train through the academic year, play inter-collegiate and university tournaments, and hold selection trials every season for students who want to represent the college.",
+    ),
+    "Green Valley Higher Secondary School": (
+        "School football team — trials, training and tournaments",
+        "Our school football team trains after classes and plays inter-school and district tournaments, with selection trials every year. We believe in balancing sport and education to build well-rounded athletes.",
+    ),
 }
 
 LOGO_COLORS = ["0D8ABC", "B91C1C", "047857", "7C3AED", "D97706", "1D4ED8", "0F766E", "9333EA"]
@@ -417,12 +429,16 @@ class Command(BaseCommand):
 
             UsernameService.claim(username, organization=org)
 
+            headline, description = ORG_COPY_BY_NAME.get(
+                name, (ORG_HEADLINES[org_type], ORG_DESCRIPTIONS[org_type])
+            )
+
             OrganizationProfile.objects.create(
                 organization=org,
                 logo=_org_logo(name, i),
                 cover_image=_cover(f"org{i}"),
-                headline=ORG_HEADLINES[org_type],
-                description=ORG_DESCRIPTIONS[org_type],
+                headline=headline,
+                description=description,
                 website=f"https://{username.replace('_', '')}.example.com",
                 level=level,
             )

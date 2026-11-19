@@ -97,7 +97,6 @@ JERSEY_TAKEN_MESSAGE = "Another player in this squad has that number."
 # Keyed by the plain value: looked up with ``organization.type``, a str.
 ENTRY_TYPE_BY_ORG_TYPE = {
     Organization.Type.ACADEMY.value: CareerEntry.EntryType.ACADEMY,
-    Organization.Type.SCHOOL.value: CareerEntry.EntryType.SCHOOL_COLLEGE,
     Organization.Type.CLUB.value: CareerEntry.EntryType.CLUB_TEAM,
     Organization.Type.TEAM.value: CareerEntry.EntryType.CLUB_TEAM,
 }

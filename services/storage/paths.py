@@ -95,6 +95,15 @@ def build_folder(actor, upload_type: str, temp_id: str = None) -> str:
         return f"organizations/{actor.organization.id}/squads"
 
     # -----------------------------------------
+    # ORG PAGE PHOTOS  (org only)
+    # -----------------------------------------
+    # Facility photos and the photos of coaches who are not on Goatza
+    # (apps/orgpages). Same shape as squads: a random object name per upload,
+    # and attaching checks the key starts with `organizations/<org_id>/page/`.
+    if upload_type == "org_page":
+        return f"organizations/{actor.organization.id}/page"
+
+    # -----------------------------------------
     # CHAT MEDIA  (user or org — direct messages)
     # -----------------------------------------
     # The per-actor subfolder lets the message service re-validate that a media

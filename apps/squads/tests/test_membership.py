@@ -215,6 +215,14 @@ class CareerEntryRuleTests(MembershipTestBase):
         row = self.join_squad(self.p1)
         self.assertEqual(row.career_entry.entry_type, CareerEntry.EntryType.ACADEMY)
 
+    def test_a_team_makes_a_club_team_entry(self):
+        # School and college teams are "team" pages now, and a team's squad is
+        # a club/team stint on the player's career, like a club's.
+        Organization.objects.filter(id=self.org.id).update(type=Organization.Type.TEAM)
+        self.squad.organization.refresh_from_db()
+        row = self.join_squad(self.p1)
+        self.assertEqual(row.career_entry.entry_type, CareerEntry.EntryType.CLUB_TEAM)
+
     def test_left_closes_the_entry_and_keeps_it_verified(self):
         row = self.join_squad(self.p1)
         self.run_after_commit(

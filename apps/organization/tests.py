@@ -261,6 +261,8 @@ class PermissionCatalogTests(MembersTestBase):
             frozenset({
                 OrgPermission.MEMBERS_VIEW.value,
                 OrgPermission.SQUADS_VIEW.value,
+                OrgPermission.PAGE_MANAGE.value,
+                OrgPermission.ENQUIRIES_MANAGE.value,
             }),
         )
 
@@ -432,7 +434,10 @@ class MembersListTests(MembersTestBase):
         roles = [member["role"] for member in data["members"]]
         self.assertEqual(roles, ["owner", "owner", "coach", "staff"])
         self.assertEqual(
-            data["me"], {"role": "staff", "permissions": ["members.view", "squads.view"]}
+            data["me"],
+            {"role": "staff", "permissions": [
+                "enquiries.manage", "members.view", "page.manage", "squads.view",
+            ]},
         )
         self.assertEqual(
             [member["is_me"] for member in data["members"]],
@@ -725,7 +730,8 @@ class AnswerInviteTests(MembersTestBase):
         self.assertEqual(organization["id"], str(self.org.id))
         self.assertEqual(organization["my_role"], "staff")
         self.assertEqual(
-            organization["my_permissions"], ["members.view", "squads.view"]
+            organization["my_permissions"],
+            ["enquiries.manage", "members.view", "page.manage", "squads.view"],
         )
 
         member = OrganizationMember.objects.get(organization=self.org, user=self.outsider)
